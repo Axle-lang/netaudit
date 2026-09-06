@@ -208,42 +208,54 @@ right moment. `F12` does the same on demand.
 ### Layout
 
 ```
-src/
-  main.axle          the window, the loop, the tiers, the two lookups in flight
-  theme fmt          the palette and the grid; the figures a library cannot format
-  app input          what the reader is doing, and the keys that do it
-
-  sys/raw            the four pointer views the OS imports need — all the `unsafe`
-  sys/tiers          which readings are running, and why the others are not
-  sys/win32/         the Windows port, and the only files that name an OS
-    conn             GetExtendedTcp/UdpTable, v4 and v6, one row shape
-    procs            NtQuerySystemInformation names + QueryFullProcessImageNameW paths
-    dnscache         the resolver's cache, inverted to address → name
-    rdns             the PTR record, for what nothing else could name
-    shell            explorer.exe /select,"…"
-
-  model/pool         the readings taken of interned text — nothing here is a `string`
-  model/key          the one hash every identity is folded with
-  model/addr         loopback / private / public, and how an address is keyed
-  model/hosts        one row per address: name, network, place, flags
-  model/endpoints    the journal, and the salience the tree ranks by
-  model/rhythm       the arrival ring, and the period and steadiness from it
-  model/groups       one row per program, keyed on the image path
-  model/score        the trust reading, and the reasons behind it
-  model/view         the flattened tree: which rows, in what order, at what height
-  model/pulse        the four headline cards, sampled once a tick
-
-  enrich/queue       who gets looked up, how often, and the back-off
-  enrich/worker      the one blocking call, on its own thread
-  enrich/scan        reading values out of a JSON response, byte by byte
-  enrich/ipapi       the batch response, folded into rows
-  enrich/cymru       the registry's answer over DNS, for what the batch could not name
-
-  ui/parts card      the pieces every surface is assembled from
-  ui/chrome tree     the title bar and cards; the list itself
-  ui/tooltip detail  the hover card and the full endpoint card
-
-vendor/smalt         the library, as a submodule
+netaudit
+├── axle.toml                  the package, the smalt path dependency, the win32 port
+├── src/
+│   ├── main.axle              the window, the loop, the tiers, the two lookups in flight
+│   ├── app.axle               the interaction state: selected, sorted, filtered, folded
+│   ├── input.axle             keys, clicks and the wheel, turned into changes on `app`
+│   ├── theme.axle             the palette and the layout grid
+│   ├── fmt.axle               the figures a library cannot format: an address, a rate
+│   │
+│   ├── sys/                   the machine, as this program reads it
+│   │   ├── raw.axle           the four pointer views the imports need — all the `unsafe`
+│   │   ├── tiers.axle         which readings are running, and why the others are not
+│   │   └── win32/             ← the one directory that names an operating system
+│   │       ├── conn.axle      GetExtendedTcp/UdpTable, v4 and v6, one row shape
+│   │       ├── procs.axle     process names, and where each binary lives
+│   │       ├── dnscache.axle  the resolver's cache, inverted to address → name
+│   │       ├── rdns.axle      the PTR record, for what nothing else could name
+│   │       └── shell.axle     explorer.exe /select,"…"
+│   │
+│   ├── model/                 the journal, and every reading taken off it
+│   │   ├── pool.axle          interned text — nothing here is ever a `string`
+│   │   ├── key.axle           the one hash every identity is folded with
+│   │   ├── addr.axle          loopback / private / public, and how an address is keyed
+│   │   ├── hosts.axle         one row per address: name, network, place, flags
+│   │   ├── endpoints.axle     the journal, and the salience the tree ranks by
+│   │   ├── rhythm.axle        the arrival ring, and the period and steadiness from it
+│   │   ├── groups.axle        one row per program, keyed on the image path
+│   │   ├── score.axle         the trust reading, and the nine reasons behind it
+│   │   ├── view.axle          the flattened tree: which rows, in what order, how tall
+│   │   └── pulse.axle         the four headline cards, sampled once a tick
+│   │
+│   ├── enrich/                who owns an address, asked over the network
+│   │   ├── queue.axle         who gets looked up, how often, and the back-off
+│   │   ├── worker.axle        the one blocking call, on a thread of its own
+│   │   ├── scan.axle          values out of a JSON response, byte by byte
+│   │   ├── ipapi.axle         the batch response, folded into rows
+│   │   └── cymru.axle         the registry over DNS, for what the batch could not name
+│   │
+│   └── ui/                    nothing below here reads the machine
+│       ├── parts.axle         the pieces every surface is assembled from
+│       ├── card.axle          the cursor a card's content is emitted against, twice
+│       ├── chrome.axle        the title bar, the four cards, the toolbar, the status
+│       ├── tree.axle          the list itself
+│       ├── tooltip.axle       the hover card
+│       └── detail.axle        the full endpoint card
+│
+├── doc/netaudit.png           this page's screenshot, written by `--snap`
+└── vendor/smalt               the library, as a submodule
 ```
 
 **One directory names an operating system, and `axle.toml` says which.**
