@@ -1,0 +1,13 @@
+[package]
+name = "netaudit"
+version = "0.1.0"
+
+# No `[link]`. The window, the framebuffer, the event queue, the 2-D
+# surface, the two faces and the BMP writer come from smalt, which is
+# Axle calling Win32 directly. Everything this program reads from the OS
+# on its own — the connection tables, the DNS cache, the ETW session — is
+# named by the `extern "C" from "<dll>"` block that imports it, so the
+# link line learns of `iphlpapi`, `dnsapi`, `advapi32` and `shell32` from
+# the declarations themselves.
+[dependencies]
+smalt = { path = "vendor/smalt" }
