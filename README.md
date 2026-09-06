@@ -14,6 +14,8 @@
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-555555?style=flat-square&labelColor=1b1b2b">
 </p>
 
+<sub><a href="#what-it-can-and-cannot-see">What it sees</a> · <a href="#what-it-is-actually-for">What it is for</a> · <a href="#keys">Keys</a> · <a href="#building">Building</a> · <a href="#layout">Layout</a> · <a href="#how-it-is-written">How it is written</a> · <a href="https://github.com/Axle-lang/smalt">smalt ↗</a> · <a href="https://axle-lang.dev">Axle ↗</a></sub>
+
 </div>
 
 ---
@@ -23,15 +25,10 @@ A network audit tool written entirely in Axle. One window, one tree: a row per
 carrying who owns it, where it is, how often it has come back, how regularly,
 and what that adds up to.
 
-```
-▾ chrome.exe                     37 endpoints   12 live      2.1 MB/s   ●●○○○
-    TCP  142.250.75.174:443      google.com                  FR  ●●●●●
-         established             AS15169 Google LLC              ×214 visits
-                                                                 every 30 s · clockwork
-    TCP  104.18.32.7:443         api.stripe.com              US  ●●●●○
-▸ Discord.exe                    12 endpoints    3 live    180 KB/s    ●●●●○
-▸ svchost.exe  by name            4 endpoints    4 live                ●●●●●
-```
+<div align="center">
+  <img src="doc/netaudit.png" alt="netaudit: a tree of programs, each folded open onto the addresses it is talking to" width="100%">
+  <sub>Written by the program itself — <code>--snap</code> draws one frame and writes it to a file.</sub>
+</div>
 
 Built on [**smalt**](https://github.com/Axle-lang/smalt) — the window, the
 surface, the event queue, the clipped 2-D primitives, the two anti-aliased
@@ -48,18 +45,20 @@ anywhere a tool can read, and HTTPS would encrypt it even if it did. Getting
 one needs a proxy in the middle or a packet capture, and this program is
 neither. What it answers instead:
 
-| Question | Where the answer comes from | Needs admin |
+| Question | Where the answer comes from | Reading |
 |---|---|---|
-| which program, which protocol, which address and port | the per-process TCP/UDP tables (`iphlpapi`) | no |
-| which **name** is behind the address | the machine's DNS cache, and reverse DNS | no |
-| who **owns** the address, and where it is | `ip-api.com`, with Team Cymru's DNS whois behind it | no |
-| how many **bytes** moved | a kernel ETW trace | yes |
-| the short connections polling misses | the same trace | yes |
+| which program, which protocol, which address and port | the per-process TCP/UDP tables (`iphlpapi`) | `POLL` |
+| which **name** is behind the address | the machine's DNS cache, and reverse DNS | `DNS` |
+| who **owns** the address, and where it is | `ip-api.com`, with Team Cymru's DNS whois behind it | `DNS` |
+| how many **bytes** moved | a kernel ETW trace | `ETW` |
+| the short connections polling misses | the same trace | `ETW` |
 
-Three readings, three badges in the title bar — `POLL`, `DNS`, `ETW` — each lit
-when it is running and each explaining itself when hovered. An empty byte column
-must never be readable as "this program sent nothing" when it means "nothing
-measured bytes".
+Three readings, three badges in the title bar, each lit when it is running and
+each explaining itself when hovered. **`ETW` is declared and not implemented**,
+so its badge stays dark and the traffic column stays blank — and the badge is
+the reason that is readable rather than misleading. A blank byte column with
+nothing to explain it says "these programs sent nothing", which is the one
+thing it must never say.
 
 ---
 
@@ -77,7 +76,10 @@ So every endpoint carries a ring of the instants it came back, and three
 readings taken from it — the median gap, the wander around it, and the
 steadiness that falls out. The default ranking weighs repetition, that
 steadiness, the address's own reputation, traffic and recency together, and the
-row says its reading in words: `×214 visits · every 30 s · clockwork`.
+row says its reading in words: `×214 visits · every 30 s · clockwork`. A window
+just opened has nothing to say about rhythm and says `seen once`; the readings
+fill in as the session runs, which is the point of a journal that outlives what
+is live.
 
 The trust score is out of five and **always explainable**. Enter opens a card
 that lists every signal that applied with the points it cost or earned. A score
@@ -110,13 +112,15 @@ hand. Six rules, applied everywhere:
 
 | | |
 |---|---|
-| `↑` `↓` | move · `→` `←` open and fold · `8` fold everything |
-| `Enter` | the full card for an endpoint |
+| `↑` `↓` | move · `PgUp` `PgDn` `Home` `End` move further |
+| `→` `←` | open and fold a program · `8` fold everything |
+| `Enter` | the full card for the selected endpoint |
 | `O` | open the folder holding the program, binary selected |
-| `S` | next ranking · `/` filter · `L` local traffic · `B` listening and UDP sockets |
-| `Space` | pause · `R` re-read now · `C` clear the history |
+| `S` | next ranking · `/` filter |
+| `L` | also show local traffic · `B` also show listening and UDP sockets |
+| `Space` | pause · `R` re-read now · `C` clear the journal |
 | `F12` | write the window to `netaudit.bmp`, beside the binary |
-| `F1` | the key list · `Esc` close, clear the filter, or quit |
+| `F1` | the key list · `Esc` close a card, clear the filter, or quit · `Q` quit |
 
 The column headers rank by what they name, and the one the rows are ordered by
 is underlined. A header covering two readings takes both: `REPETITION / RHYTHM`
@@ -126,7 +130,8 @@ row selects it, so you can read a program's totals without closing what you
 were looking at.
 
 Hovering a program shows its full image path; hovering an endpoint shows
-everything the two lines had to elide.
+everything the two lines had to elide; hovering a badge in the title bar says
+what that reading is doing and why.
 
 ---
 
@@ -168,12 +173,15 @@ An existing clone that predates it: `git submodule update --init`.
 The only prerequisite is the Axle compiler, **v0.12.1 or newer**. There is no
 SDK to install, no DLL to copy beside the binary and no `[link]` section to
 fill in: every OS library this program uses — `iphlpapi`, `dnsapi`,
-`advapi32`, `shell32`, and `gdi32` through smalt — is named by the
+`kernel32`, `shell32`, and `gdi32` through smalt — is named by the
 `extern "C" from "…"` block that imports from it, so the link line learns of
 each from the declaration that needed it.
 
-Run it as administrator to light the `ETW` badge and add the byte columns.
-Everything else works unelevated.
+Nothing needs elevation, and nothing is gated behind it: the connection
+tables, the resolver cache and the reverse lookups are all readable by any
+process. The one reading that would need it — the kernel trace behind the
+`ETW` badge — is not implemented, so running as administrator changes
+nothing today.
 
 `--snap <ms>` waits that long, writes `netaudit.bmp`, and quits — a capture
 for a report, or for a script, without anyone standing over the machine at
@@ -220,7 +228,6 @@ src/
   enrich/scan        reading values out of a JSON response, byte by byte
   enrich/ipapi       the batch response, folded into rows
   enrich/cymru       the registry's answer over DNS, for what the batch could not name
-  enrich/ripestat    the announcing network, when the registry has one
 
   ui/parts card      the pieces every surface is assembled from
   ui/chrome tree     the title bar and cards; the list itself
@@ -269,6 +276,31 @@ text form, a rate whose empty case means "nothing measured bytes" rather than
 reading's trace is drawn against.
 
 ---
+
+## How it is written
+
+Three habits, each of which turns a class of silent mistake into a compile
+error.
+
+**Every state is an enum, and every reading of one is a `match` with no
+wildcard.** `Tier`, `TierState`, `Sort`, `RowKind`, `Modal`, `Say`, `Action`,
+`Proto`, `SocketKind`, `Reach`, `Look`, `NameSource`, `PathState`,
+`WhoisKind`, `Reason` — including the columns, which are `Reach[]` and
+`Look[]` rather than `i32[]`. The event loop is two of those matches, one
+routing an `EventKind` to a handler and one applying the `Action` it
+answered, so an event kind or an action added later is an error and not a
+silent no-op. The trust score reads the same nine-arm table the detail card
+lists, so a signal cannot be scored without being explained.
+
+**A lookup that can fail answers two values, never a sentinel.** `tierAt` and
+`headerAt` return `(bool, T)`. An integer that is sometimes a `Sort` and
+sometimes `-1` is a type nobody can read twice the same way.
+
+**All the `unsafe` is in one file.** `src/sys/raw.axle` holds the four views
+between an address and a `ptr` that the Windows imports need; smalt owns the
+raw reads and writes. `unsafe` is per-function in Axle (E0707 — it does not
+propagate across a call), so that confinement is enforceable rather than
+aspirational: `grep unsafe src/` returns one file.
 
 ## License
 
