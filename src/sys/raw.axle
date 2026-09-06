@@ -3,9 +3,9 @@
 // smalt owns the raw reads and writes: `Mem` is its public escape hatch,
 // every accessor is `static`, and the `unsafe` is on its side of the call.
 // What it cannot supply is the `ptr` type itself — `kernel::raw` is
-// `pub(crate)`, deliberately — and this program calls four Windows
-// libraries smalt has never heard of. `GetExtendedTcpTable`,
-// `DnsGetCacheDataTable`, `StartTraceW` and `ShellExecuteW` take and
+// `pub(crate)`, deliberately — and this program calls Windows libraries
+// smalt has never heard of. `GetExtendedTcpTable`, `DnsGetCacheDataTable`,
+// `DnsQuery_W`, `NtQuerySystemInformation` and `ShellExecuteW` take and
 // answer pointers, so the four views between an address and a `ptr` live
 // here and nowhere else.
 //

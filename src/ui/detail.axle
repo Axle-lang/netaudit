@@ -25,7 +25,7 @@ use crate::model::groups;
 use crate::model::hosts::{Hosts, nameSource, lookNote, Look};
 use crate::model::rhythm::{hasRhythm, regularityWord};
 use crate::model::addr;
-use crate::model::score::{reasonBit, reasonWeight, reasonText, REASON_COUNT};
+use crate::model::score::{Reason, reasonAt, reasonBit, reasonWeight, reasonText, REASON_COUNT};
 use crate::sys::conn::{Proto, stateName};
 use crate::sys::tiers;
 use crate::theme::{WIN_W, WIN_H, C_MODAL, C_LINE, C_TEXT, C_DIM, C_FAINT, C_MEM, C_OK, C_HOT, C_ACCENT};
@@ -222,13 +222,14 @@ fn trust(c : Card, f : Frame, ui : BitmapFont, e : Endpoints, s : i32) : void {
     }
 
     for (i of 0..REASON_COUNT) {
-        if ((e.reasons[s] & reasonBit(i)) != 0) {
-            let w : i32 = reasonWeight(i);
+        let r : Reason = reasonAt(i);
+        if ((e.reasons[s] & reasonBit(r)) != 0) {
+            let w : i32 = reasonWeight(r);
             let ink : i32 = C_HOT;
             if (w > 0) {
                 ink = C_OK;
             }
-            card::line(c, f, ui, signed(w) + reasonText(i), ink);
+            card::line(c, f, ui, signed(w) + reasonText(r), ink);
         }
     }
 }

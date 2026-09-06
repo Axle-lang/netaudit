@@ -84,7 +84,7 @@ fn forTier(
     which : Tier
 ) : void {
     let state : TierState = t.stateOf(which);
-    card::line(c, f, ui, tierNote(which, state, t.elevated), C_TEXT);
+    card::line(c, f, ui, tierNote(which, state), C_TEXT);
     if (which == Tier::Dns && state == TierState::On) {
         card::line(c, f, ui, tierReading(which, state), C_FAINT);
         s.reset();

@@ -11,7 +11,10 @@
 //         it can go dark and the badge goes with it.
 //   ETW   a real-time kernel trace: bytes per process, the connections too
 //         short for polling to catch, and the domain each process resolved.
-//         Needs elevation, and the badge is the only honest way to say so.
+//         Declared and not implemented, so its badge is dark and says why —
+//         which is the whole reason the badges exist. A traffic column with
+//         nothing in it and no badge to explain it reads as "these programs
+//         sent nothing", and that is the one thing it must never say.
 //
 // Each tier carries the sentence that explains its state, because "off" is
 // not a diagnosis. `note` is what the status bar and the tooltip show, and
@@ -43,8 +46,6 @@ class Tiers {
     pub(crate) poll : TierState = TierState::On,
     pub(crate) dns : TierState = TierState::Off,
     pub(crate) etw : TierState = TierState::Off,
-    pub(crate) elevated : bool = false,
-    etwLost : i64 = 0,
 
     /** Whether byte counts are being measured rather than left blank. */
     pub(crate) fn bytesMeasured(self) : bool {
@@ -83,11 +84,11 @@ fn tierReading(which : Tier, state : TierState) : string {
 }
 
 /** The sentence a tier's badge explains itself with. */
-fn tierNote(which : Tier, state : TierState, elevated : bool) : string {
+fn tierNote(which : Tier, state : TierState) : string {
     return match which {
         Tier::Poll => pollNote(state),
         Tier::Dns => dnsNote(state),
-        Tier::Etw => etwNote(state, elevated),
+        Tier::Etw => etwNote(state),
     };
 }
 
@@ -111,23 +112,14 @@ fn dnsNote(state : TierState) : string {
     };
 }
 
-/**
- * Why the kernel trace is, or is not, running.
- *
- * The unelevated case is named separately from the failed one because they
- * are two different things a reader can do something about: one is a
- * restart as administrator, the other is not.
- */
-fn etwNote(state : TierState, elevated : bool) : string {
+/** Why the kernel trace is, or is not, running. */
+fn etwNote(state : TierState) : string {
     return match state {
         TierState::On =>
             "Tracing the kernel network provider: bytes per process, short connections, and resolved names.",
         TierState::Lost =>
             "The kernel trace stopped. Byte counts are frozen at their last reading.",
-        TierState::Off => match elevated {
-            true => "The kernel trace could not be started, so byte counts are not measured.",
-            false =>
-                "Byte counts need a kernel trace, which needs administrator. Run as administrator to measure them.",
-        },
+        TierState::Off =>
+            "No kernel trace, so no byte counts. The traffic column is blank because nothing measures it, not because nothing was sent.",
     };
 }

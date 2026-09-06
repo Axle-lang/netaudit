@@ -18,50 +18,114 @@
 // evidence, not on the address.
 
 use crate::model::endpoints::{Endpoints, SocketKind};
-use crate::model::hosts::{Hosts, FLAG_PROXY, FLAG_HOSTING, FLAG_MOBILE, Look};
+use crate::model::hosts::{Hosts, FLAG_PROXY, FLAG_HOSTING, Look};
 use crate::model::rhythm;
 use crate::model::addr::{Reach};
 
-/** The address answers as a proxy, a VPN exit or a Tor relay. */
-const R_PROXY : i32 = 1;
-/** The address belongs to a datacenter rather than an access network. */
-const R_HOSTING : i32 = 4;
-/** Nobody publishes a name for the address. */
-const R_NO_PTR : i32 = 8;
-/** The owning network is not one of the majors this program knows. */
-const R_UNKNOWN_AS : i32 = 16;
-/** An unusual port, to a network that does not host public services. */
-const R_ODD_PORT : i32 = 32;
-/** A steady repeat towards a host nothing will name — the timer's signature. */
-const R_BEACON : i32 = 64;
-/** A socket accepting connections from outside this machine. */
-const R_OPEN_DOOR : i32 = 128;
-/** The machine itself resolved this name — the traffic was asked for. */
-const R_ASKED_FOR : i32 = 256;
-/** A network large enough that its behaviour is a matter of public record. */
-const R_MAJOR_AS : i32 = 512;
+/**
+ * A signal the score can report, in the order the detail card lists them.
+ *
+ * One enum and three exhaustive tables — the bit it occupies in a row's
+ * `reasons` word, what it costs or earns, and the sentence it reads as. They
+ * were three `match`es over a bare index with a `_` arm each, which is a
+ * shape where adding a signal and forgetting one table shows the reader the
+ * wrong weight beside the right words and nothing goes red.
+ */
+enum Reason : i32 {
+    /** The address answers as a proxy, a VPN exit or a Tor relay. */
+    Proxy = 0,
+    /** A steady repeat towards a host nothing will name — the timer's signature. */
+    Beacon = 1,
+    /** A socket accepting connections from outside this machine. */
+    OpenDoor = 2,
+    /** An unusual port, to a network that does not host public services. */
+    OddPort = 3,
+    /** Nobody publishes a name for the address. */
+    NoPtr = 4,
+    /** The owning network is not one of the majors this program knows. */
+    UnknownAs = 5,
+    /** The address belongs to a datacenter rather than an access network. */
+    Hosting = 6,
+    /** A network large enough that its behaviour is a matter of public record. */
+    MajorAs = 7,
+    /** The machine itself resolved this name — the traffic was asked for. */
+    AskedFor = 8,
+}
 
-/** Reasons this program can report, for the walk that lists them. */
+/** Signals this program can report, for the walk that lists them. */
 const REASON_COUNT : i32 = 9;
 
-/** Weight of each reason, in tenths of a point. */
-const W_PROXY : i32 = -20;
-/** See [`R_HOSTING`]. */
-const W_HOSTING : i32 = -5;
-/** See [`R_NO_PTR`]. */
-const W_NO_PTR : i32 = -5;
-/** See [`R_UNKNOWN_AS`]. */
-const W_UNKNOWN_AS : i32 = -5;
-/** See [`R_ODD_PORT`]. */
-const W_ODD_PORT : i32 = -10;
-/** See [`R_BEACON`]. */
-const W_BEACON : i32 = -10;
-/** See [`R_OPEN_DOOR`]. */
-const W_OPEN_DOOR : i32 = -10;
-/** See [`R_ASKED_FOR`]. */
-const W_ASKED_FOR : i32 = 5;
-/** See [`R_MAJOR_AS`]. */
-const W_MAJOR_AS : i32 = 5;
+/**
+ * The `i`-th signal of that walk.
+ *
+ * The only place the numbering is read back; everything else names the
+ * variant, so the three tables below cannot drift out of step with the loop
+ * that reads all three.
+ */
+fn reasonAt(i : i32) : Reason {
+    return match i {
+        0 => Reason::Proxy,
+        1 => Reason::Beacon,
+        2 => Reason::OpenDoor,
+        3 => Reason::OddPort,
+        4 => Reason::NoPtr,
+        5 => Reason::UnknownAs,
+        6 => Reason::Hosting,
+        7 => Reason::MajorAs,
+        _ => Reason::AskedFor,
+    };
+}
+
+/** The bit `r` occupies in a row's `reasons` word. */
+fn reasonBit(r : Reason) : i32 {
+    return match r {
+        Reason::Proxy => 1,
+        Reason::Hosting => 4,
+        Reason::NoPtr => 8,
+        Reason::UnknownAs => 16,
+        Reason::OddPort => 32,
+        Reason::Beacon => 64,
+        Reason::OpenDoor => 128,
+        Reason::AskedFor => 256,
+        Reason::MajorAs => 512,
+    };
+}
+
+/**
+ * What `r` costs or earns, in tenths of a point.
+ *
+ * A proxy is the heaviest single mark against an address, and the two
+ * positive signals are deliberately small: a score that could be talked back
+ * up to five by good news would stop being a floor.
+ */
+fn reasonWeight(r : Reason) : i32 {
+    return match r {
+        Reason::Proxy => -20,
+        Reason::Beacon => -10,
+        Reason::OpenDoor => -10,
+        Reason::OddPort => -10,
+        Reason::NoPtr => -5,
+        Reason::UnknownAs => -5,
+        Reason::Hosting => -5,
+        Reason::MajorAs => 5,
+        Reason::AskedFor => 5,
+    };
+}
+
+/** What `r` says, in the words the detail card uses. */
+fn reasonText(r : Reason) : string {
+    return match r {
+        Reason::Proxy => "the address answers as a proxy, VPN or Tor exit",
+        Reason::Beacon => "a steady repeat towards a host nothing will name",
+        Reason::OpenDoor => "this socket accepts connections from outside the machine",
+        Reason::OddPort => "an unusual port, to a network that hosts no public service",
+        Reason::NoPtr => "no name is published for the address",
+        Reason::UnknownAs => "the owning network is not one of the majors",
+        Reason::Hosting => "the address is in a datacenter, not on an access network",
+        Reason::MajorAs => "a major network, whose behaviour is a matter of public record",
+        Reason::AskedFor => "this machine resolved the name itself — the traffic was asked for",
+    };
+}
 
 /** A rhythm this steady was set by a timer, not by a person. */
 const BEACON_REGULARITY : i32 = 800;
@@ -114,18 +178,18 @@ fn assess(e : Endpoints, hosts : Hosts, s : i32) : void {
 fn reputation(hosts : Hosts, h : i32) : i32 {
     let r : i32 = 0;
     if (hosts.has(h, FLAG_PROXY)) {
-        r = r | R_PROXY;
+        r = r | reasonBit(Reason::Proxy);
     }
     if (hosts.has(h, FLAG_HOSTING)) {
-        r = r | R_HOSTING;
+        r = r | reasonBit(Reason::Hosting);
     }
     if (hosts.nameOff[h] < 0) {
-        r = r | R_NO_PTR;
+        r = r | reasonBit(Reason::NoPtr);
     }
     if (isMajor(hosts.asn[h])) {
-        r = r | R_MAJOR_AS;
+        r = r | reasonBit(Reason::MajorAs);
     } else {
-        r = r | R_UNKNOWN_AS;
+        r = r | reasonBit(Reason::UnknownAs);
     }
     return r;
 }
@@ -134,16 +198,16 @@ fn reputation(hosts : Hosts, h : i32) : i32 {
 fn behaviour(e : Endpoints, hosts : Hosts, s : i32, h : i32) : i32 {
     let r : i32 = 0;
     if (e.kind[s] == SocketKind::Listen) {
-        r = r | R_OPEN_DOOR;
+        r = r | reasonBit(Reason::OpenDoor);
     }
     if (e.kind[s] == SocketKind::Peer && oddPort(e.port[s]) && !hosts.has(h, FLAG_HOSTING)) {
-        r = r | R_ODD_PORT;
+        r = r | reasonBit(Reason::OddPort);
     }
     if (beaconing(e, hosts, s, h)) {
-        r = r | R_BEACON;
+        r = r | reasonBit(Reason::Beacon);
     }
     if (hosts.nameFrom[h] != NameSource::None && hosts.nameOff[h] >= 0) {
-        r = r | R_ASKED_FOR;
+        r = r | reasonBit(Reason::AskedFor);
     }
     return r;
 }
@@ -187,78 +251,23 @@ fn oddPort(port : i32) : bool {
     return port > 1024;
 }
 
-/** Turn a set of reasons into a score out of five. */
+/**
+ * Turn a set of reasons into a score out of five.
+ *
+ * One walk over the same table the detail card reads, so a signal cannot be
+ * scored without being listed or listed without being scored — which is the
+ * failure a fourth hand-written table of weights invites, and the reason
+ * there is not one.
+ */
 fn fromReasons(reasons : i32) : i32 {
     let tenths : i32 = 50;
-    tenths = tenths + weightOf(reasons, R_PROXY, W_PROXY);
-    tenths = tenths + weightOf(reasons, R_HOSTING, W_HOSTING);
-    tenths = tenths + weightOf(reasons, R_NO_PTR, W_NO_PTR);
-    tenths = tenths + weightOf(reasons, R_UNKNOWN_AS, W_UNKNOWN_AS);
-    tenths = tenths + weightOf(reasons, R_ODD_PORT, W_ODD_PORT);
-    tenths = tenths + weightOf(reasons, R_BEACON, W_BEACON);
-    tenths = tenths + weightOf(reasons, R_OPEN_DOOR, W_OPEN_DOOR);
-    tenths = tenths + weightOf(reasons, R_ASKED_FOR, W_ASKED_FOR);
-    tenths = tenths + weightOf(reasons, R_MAJOR_AS, W_MAJOR_AS);
-    if (tenths < 0) {
-        tenths = 0;
+    for (i of 0..REASON_COUNT) {
+        let r : Reason = reasonAt(i);
+        if ((reasons & reasonBit(r)) != 0) {
+            tenths = tenths + reasonWeight(r);
+        }
     }
-    if (tenths > 50) {
-        tenths = 50;
-    }
-    return (tenths + 5) / 10;
-}
-
-/** `w` when `reasons` carries `bit`, zero otherwise. */
-fn weightOf(reasons : i32, bit : i32, w : i32) : i32 {
-    if ((reasons & bit) != 0) {
-        return w;
-    }
-    return 0;
-}
-
-/** The `i`-th reason bit, for the walk that lists them in order. */
-fn reasonBit(i : i32) : i32 {
-    return match i {
-        0 => R_PROXY,
-        1 => R_BEACON,
-        2 => R_OPEN_DOOR,
-        3 => R_ODD_PORT,
-        4 => R_NO_PTR,
-        5 => R_UNKNOWN_AS,
-        6 => R_HOSTING,
-        7 => R_MAJOR_AS,
-        _ => R_ASKED_FOR,
-    };
-}
-
-/** The weight of the `i`-th reason, in tenths of a point. */
-fn reasonWeight(i : i32) : i32 {
-    return match i {
-        0 => W_PROXY,
-        1 => W_BEACON,
-        2 => W_OPEN_DOOR,
-        3 => W_ODD_PORT,
-        4 => W_NO_PTR,
-        5 => W_UNKNOWN_AS,
-        6 => W_HOSTING,
-        7 => W_MAJOR_AS,
-        _ => W_ASKED_FOR,
-    };
-}
-
-/** What the `i`-th reason says, in the words the detail card uses. */
-fn reasonText(i : i32) : string {
-    return match i {
-        0 => "the address answers as a proxy, VPN or Tor exit",
-        1 => "a steady repeat towards a host nothing will name",
-        2 => "this socket accepts connections from outside the machine",
-        3 => "an unusual port, to a network that hosts no public service",
-        4 => "no name is published for the address",
-        5 => "the owning network is not one of the majors",
-        6 => "the address is in a datacenter, not on an access network",
-        7 => "a major network, whose behaviour is a matter of public record",
-        _ => "this machine resolved the name itself — the traffic was asked for",
-    };
+    return ((tenths.max(0).min(50)) + 5) / 10;
 }
 
 /**

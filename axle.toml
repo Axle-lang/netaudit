@@ -10,10 +10,10 @@ targets = ["x86_64-pc-windows-msvc"]
 
 # No `[link]` section. Every OS library is named by the `extern "C" from "…"`
 # block that imports from it — `iphlpapi` for the connection tables, `dnsapi`
-# for the resolver cache, `shell32` to reveal a binary, `kernel32` for the
-# process handles, and `gdi32` through smalt — so the link line learns of
-# each from the declaration that needed it, and a consumer links what it uses
-# without being told twice.
+# for the resolver cache and the reverse lookups, `kernel32` for the process
+# handles, `shell32` to reveal a binary, and `gdi32` through smalt — so the
+# link line learns of each from the declaration that needed it, and a
+# consumer links what it uses without being told twice.
 [dependencies]
 smalt = { path = "vendor/smalt" }
 
