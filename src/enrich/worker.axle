@@ -1,0 +1,61 @@
+// enrich/worker — the one blocking call, kept off the loop.
+//
+// Looking an address up is an HTTP round-trip: a few hundred milliseconds on
+// a good day, and the full timeout on a bad one. Made on the event loop it
+// would freeze the window, and freezing the window of a monitoring tool is
+// how a reader concludes the machine has locked up.
+//
+// So the call runs on its own OS thread. `spawn` hands back a
+// `Task<string>`; the loop asks `isAlive()` once a frame, which is a peek and
+// not a wait, and joins only once the answer has arrived.
+//
+// # Why the failure is a value and not an exception
+//
+// Both functions catch. A raise here would have to cross the thunk and be
+// re-stashed for the `join` to re-raise, which works — but it also makes the
+// `spawn` itself a throwing call, so every caller has to carry an error set
+// for an exception that cannot happen until the join. The caller's job is to
+// decide when to ask again; what it needs for that is "did this answer",
+// which is exactly what an empty body says. A network that is down and a
+// service that is angry are the same decision here, and neither is worth a
+// second control-flow path.
+
+use std::net::HttpClient;
+use std::lang::IOException;
+
+/**
+ * POST `body` to `url` and answer the response body, or the empty string
+ * when the request did not complete. Runs on the spawned thread.
+ */
+fn post(url : string, body : string) : string {
+    try {
+        let client : HttpClient = new HttpClient();
+        return client.post(url, body);
+    } catch e : IOException {
+        return "";
+    }
+}
+
+/**
+ * A lookup that does nothing, answering at once.
+ *
+ * It exists so that a task slot is never *unassigned*. The two slots are
+ * ordinary locals holding handles, and a handle that was never minted is a
+ * number with no entry behind it — read at scope exit, that is a crash with
+ * nothing in the program to point at. Filling both slots with a task that
+ * has already finished costs two thread launches at startup and removes the
+ * only state in which a slot means nothing.
+ */
+fn idle() : string {
+    return "";
+}
+
+/** GET `url` and answer the response body, or the empty string. */
+fn get(url : string) : string {
+    try {
+        let client : HttpClient = new HttpClient();
+        return client.get(url);
+    } catch e : IOException {
+        return "";
+    }
+}

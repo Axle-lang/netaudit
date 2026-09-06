@@ -1,0 +1,404 @@
+// input — keys, clicks and wheel turned into changes on `app`.
+//
+// Nothing here draws and nothing here reads the OS. It maps an event onto a
+// change of interaction state, and hands back an **action** for the three
+// things it cannot do itself: quit, force a refresh, and open a folder.
+//
+// Every movement goes through the flat row list, so the keyboard and the
+// pointer agree on what "the next row" means — including the fact that an
+// endpoint under a folded program is not a row at all. And every selection
+// is stored as a key: by the time the reader presses Down again, the tree
+// has been rebuilt and the index they moved from means something else.
+
+use crate::ui::tree;
+use crate::ui::chrome;
+use smalt::{Event, MouseButton, Scancode};
+use crate::app::App;
+use crate::app::{Modal, Say};
+use crate::model::view::{View, RowKind, rowOfEndpoint, rowOfGroup};
+use crate::model::endpoints;
+use crate::model::groups;
+
+/**
+ * What the loop must do that this file cannot do itself.
+ *
+ * Everything else an event causes is a change on `App`, made here. These
+ * five need the window, the OS or the journal, so they are handed back as a
+ * value the loop matches on — and the match is exhaustive, so an action
+ * added here is one the loop is made to handle.
+ */
+enum Action : i32 {
+    /** Nothing for the loop to do. */
+    None = 0,
+    /** Close the window. */
+    Quit = 1,
+    /** Re-read the machine now rather than at the next tick. */
+    Refresh = 2,
+    /** Open the folder holding the selected program's binary. */
+    Open = 3,
+    /** Forget the journal and start again from what is live. */
+    Clear = 4,
+    /** Write what is on screen to a file. */
+    Snap = 5,
+}
+
+/** Rows a page key moves by — a little less than a screen, to keep context. */
+const PAGE_ROWS : i32 = 12;
+
+/** The flat-list position of whatever is selected, or `-1`. */
+fn selectedRow(a : App, v : View, e : Endpoints, g : Groups) : i32 {
+    if (!a.selected) {
+        return -1;
+    }
+    return match a.selKind {
+        RowKind::Group => rowOfGroup(v, g, a.selKey),
+        RowKind::Endpoint => rowOfEndpoint(v, e, a.selKey),
+    };
+}
+
+/** Select the row at flat position `r`, and scroll it into view. */
+fn selectRow(a : App, v : View, e : Endpoints, g : Groups, r : i32) : void {
+    if (r < 0 || r >= v.count) {
+        return;
+    }
+    if (v.rowKind[r] == RowKind::Group) {
+        a.selectGroup(g.key[v.rowRef[r]]);
+    } else {
+        a.selectEndpoint(e.key[v.rowRef[r]]);
+    }
+    a.scroll = tree::reveal(v, r, a.scroll);
+}
+
+/** Move the selection `delta` rows, clamped to the ends of the list. */
+fn moveSel(a : App, v : View, e : Endpoints, g : Groups, delta : i32) : void {
+    if (v.count == 0) {
+        return;
+    }
+    let from : i32 = selectedRow(a, v, e, g);
+    if (from < 0) {
+        selectRow(a, v, e, g, 0);
+        return;
+    }
+    selectRow(a, v, e, g, (from + delta).max(0).min(v.count - 1));
+}
+
+/** The group a row belongs to: itself if it is one, otherwise the one above. */
+fn groupOf(v : View, r : i32) : i32 {
+    let i : i32 = r;
+    while (i >= 0) {
+        if (v.rowKind[i] == RowKind::Group) {
+            return v.rowRef[i];
+        }
+        i = i - 1;
+    }
+    return -1;
+}
+
+/** Route a key by what currently has focus. */
+fn onKey(a : App, v : View, e : Endpoints, g : Groups, sc : Scancode) : Action {
+    if (a.modal != Modal::None) {
+        return modalKey(a, sc);
+    }
+    if (a.typing) {
+        return typingKey(a, v, e, g, sc);
+    }
+    return browsingKey(a, v, e, g, sc);
+}
+
+/** Keys while a card is up — anything closes it. */
+fn modalKey(a : App, sc : Scancode) : Action {
+    if (sc == Scancode::Escape || sc == Scancode::Return || sc == Scancode::Space) {
+        a.modal = Modal::None;
+        a.dirty = true;
+    }
+    return Action::None;
+}
+
+/**
+ * Keys while the filter field has focus. Navigation stays live: the point
+ * of narrowing the list is to pick something out of it.
+ */
+fn typingKey(a : App, v : View, e : Endpoints, g : Groups, sc : Scancode) : Action {
+    if (sc == Scancode::Escape) {
+        a.clearFilter();
+        return Action::None;
+    }
+    if (sc == Scancode::Return || sc == Scancode::KeypadEnter) {
+        a.typing = false;
+        a.dirty = true;
+        return Action::None;
+    }
+    if (sc == Scancode::Backspace) {
+        a.backspace();
+        return Action::None;
+    }
+    if (sc == Scancode::Up) {
+        moveSel(a, v, e, g, -1);
+    }
+    if (sc == Scancode::Down) {
+        moveSel(a, v, e, g, 1);
+    }
+    return Action::None;
+}
+
+/** Keys while the tree has focus. */
+fn browsingKey(a : App, v : View, e : Endpoints, g : Groups, sc : Scancode) : Action {
+    if (sc == Scancode::Escape || sc == Scancode::Q) {
+        if (a.filterLen > 0) {
+            a.clearFilter();
+            return Action::None;
+        }
+        return Action::Quit;
+    }
+    if (sc == Scancode::Up) {
+        moveSel(a, v, e, g, -1);
+        return Action::None;
+    }
+    if (sc == Scancode::Down) {
+        moveSel(a, v, e, g, 1);
+        return Action::None;
+    }
+    if (sc == Scancode::PageUp) {
+        moveSel(a, v, e, g, 0 - PAGE_ROWS);
+        return Action::None;
+    }
+    if (sc == Scancode::PageDown) {
+        moveSel(a, v, e, g, PAGE_ROWS);
+        return Action::None;
+    }
+    if (sc == Scancode::Home) {
+        selectRow(a, v, e, g, 0);
+        return Action::None;
+    }
+    if (sc == Scancode::End) {
+        selectRow(a, v, e, g, v.count - 1);
+        return Action::None;
+    }
+    return foldKey(a, v, e, g, sc);
+}
+
+/** The keys that open and close what the tree is showing. */
+fn foldKey(a : App, v : View, e : Endpoints, g : Groups, sc : Scancode) : Action {
+    let r : i32 = selectedRow(a, v, e, g);
+
+    if (sc == Scancode::Right) {
+        let gi : i32 = groupOf(v, r);
+        if (gi >= 0 && !g.isOpen(gi)) {
+            g.toggle(gi);
+            a.dirty = true;
+        }
+        return Action::None;
+    }
+    if (sc == Scancode::Left) {
+        let gi : i32 = groupOf(v, r);
+        if (gi >= 0) {
+            // Left on an endpoint climbs to its program first; only a
+            // second press folds it. Folding out from under the reader on
+            // the first press loses the row they were looking at.
+            if (r >= 0 && v.rowKind[r] == RowKind::Endpoint) {
+                a.selectGroup(g.key[gi]);
+            } else if (g.isOpen(gi)) {
+                g.toggle(gi);
+            }
+            a.dirty = true;
+        }
+        return Action::None;
+    }
+    if (sc == Scancode::Return || sc == Scancode::KeypadEnter) {
+        if (r >= 0 && v.rowKind[r] == RowKind::Group) {
+            g.toggle(v.rowRef[r]);
+            a.dirty = true;
+        } else if (r >= 0) {
+            a.modal = Modal::Detail;
+            a.dirty = true;
+        }
+        return Action::None;
+    }
+    if (sc == Scancode::Num8) {
+        g.setAll(!anyOpen(g));
+        a.dirty = true;
+        return Action::None;
+    }
+    return commandKey(a, sc);
+}
+
+/** Whether any program row is currently open. */
+fn anyOpen(g : Groups) : bool {
+    for (i of 0..g.count) {
+        if (g.isOpen(i)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/** The keys that change what the window is doing rather than where it is. */
+fn commandKey(a : App, sc : Scancode) : Action {
+    if (sc == Scancode::Slash) {
+        // The `/` that opened the field would otherwise arrive again as the
+        // first typed character.
+        a.typing = true;
+        a.swallow = true;
+        a.dirty = true;
+        return Action::None;
+    }
+    if (sc == Scancode::S) {
+        a.nextSort();
+        return Action::None;
+    }
+    if (sc == Scancode::L) {
+        a.showLocal = !a.showLocal;
+        a.saying(Say::Local);
+        return Action::None;
+    }
+    if (sc == Scancode::B) {
+        a.showBound = !a.showBound;
+        a.saying(Say::Bound);
+        return Action::None;
+    }
+    if (sc == Scancode::O) {
+        return Action::Open;
+    }
+    if (sc == Scancode::C) {
+        return Action::Clear;
+    }
+    if (sc == Scancode::Space) {
+        a.paused = !a.paused;
+        if (a.paused) {
+            a.saying(Say::Paused);
+        } else {
+            a.saying(Say::Resumed);
+        }
+        return Action::None;
+    }
+    if (sc == Scancode::F5 || sc == Scancode::R) {
+        return Action::Refresh;
+    }
+    if (sc == Scancode::F1) {
+        a.modal = Modal::Help;
+        a.dirty = true;
+        return Action::None;
+    }
+    if (sc == Scancode::F12) {
+        return Action::Snap;
+    }
+    return Action::None;
+}
+
+/** A typed character, once the `/` that opened the field has been eaten. */
+fn onText(a : App, c : i32) : Action {
+    if (!a.typing) {
+        return Action::None;
+    }
+    if (a.swallow) {
+        a.swallow = false;
+        return Action::None;
+    }
+    a.typeByte(c);
+    return Action::None;
+}
+
+/**
+ * The pointer moved. Two things follow: the hovered row changes, and — while
+ * the pointer is over the rows — reordering is frozen, so nothing the reader
+ * is about to click can move first.
+ */
+fn onMotion(a : App, v : View, nowMs : i64, x : i32, y : i32) : Action {
+    a.pointerMoved(nowMs, x, y);
+    if (a.dragging) {
+        tree::dragTo(a, v, y);
+        a.holdOrder(nowMs);
+        return Action::None;
+    }
+    let was : i32 = a.hoverRow;
+    a.hoverRow = tree::rowAtPoint(v, a, x, y);
+    a.inTree = tree::inRows(x, y);
+    if (a.inTree) {
+        a.holdOrder(nowMs);
+    }
+    if (a.hoverRow != was) {
+        a.dirty = true;
+    }
+    return Action::None;
+}
+
+/**
+ * A mouse button went down. Only the left one does anything, and the test
+ * is here rather than in the loop: which buttons a program answers is an
+ * input decision, not a dispatch one.
+ */
+fn onClick(a : App, v : View, e : Endpoints, g : Groups, ev : Event) : Action {
+    if (ev.button != MouseButton::Left) {
+        return Action::None;
+    }
+    let x : i32 = ev.x;
+    let y : i32 = ev.y;
+    if (a.modal != Modal::None) {
+        a.modal = Modal::None;
+        a.dirty = true;
+        return Action::None;
+    }
+    if (chrome::onFilter(x, y)) {
+        a.typing = true;
+        a.dirty = true;
+        return Action::None;
+    }
+    if (chrome::onSort(x, y)) {
+        a.nextSort();
+        return Action::None;
+    }
+    let tg : i32 = chrome::onToggle(x, y);
+    if (tg == 0) {
+        a.showLocal = !a.showLocal;
+        a.saying(Say::Local);
+        return Action::None;
+    }
+    if (tg == 1) {
+        a.showBound = !a.showBound;
+        a.saying(Say::Bound);
+        return Action::None;
+    }
+
+    if (chrome::onFilterClear(x, y) && a.filterLen > 0) {
+        a.clearFilter();
+        return Action::None;
+    }
+    let (onHeader, col) = tree::headerAt(x, y);
+    if (onHeader) {
+        a.sortByColumn(col, tree::alternate(col));
+        return Action::None;
+    }
+    if (tree::onBar(x, y)) {
+        tree::grab(a, v, y);
+        return Action::None;
+    }
+
+    let r : i32 = tree::rowAtPoint(v, a, x, y);
+    if (r < 0) {
+        a.typing = false;
+        a.dirty = true;
+        return Action::None;
+    }
+    a.typing = false;
+    selectRow(a, v, e, g, r);
+    if (v.rowKind[r] == RowKind::Group && tree::onTwisty(x)) {
+        g.toggle(v.rowRef[r]);
+        a.dirty = true;
+    }
+    return Action::None;
+}
+
+/** A release ends a scrollbar drag; nothing else is held. */
+fn onRelease(a : App, ev : Event) : Action {
+    if (ev.button == MouseButton::Left && a.dragging) {
+        a.dragging = false;
+        a.dirty = true;
+    }
+    return Action::None;
+}
+
+/** The wheel scrolls the rows. */
+fn onWheel(a : App, v : View, notches : i32) : Action {
+    tree::wheel(a, v, notches);
+    return Action::None;
+}

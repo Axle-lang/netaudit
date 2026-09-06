@@ -1,0 +1,24 @@
+// model/key — the one hash every identity in this program is folded with.
+//
+// An endpoint's key is its group, its protocol, its kind and its port; a
+// group's is its interned name and a salt; a host's is its address bytes
+// and its family. Three different shapes, all reduced to the `i64` that
+// `SlotIndex` looks up, and all reduced by the same fold — which is the
+// point of the file. Two hashes over the same bytes give two keys, and a
+// row entered under one and searched for under the other is a row that
+// exists and can never be found again.
+//
+// FNV-1a, and the sign bit cleared so a key is always positive: the table
+// treats 0 as its empty sentinel, and a negative key would read as a slot
+// index everywhere a lookup result is compared against zero.
+
+/** Fold one more `i64` into a running FNV-1a hash. */
+fn hashStep(h : i64, v : i64) : i64 {
+    let x : i64 = h ^ v;
+    return (x * 0x100000001B3) & 0x7FFFFFFFFFFFFFFF;
+}
+
+/** The seed every key in this program starts from. */
+fn seed() : i64 {
+    return 0x2545F4914F6CDD1D;
+}

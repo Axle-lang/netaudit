@@ -1,0 +1,537 @@
+// model/endpoints — the journal. One row per conversation a program has.
+//
+// This is where the program's central decision lives, and it is worth
+// stating plainly: **an endpoint is a journal entry, not a snapshot**. When
+// a TCP connection closes, its row does not disappear. It goes grey, keeps
+// its counts, and stays for `LINGER_MS`.
+//
+// A table that showed only what is `ESTABLISHED` right now would be
+// unreadable — connections open and close several times a second, so rows
+// would appear and vanish under the pointer and the list would never sit
+// still. Worse, it would answer the wrong question. "What is this program
+// connected to at this instant" is trivia; "what has this program been
+// talking to, how often, and how regularly" is the audit, and only a
+// journal can answer it.
+//
+// The identity of a row is `(program, protocol, kind, address, port)` — it
+// deliberately does **not** include the local port, so a beacon that
+// reconnects from a fresh ephemeral port every thirty seconds is one row
+// that has been visited fifty times, not fifty rows that were visited once.
+// That collapsing is what makes the repetition visible at all.
+//
+// Every reading is derived, never accumulated in the UI: `hits` counts
+// transitions from idle to live, `rateIn`/`rateOut` are smoothed so the
+// figures do not strobe, and `salience` — the default ranking — is a
+// weighted read of repetition, regularity, risk, traffic and recency.
+
+use smalt::{Mem, SlotIndex};
+use crate::sys::conn::{Conns, Proto, TCP_LISTEN, isLive};
+use crate::model::key::{hashStep, seed};
+use crate::model::addr::{hashAddr, reach, shownFamily, shownOffset, Reach};
+use crate::model::rhythm::{Rhythm, hasRhythm};
+use crate::model::hosts;
+use crate::model::groups;
+use crate::model::pool;
+use crate::sys::procs;
+
+/** Rows the journal can hold. */
+const MAX_ENDPOINTS : i32 = 8192;
+/** Address bytes per row. */
+const EP_ADDR_BYTES : i64 = 16;
+/** How long a row outlives its last sighting. */
+const LINGER_MS : i64 = 300000;
+
+/** What a socket is doing, which decides what a row can even say.
+ *
+ * A listening socket and a UDP handle have no peer for Windows to
+ * name, so neither carries an address the way a connection does —
+ * which is why both are hidden until asked for. */
+enum SocketKind : i32 {
+    /** A conversation with a peer the OS named. */
+    Peer = 0,
+    /** A TCP socket accepting inbound connections — the address is the bind. */
+    Listen = 1,
+    /** A UDP handle. Windows records no peer for one; the address is the bind. */
+    Udp = 2,
+}
+
+
+/**
+ * The endpoint journal, in column form.
+ *
+ * Slots are compacted when a row expires, so nothing outside this class may
+ * hold a slot index across a refresh. The two things that must survive one —
+ * the selection and the scroll — are held as a key and as pixels.
+ */
+class Endpoints {
+    pub(crate) key : i64[],
+    pub(crate) group : i32[],
+    pub(crate) host : i32[],
+    pub(crate) kind : SocketKind[],
+    pub(crate) proto : Proto[],
+    pub(crate) family : i32[],
+    pub(crate) port : i32[],
+    pub(crate) state : i32[],
+
+    pub(crate) firstMs : i64[],
+    pub(crate) lastMs : i64[],
+    pub(crate) closedMs : i64[],
+
+    pub(crate) hits : i32[],
+    pub(crate) liveNow : i32[],
+    livePrev : i32[],
+    pub(crate) sockets : i32[],
+
+    pub(crate) bytesIn : i64[],
+    pub(crate) bytesOut : i64[],
+    pub(crate) rateIn : i64[],
+    pub(crate) rateOut : i64[],
+    tickIn : i64[],
+    tickOut : i64[],
+
+    pub(crate) salience : i64[],
+    pub(crate) score : i32[],
+    pub(crate) reasons : i32[],
+
+    addrs : i64,
+    pub(crate) count : i32,
+    index : SlotIndex,
+    pub(crate) rhythm : Rhythm,
+    pub(crate) dropped : i32,
+
+    constructor() {
+        self.key = malloc<i64>(MAX_ENDPOINTS as i64);
+        self.group = malloc<i32>(MAX_ENDPOINTS as i64);
+        self.host = malloc<i32>(MAX_ENDPOINTS as i64);
+        self.kind = malloc<SocketKind>(MAX_ENDPOINTS as i64);
+        self.proto = malloc<Proto>(MAX_ENDPOINTS as i64);
+        self.family = malloc<i32>(MAX_ENDPOINTS as i64);
+        self.port = malloc<i32>(MAX_ENDPOINTS as i64);
+        self.state = malloc<i32>(MAX_ENDPOINTS as i64);
+        self.firstMs = malloc<i64>(MAX_ENDPOINTS as i64);
+        self.lastMs = malloc<i64>(MAX_ENDPOINTS as i64);
+        self.closedMs = malloc<i64>(MAX_ENDPOINTS as i64);
+        self.hits = malloc<i32>(MAX_ENDPOINTS as i64);
+        self.liveNow = malloc<i32>(MAX_ENDPOINTS as i64);
+        self.livePrev = malloc<i32>(MAX_ENDPOINTS as i64);
+        self.sockets = malloc<i32>(MAX_ENDPOINTS as i64);
+        self.bytesIn = malloc<i64>(MAX_ENDPOINTS as i64);
+        self.bytesOut = malloc<i64>(MAX_ENDPOINTS as i64);
+        self.rateIn = malloc<i64>(MAX_ENDPOINTS as i64);
+        self.rateOut = malloc<i64>(MAX_ENDPOINTS as i64);
+        self.tickIn = malloc<i64>(MAX_ENDPOINTS as i64);
+        self.tickOut = malloc<i64>(MAX_ENDPOINTS as i64);
+        self.salience = malloc<i64>(MAX_ENDPOINTS as i64);
+        self.score = malloc<i32>(MAX_ENDPOINTS as i64);
+        self.reasons = malloc<i32>(MAX_ENDPOINTS as i64);
+        self.addrs = Mem::take((MAX_ENDPOINTS as i64) * EP_ADDR_BYTES);
+        self.count = 0;
+        self.dropped = 0;
+        self.index = new SlotIndex(MAX_ENDPOINTS * 2);
+        self.rhythm = new Rhythm(MAX_ENDPOINTS);
+    }
+
+    /** Byte address of row `s`'s sixteen address bytes. */
+    pub(crate) fn addrAt(self, s : i32) : i64 {
+        return self.addrs + (s as i64) * EP_ADDR_BYTES;
+    }
+
+    /**
+     * Fold one whole connection snapshot into the journal.
+     *
+     * The three passes are separate on purpose. The first clears the
+     * per-tick counters, the second attributes every socket, and only the
+     * third decides what changed — because "this endpoint became live
+     * again" is a statement about the tick as a whole, and cannot be made
+     * while rows are still arriving.
+     */
+    pub(crate) fn absorb(
+        mut self,
+        nowMs : i64,
+        conns : Conns,
+        pool : Pool,
+        procs : Procs,
+        groups : Groups,
+        hosts : Hosts
+    ) : void {
+        if (!conns.ok || self.addrs == 0) {
+            return;
+        }
+        self.beginTick();
+        groups.beginTick();
+
+        for (r of 0..conns.count) {
+            self.attribute(nowMs, conns, r, pool, procs, groups, hosts);
+        }
+
+        self.settle(nowMs);
+        self.expire(nowMs);
+    }
+
+    /** Move this tick's live counts into `livePrev` and start fresh. */
+    fn beginTick(mut self) : void {
+        for (s of 0..self.count) {
+            self.livePrev[s] = self.liveNow[s];
+            self.liveNow[s] = 0;
+            self.sockets[s] = 0;
+        }
+    }
+
+    /** Fold one connection row into the endpoint it belongs to. */
+    fn attribute(
+        mut self,
+        nowMs : i64,
+        conns : Conns,
+        r : i32,
+        pool : Pool,
+        procs : Procs,
+        groups : Groups,
+        hosts : Hosts
+    ) : void {
+        let g : i32 = groups.forPid(pool, procs, conns.pid[r] as i64);
+        if (g < 0) {
+            return;
+        }
+
+        let proto : Proto = conns.proto[r];
+        let state : i32 = conns.state[r];
+        let kind : SocketKind = SocketKind::Peer;
+        let port : i32 = conns.remotePort[r];
+        if (proto == Proto::Udp) {
+            kind = SocketKind::Udp;
+            port = conns.localPort[r];
+        } else if (state == TCP_LISTEN) {
+            kind = SocketKind::Listen;
+            port = conns.localPort[r];
+        }
+
+        let raw : i64 = conns.addrAt(r);
+        let fam : i32 = shownFamily(raw, conns.family[r]);
+        let at : i64 = raw + shownOffset(raw, conns.family[r]);
+
+        let k : i64 = hashStep(
+            hashStep(hashStep(seed(), g as i64), ((proto as i32) * 8 + (kind as i32)) as i64),
+            port as i64
+        );
+        k = hashAddr(k, at, fam);
+
+        let s : i32 = self.index.get(k);
+        if (s < 0) {
+            s = self.mint(nowMs, k, g, kind, proto, fam, port, at);
+            if (s < 0) {
+                return;
+            }
+            self.host[s] = hosts.intern(at, fam);
+        }
+
+        self.state[s] = state;
+        self.lastMs[s] = nowMs;
+        self.sockets[s] = self.sockets[s] + 1;
+        if (proto == Proto::Udp || state == TCP_LISTEN || isLive(state)) {
+            self.liveNow[s] = self.liveNow[s] + 1;
+        }
+    }
+
+    /** Mint a row for a conversation never seen before. */
+    fn mint(
+        mut self,
+        nowMs : i64,
+        k : i64,
+        g : i32,
+        kind : SocketKind,
+        proto : Proto,
+        family : i32,
+        port : i32,
+        at : i64
+    ) : i32 {
+        if (self.count >= MAX_ENDPOINTS) {
+            self.dropped = self.dropped + 1;
+            return -1;
+        }
+        let s : i32 = self.count;
+        self.count = s + 1;
+
+        Mem::clear(self.addrAt(s), EP_ADDR_BYTES);
+        let n : i64 = 4;
+        if (family == 6) {
+            n = 16;
+        }
+        for (i of 0..n) {
+            Mem::putByte(self.addrAt(s), i, Mem::byteAt(at, i));
+        }
+
+        self.key[s] = k;
+        self.group[s] = g;
+        self.host[s] = -1;
+        self.kind[s] = kind;
+        self.proto[s] = proto;
+        self.family[s] = family;
+        self.port[s] = port;
+        self.state[s] = 0;
+        self.firstMs[s] = nowMs;
+        self.lastMs[s] = nowMs;
+        self.closedMs[s] = 0;
+        // A row is minted because a conversation was observed, so it starts
+        // at one visit, not zero — a connection first seen in `TIME_WAIT`
+        // already happened, and showing it as `×0` would say the opposite.
+        // `livePrev` starts raised so `settle` does not read this tick as a
+        // second arrival on top of the one recorded here.
+        self.hits[s] = 1;
+        self.liveNow[s] = 0;
+        self.livePrev[s] = 1;
+        self.sockets[s] = 0;
+        self.bytesIn[s] = 0;
+        self.bytesOut[s] = 0;
+        self.rateIn[s] = 0;
+        self.rateOut[s] = 0;
+        self.tickIn[s] = 0;
+        self.tickOut[s] = 0;
+        self.salience[s] = 0;
+        self.score[s] = -1;
+        self.reasons[s] = 0;
+        self.rhythm.reset(s);
+        self.rhythm.arrive(s, nowMs);
+        self.index.put(k, s);
+        return s;
+    }
+
+    /**
+     * Decide, per row, what this tick meant.
+     *
+     * An **arrival** is the idle → live edge, and only that edge. A socket
+     * that simply stays open is one arrival, not one per second — counting
+     * every tick would make a permanently-open connection the most regular
+     * thing on the machine, which is both true and useless.
+     */
+    fn settle(mut self, nowMs : i64) : void {
+        for (s of 0..self.count) {
+            if (self.liveNow[s] > 0 && self.livePrev[s] == 0) {
+                self.hits[s] = self.hits[s] + 1;
+                self.closedMs[s] = 0;
+                self.rhythm.arrive(s, nowMs);
+            } else if (self.liveNow[s] == 0 && self.livePrev[s] > 0) {
+                self.closedMs[s] = nowMs;
+            }
+            self.decay(s);
+        }
+    }
+
+    /**
+     * Fold this tick's byte counters into the smoothed rates and clear
+     * them. Without the ETW tier the counters are always zero and the rates
+     * decay to zero, which is the honest reading — no traffic figure is
+     * invented from the connection table, which carries none.
+     *
+     * The smoothing is a three-quarters carry: a rate reaches nine tenths
+     * of a step change in about eight ticks, which is fast enough to see a
+     * download start and slow enough that the column does not flicker.
+     */
+    fn decay(mut self, s : i32) : void {
+        self.rateIn[s] = (self.rateIn[s] * 3 + self.tickIn[s]) / 4;
+        self.rateOut[s] = (self.rateOut[s] * 3 + self.tickOut[s]) / 4;
+        self.tickIn[s] = 0;
+        self.tickOut[s] = 0;
+    }
+
+    /**
+     * Drop the rows nothing has seen for `LINGER_MS`. The hole is filled
+     * from the tail and the index is rebuilt wholesale rather than patched:
+     * a patch that missed one moved slot would answer a lookup with another
+     * endpoint's row, and nothing would go red.
+     */
+    fn expire(mut self, nowMs : i64) : void {
+        let moved : bool = false;
+        let s : i32 = 0;
+        while (s < self.count) {
+            if (self.liveNow[s] == 0 && nowMs - self.lastMs[s] > LINGER_MS) {
+                let last : i32 = self.count - 1;
+                if (s != last) {
+                    self.copySlot(s, last);
+                    moved = true;
+                }
+                self.count = last;
+            } else {
+                s = s + 1;
+            }
+        }
+        if (moved || self.index.size() > self.count) {
+            self.reindex();
+        }
+    }
+
+    /** Copy slot `from` onto slot `to`, rhythm ring included. */
+    fn copySlot(mut self, to : i32, from : i32) : void {
+        self.key[to] = self.key[from];
+        self.group[to] = self.group[from];
+        self.host[to] = self.host[from];
+        self.kind[to] = self.kind[from];
+        self.proto[to] = self.proto[from];
+        self.family[to] = self.family[from];
+        self.port[to] = self.port[from];
+        self.state[to] = self.state[from];
+        self.firstMs[to] = self.firstMs[from];
+        self.lastMs[to] = self.lastMs[from];
+        self.closedMs[to] = self.closedMs[from];
+        self.hits[to] = self.hits[from];
+        self.liveNow[to] = self.liveNow[from];
+        self.livePrev[to] = self.livePrev[from];
+        self.sockets[to] = self.sockets[from];
+        self.bytesIn[to] = self.bytesIn[from];
+        self.bytesOut[to] = self.bytesOut[from];
+        self.rateIn[to] = self.rateIn[from];
+        self.rateOut[to] = self.rateOut[from];
+        self.tickIn[to] = self.tickIn[from];
+        self.tickOut[to] = self.tickOut[from];
+        self.salience[to] = self.salience[from];
+        self.score[to] = self.score[from];
+        self.reasons[to] = self.reasons[from];
+        for (b of 0..EP_ADDR_BYTES) {
+            Mem::putByte(self.addrAt(to), b, Mem::byteAt(self.addrAt(from), b));
+        }
+        self.rhythm.copyFrom(to, from);
+    }
+
+    /** Rebuild the key → slot index from the surviving rows. */
+    fn reindex(mut self) : void {
+        self.index.clear();
+        for (s of 0..self.count) {
+            self.index.put(self.key[s], s);
+        }
+    }
+
+    /**
+     * Forget the journal. Everything still live is folded back in on the
+     * next tick with a fresh first-seen, so the reader gets a clean slate
+     * rather than an empty window — the point of clearing is to see what
+     * happens *from now*, not to hide what is happening.
+     */
+    pub(crate) fn forget(mut self) : void {
+        self.count = 0;
+        self.dropped = 0;
+        self.index.clear();
+    }
+
+    /** The row carrying `key`, or `-1`. */
+    pub(crate) fn bySlotKey(self, key : i64) : i32 {
+        return self.index.get(key);
+    }
+
+    /** Credit `n` received bytes to row `s` this tick — the ETW tier's door. */
+    fn creditIn(mut self, s : i32, n : i64) : void {
+        if (s >= 0 && s < self.count) {
+            self.bytesIn[s] = self.bytesIn[s] + n;
+            self.tickIn[s] = self.tickIn[s] + n;
+        }
+    }
+
+    /** Credit `n` sent bytes to row `s` this tick. */
+    fn creditOut(mut self, s : i32, n : i64) : void {
+        if (s >= 0 && s < self.count) {
+            self.bytesOut[s] = self.bytesOut[s] + n;
+            self.tickOut[s] = self.tickOut[s] + n;
+        }
+    }
+
+    /** Combined smoothed traffic of a row. */
+    pub(crate) fn rate(self, s : i32) : i64 {
+        return self.rateIn[s] + self.rateOut[s];
+    }
+
+    /** The reach class of row `s`'s address. */
+    pub(crate) fn reachOf(self, s : i32) : Reach {
+        return reach(self.addrAt(s), self.family[s]);
+    }
+
+    /** Release the address block, the index and the rhythm rings. */
+    pub(crate) fn dispose(mut self) : void {
+        if (self.addrs != 0) {
+            Mem::release(self.addrs);
+            self.addrs = 0;
+        }
+        self.index.close();
+        self.rhythm.dispose();
+    }
+}
+
+// ─── Ranking ─────────────────────────────────────────────────
+
+/** Repetition saturates here: past this, more visits say nothing new. */
+const HITS_FULL : i32 = 25;
+/** Traffic saturates here, in bytes per second. */
+const RATE_FULL : i64 = 1048576;
+/** How long a row takes to decay to no recency at all. */
+const RECENCY_MS : i64 = 600000;
+
+/**
+ * How much this row deserves the reader's attention, from 0 to 10000.
+ *
+ * The five terms are the five reasons an audit looks twice, weighted by how
+ * often each one is the reason something turned out to matter:
+ *
+ *   repetition  the endpoint keeps coming back
+ *   regularity  it comes back on a timer — the shape a person does not make
+ *   risk        the address itself is suspect
+ *   traffic     something substantial is moving
+ *   recency     it happened recently enough to still be actionable
+ *
+ * Risk is weighted highest and regularity second, because a big transfer to
+ * a well-known network is the normal state of a working machine, and a tiny
+ * one to an unnamed host every thirty seconds is not.
+ */
+fn salienceOf(e : Endpoints, hosts : Hosts, s : i32, nowMs : i64) : i64 {
+    let hits : i64 = (e.hits[s] as i64) * 1000 / (HITS_FULL as i64);
+    if (hits > 1000) {
+        hits = 1000;
+    }
+
+    let regular : i64 = 0;
+    if (hasRhythm(e.rhythm, s)) {
+        regular = e.rhythm.regular[s] as i64;
+    }
+
+    let risk : i64 = 0;
+    if (e.score[s] >= 0) {
+        risk = ((5 - e.score[s]) as i64) * 200;
+    }
+
+    let traffic : i64 = e.rate(s) * 1000 / RATE_FULL;
+    if (traffic > 1000) {
+        traffic = 1000;
+    }
+
+    let age : i64 = nowMs - e.lastMs[s];
+    let recency : i64 = 1000 - (age * 1000) / RECENCY_MS;
+    if (recency < 0) {
+        recency = 0;
+    }
+
+    let live : i64 = 0;
+    if (e.liveNow[s] > 0) {
+        live = 200;
+    }
+    return hits * 3 + regular * 3 + risk * 4 + traffic * 2 + recency + live;
+}
+
+/**
+ * Recompute every row's salience, carrying three quarters of the previous
+ * reading. The carry is the damping the whole tree depends on: a row whose
+ * salience jumps by a little does not overtake its neighbour on the next
+ * frame, and the reader's pointer stays over the row they were reading.
+ */
+fn rank(e : Endpoints, hosts : Hosts, nowMs : i64) : void {
+    for (s of 0..e.count) {
+        let now : i64 = salienceOf(e, hosts, s, nowMs);
+        e.salience[s] = (e.salience[s] * 3 + now) / 4;
+    }
+}
+
+/** The name of a kind, as the row's badge shows it. */
+fn kindBadge(kind : SocketKind, proto : Proto) : string {
+    if (kind == SocketKind::Listen) {
+        return "LISTEN";
+    }
+    if (proto == Proto::Udp) {
+        return "UDP";
+    }
+    return "TCP";
+}

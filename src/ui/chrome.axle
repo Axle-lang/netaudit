@@ -1,0 +1,364 @@
+// ui/chrome — everything around the tree: the title bar and its tier
+// badges, the four headline cards, the toolbar, and the status bar.
+//
+// Nothing in this file decides anything. It reads `model/pulse`, `app` and
+// `sys/tiers` and draws what they say, with every figure formatted into
+// `app.scratch` so a repaint allocates nothing.
+//
+// The tier badges in the title bar are load-bearing rather than decorative.
+// Two of the three readings this program can take are unavailable on a
+// normal machine, and a window that hid that would let an empty byte column
+// be read as "this program sent nothing" when it means "nothing measured
+// bytes". The badges are always visible, and hovering one says why it is in
+// the state it is in.
+
+use smalt::{Fmt, Frame, Rect, Color, BitmapFont};
+use crate::fmt;
+use crate::ui::parts;
+use crate::app::{App, Modal, Say, sayText, sortName, sortNote};
+use crate::model::view;
+use crate::model::pulse;
+use crate::enrich::queue::{Queue, troubleNote};
+use crate::sys::tiers::{Tier, TierState, Tiers, tierName};
+use crate::theme::{WIN_W, WIN_H, PAD, TITLE_H, CARD_Y, CARD_H, BAR_Y, BAR_H, TREE_Y, STATUS_H, C_BG, C_CARD, C_HEADER, C_LINE, C_TEXT, C_DIM, C_FAINT, C_ACCENT, C_OK, C_HOT, C_MEM, C_TCP};
+
+/** Card width — four across the content area with 12 px gutters. */
+const CARD_W : i32 = 343;
+/** Left edge of the second card. */
+const CARD2_X : i32 = 371;
+/** Left edge of the third card. */
+const CARD3_X : i32 = 726;
+/** Left edge of the fourth card. */
+const CARD4_X : i32 = 1081;
+/** Width of the filter field. */
+const FILTER_W : i32 = 360;
+/** Left edge of the sort chip. */
+const SORT_X : i32 = 392;
+/** Left edge of the two visibility toggles. */
+const TOGGLE_X : i32 = 560;
+/** Width of one visibility toggle. */
+const TOGGLE_W : i32 = 132;
+
+/** Left edge of the first tier badge. */
+const TIER_X : i32 = 1076;
+/** Width of one tier badge. */
+const TIER_W : i32 = 62;
+
+/** Paint the page background. */
+fn background(f : Frame) : void {
+    f.fillRect(Rect::make(0, 0, WIN_W, WIN_H), C_BG);
+}
+
+/** Title bar: the product mark, the three tier badges, and the live state. */
+fn titleBar(f : Frame, ui : BitmapFont, t : Tiers, a : App) : void {
+    f.fillRect(Rect::make(0, 0, WIN_W, TITLE_H), C_HEADER);
+    f.hLine(0, TITLE_H - 1, WIN_W, C_LINE);
+    f.fillRound(Rect::make(PAD, 14, 16, 16), 4, C_ACCENT);
+    f.fillRect(Rect::make(PAD + 4, 18, 8, 8), C_HEADER);
+
+    let pen : i32 = ui.draw(f, PAD + 26, 27, "Axle Network Audit", C_TEXT);
+    ui.draw(f, pen + 12, 27, "what each program on this machine is talking to", C_FAINT);
+
+    tierBadge(f, ui, TIER_X, Tier::Poll, t);
+    tierBadge(f, ui, TIER_X + TIER_W, Tier::Dns, t);
+    tierBadge(f, ui, TIER_X + TIER_W * 2, Tier::Etw, t);
+
+    if (a.paused) {
+        f.fillRound(Rect::make(WIN_W - PAD - 74, 13, 74, 18), 9, Color::mix(C_HEADER, C_HOT, 1, 3));
+        ui.draw(f, WIN_W - PAD - 60, 26, "PAUSED", C_HOT);
+        return;
+    }
+    f.fillRound(Rect::make(WIN_W - PAD - 60, 18, 8, 8), 4, C_OK);
+    ui.draw(f, WIN_W - PAD - 46, 26, "LIVE", C_DIM);
+}
+
+/** One tier badge: a filled dot when the reading is running, hollow when not. */
+fn tierBadge(f : Frame, ui : BitmapFont, x : i32, which : Tier, t : Tiers) : void {
+    let on : bool = t.stateOf(which) == TierState::On;
+    let ink : i32 = C_FAINT;
+    if (on) {
+        ink = C_ACCENT;
+    }
+    if (on) {
+        f.fillRound(Rect::make(x, 19, 6, 6), 3, ink);
+    } else {
+        f.ring(x + 3, 22, 3, ink);
+    }
+    ui.draw(f, x + 12, 26, tierName(which), ink);
+}
+
+/** Whether `(mx, my)` is over tier badge `which` (0 POLL, 1 DNS, 2 ETW). */
+fn tierAt(mx : i32, my : i32) : (over: bool, which: Tier) {
+    if (my < 12 || my >= 32 || mx < TIER_X) {
+        return (false, Tier::Poll);
+    }
+    return match (mx - TIER_X) / TIER_W {
+        0 => (true, Tier::Poll),
+        1 => (true, Tier::Dns),
+        2 => (true, Tier::Etw),
+        _ => (false, Tier::Poll),
+    };
+}
+
+/** One card body: rounded surface, small caps label. */
+fn cardBox(f : Frame, ui : BitmapFont, x : i32, label : string) : void {
+    f.fillRound(Rect::make(x, CARD_Y, CARD_W, CARD_H), 8, C_CARD);
+    ui.draw(f, x + 14, CARD_Y + 21, label, C_DIM);
+}
+
+/** The four headline cards. */
+fn cards(f : Frame, ui : BitmapFont, big : BitmapFont, p : Pulse, t : Tiers, a : App) : void {
+    liveCard(f, ui, big, p, a);
+    programCard(f, ui, big, p, a);
+    reachCard(f, ui, big, p, a);
+    flagCard(f, ui, big, p, t, a);
+}
+
+/**
+ * Live conversations, with two minutes of them behind the figure. The trace
+ * is the card's real content: a flat line is a machine at rest, and a step
+ * is something that started.
+ */
+fn liveCard(f : Frame, ui : BitmapFont, big : BitmapFont, p : Pulse, a : App) : void {
+    cardBox(f, ui, PAD, "LIVE CONVERSATIONS");
+    parts::spark(f, PAD + 1, CARD_Y + 60, CARD_W - 2, CARD_H - 66, p.liveHist, p.histLen, C_ACCENT);
+    a.scratch.reset();
+    a.scratch.decimal(p.live as i64);
+    parts::figure(f, big, PAD + 14, CARD_Y + 54, a.scratch, C_TEXT);
+
+    a.scratch.reset();
+    a.scratch.decimal(p.journal as i64);
+    let right : i32 = PAD + CARD_W - 14;
+    ui.drawRight(f, right, CARD_Y + 52, " in the journal", C_FAINT);
+    parts::figureRight(
+        f, ui, right - ui.width(" in the journal"),
+        CARD_Y + 52, a.scratch, C_DIM
+    );
+}
+
+/** How many programs, and how many processes they add up to. */
+fn programCard(f : Frame, ui : BitmapFont, big : BitmapFont, p : Pulse, a : App) : void {
+    cardBox(f, ui, CARD2_X, "PROGRAMS");
+    a.scratch.reset();
+    a.scratch.decimal(p.programs as i64);
+    parts::figure(f, big, CARD2_X + 14, CARD_Y + 54, a.scratch, C_TEXT);
+
+    a.scratch.reset();
+    a.scratch.decimal(p.processes as i64);
+    let pen : i32 = parts::figure(f, ui, CARD2_X + 14, CARD_Y + 80, a.scratch, C_DIM);
+    ui.draw(f, pen, CARD_Y + 80, " processes holding sockets", C_FAINT);
+}
+
+/** How far the traffic goes: distinct hosts, networks, countries. */
+fn reachCard(f : Frame, ui : BitmapFont, big : BitmapFont, p : Pulse, a : App) : void {
+    cardBox(f, ui, CARD3_X, "REACH");
+    a.scratch.reset();
+    a.scratch.decimal(p.publicHosts as i64);
+    let pen : i32 = parts::figure(f, big, CARD3_X + 14, CARD_Y + 54, a.scratch, C_TEXT);
+    ui.draw(f, pen + 6, CARD_Y + 54, "addresses", C_FAINT);
+
+    a.scratch.reset();
+    a.scratch.decimal(p.networks as i64);
+    pen = parts::figure(f, ui, CARD3_X + 14, CARD_Y + 80, a.scratch, C_DIM);
+    pen = ui.draw(f, pen, CARD_Y + 80, " networks", C_FAINT);
+    a.scratch.reset();
+    a.scratch.decimal(p.countries as i64);
+    pen = parts::figure(f, ui, pen + 10, CARD_Y + 80, a.scratch, C_DIM);
+    ui.draw(f, pen, CARD_Y + 80, " countries", C_FAINT);
+}
+
+/**
+ * What is worth looking at. When no lookup has come back the card says so
+ * rather than showing a zero: "nothing flagged" and "nothing checked" are
+ * opposite states and must not share a face.
+ */
+fn flagCard(f : Frame, ui : BitmapFont, big : BitmapFont, p : Pulse, t : Tiers, a : App) : void {
+    cardBox(f, ui, CARD4_X, "FLAGGED");
+    parts::spark(
+        f,
+        CARD4_X + 1,
+        CARD_Y + 60,
+        CARD_W - 2,
+        CARD_H - 66,
+        p.flagHist,
+        p.histLen,
+        C_HOT
+    );
+    if (p.worst < 0) {
+        ui.draw(f, CARD4_X + 14, CARD_Y + 54, "nothing checked yet", C_FAINT);
+        if (p.pending > 0) {
+            a.scratch.reset();
+            a.scratch.decimal(p.pending as i64);
+            let pen : i32 = parts::figure(f, ui, CARD4_X + 14, CARD_Y + 80, a.scratch, C_DIM);
+            ui.draw(f, pen, CARD_Y + 80, " addresses waiting on a lookup", C_FAINT);
+        } else {
+            ui.draw(f, CARD4_X + 14, CARD_Y + 80, "no routable address seen yet", C_FAINT);
+        }
+        return;
+    }
+
+    let ink : i32 = parts::scoreColor(p.worst);
+    a.scratch.reset();
+    a.scratch.decimal(p.flagged as i64);
+    let pen : i32 = parts::figure(f, big, CARD4_X + 14, CARD_Y + 54, a.scratch, ink);
+    ui.draw(f, pen + 6, CARD_Y + 54, "endpoints", C_FAINT);
+
+    let bar : i32 = parts::pips(f, CARD4_X + 14, CARD_Y + 76, p.worst);
+    a.scratch.reset();
+    fmt::outOfFive(a.scratch, p.worst);
+    pen = parts::figure(f, ui, bar + 8, CARD_Y + 80, a.scratch, ink);
+    ui.draw(f, pen + 6, CARD_Y + 80, "worst seen", C_FAINT);
+}
+
+/** Toolbar: the filter field, the sort chip, the two visibility toggles. */
+fn toolbar(f : Frame, ui : BitmapFont, v : View, a : App) : void {
+    let edge : i32 = C_LINE;
+    if (a.typing) {
+        edge = C_ACCENT;
+    }
+    f.fillRound(Rect::make(PAD, BAR_Y, FILTER_W, BAR_H), 6, C_HEADER);
+    f.roundBorder(Rect::make(PAD, BAR_Y, FILTER_W, BAR_H), 6, edge);
+    f.ring(PAD + 21, BAR_Y + 14, 5, C_DIM);
+    f.fillRect(Rect::make(PAD + 25, BAR_Y + 18, 5, 2), C_DIM);
+
+    let base : i32 = BAR_Y + 21;
+    if (a.filterLen == 0) {
+        ui.draw(f, PAD + 36, base, "Filter by program, host, network or address", C_FAINT);
+        if (!a.typing) {
+            ui.drawRight(f, PAD + FILTER_W - 12, base, "/", C_FAINT);
+        }
+    } else {
+        let pen : i32 = ui.drawBytes(f, PAD + 36, base, a.filter, 0, a.filterLen, C_TEXT);
+        if (a.typing) {
+            f.fillRect(Rect::make(pen + 2, base - 11, 1, 14), C_ACCENT);
+        }
+        // A filter with no visible way out is a filter a reader has to guess
+        // their way out of. The cross is that way out; Esc is the other.
+        cross(f, PAD + FILTER_W - 20, BAR_Y + 16, C_DIM);
+    }
+
+    f.fillRound(Rect::make(SORT_X, BAR_Y, 148, BAR_H), 6, C_HEADER);
+    let pen : i32 = ui.draw(f, SORT_X + 12, base, "sort", C_FAINT);
+    ui.draw(f, pen + 6, base, sortName(a.sortKey), C_ACCENT);
+    ui.draw(f, SORT_X + 132, base, "S", C_FAINT);
+
+    toggle(f, ui, TOGGLE_X, "local traffic", a.showLocal, v.hiddenLocal, a);
+    toggle(f, ui, TOGGLE_X + TOGGLE_W + 8, "open sockets", a.showBound, v.hiddenBound, a);
+
+    let right : i32 = WIN_W - PAD;
+    a.scratch.reset();
+    a.scratch.decimal(v.shown as i64);
+    ui.drawRight(f, right, base, " endpoints shown", C_FAINT);
+    parts::figureRight(
+        f, ui, right - ui.width(" endpoints shown"), base, a.scratch, C_TEXT
+    );
+    ui.drawRight(f, right, TREE_Y - 6, sortNote(a.sortKey), C_FAINT);
+}
+
+/**
+ * One visibility toggle, carrying the count of what it is hiding. The count
+ * is the point: a filter whose effect is invisible is a filter that gets
+ * blamed for missing data.
+ */
+fn toggle(f : Frame, ui : BitmapFont, x : i32, label : string, on : bool, hidden : i32, a : App) : void {
+    let ink : i32 = C_FAINT;
+    let back : i32 = C_BG;
+    if (on) {
+        ink = C_TCP;
+        back = Color::mix(C_BG, C_TCP, 1, 5);
+    }
+    f.fillRound(Rect::make(x, BAR_Y, TOGGLE_W, BAR_H), 6, back);
+    f.roundBorder(Rect::make(x, BAR_Y, TOGGLE_W, BAR_H), 6, Color::mix(C_BG, C_LINE, 2, 3));
+    let pen : i32 = ui.draw(f, x + 12, BAR_Y + 21, label, ink);
+    if (!on && hidden > 0) {
+        a.scratch.reset();
+        a.scratch.decimal(hidden as i64);
+        parts::figureRight(f, ui, x + TOGGLE_W - 12, BAR_Y + 21, a.scratch, C_DIM);
+    }
+}
+
+/** A small ×, four strokes, for the filter's clear control. */
+fn cross(f : Frame, cx : i32, cy : i32, color : i32) : void {
+    for (i of 0..9) {
+        f.plot(cx - 4 + i, cy - 4 + i, color);
+        f.plot(cx + 4 - i, cy - 4 + i, color);
+    }
+}
+
+/** Whether `(mx, my)` is on the filter's clear control. */
+fn onFilterClear(mx : i32, my : i32) : bool {
+    return mx >= PAD + FILTER_W - 30 && mx < PAD + FILTER_W
+        && my >= BAR_Y && my < BAR_Y + BAR_H;
+}
+
+/** Whether `(mx, my)` is inside the filter field. */
+fn onFilter(mx : i32, my : i32) : bool {
+    return mx >= PAD && mx < PAD + FILTER_W && my >= BAR_Y && my < BAR_Y + BAR_H;
+}
+
+/** Whether `(mx, my)` is inside the sort chip. */
+fn onSort(mx : i32, my : i32) : bool {
+    return mx >= SORT_X && mx < SORT_X + 148 && my >= BAR_Y && my < BAR_Y + BAR_H;
+}
+
+/** Which visibility toggle `(mx, my)` is inside: 0 loopback, 1 sockets, -1 neither. */
+fn onToggle(mx : i32, my : i32) : i32 {
+    if (my < BAR_Y || my >= BAR_Y + BAR_H) {
+        return -1;
+    }
+    if (mx >= TOGGLE_X && mx < TOGGLE_X + TOGGLE_W) {
+        return 0;
+    }
+    if (mx >= TOGGLE_X + TOGGLE_W + 8 && mx < TOGGLE_X + TOGGLE_W * 2 + 8) {
+        return 1;
+    }
+    return -1;
+}
+
+/** Status bar: what just happened, and what the keys do. */
+fn statusBar(f : Frame, ui : BitmapFont, a : App, p : Pulse, q : Queue) : void {
+    let y : i32 = WIN_H - STATUS_H;
+    f.fillRect(Rect::make(0, y, WIN_W, STATUS_H), C_HEADER);
+    f.hLine(0, y, WIN_W, C_LINE);
+    let base : i32 = y + 19;
+
+    if (a.say != Say::None) {
+        f.fillRound(Rect::make(PAD, y + 6, 6, 16), 3, C_ACCENT);
+        ui.draw(f, PAD + 14, base, sayText(a.say, a.showLocal, a.showBound), C_TEXT);
+    } else if (q.lastError) {
+        // The one standing condition worth interrupting the hint line for:
+        // rows that will stay unnamed until it clears, through no fault of
+        // the machine being audited.
+        f.fillRound(Rect::make(PAD, y + 6, 6, 16), 3, C_HOT);
+        ui.draw(f, PAD + 14, base, troubleNote(q), C_DIM);
+    } else if (p.dropped > 0) {
+        // The journal is full. Saying so matters more than any hint: from
+        // here on the tree is missing rows, and a reader who does not know
+        // that will read an absence as evidence.
+        f.fillRound(Rect::make(PAD, y + 6, 6, 16), 3, C_HOT);
+        a.scratch.reset();
+        a.scratch.decimal(p.dropped as i64);
+        let pen : i32 = ui.draw(f, PAD + 14, base, "journal full — ", C_DIM);
+        pen = parts::figure(f, ui, pen, base, a.scratch, C_HOT);
+        ui.draw(f, pen, base, " conversations not recorded. C clears it.", C_FAINT);
+    } else if (p.pending > 0) {
+        a.scratch.reset();
+        a.scratch.decimal(p.pending as i64);
+        let pen : i32 = parts::figure(f, ui, PAD, base, a.scratch, C_DIM);
+        pen = ui.draw(f, pen, base, " addresses still to look up", C_FAINT);
+        if (q.resolved > 0) {
+            pen = ui.draw(f, pen, base, ", ", C_FAINT);
+            a.scratch.reset();
+            a.scratch.decimal(q.resolved as i64);
+            pen = parts::figure(f, ui, pen, base, a.scratch, C_DIM);
+            ui.draw(f, pen, base, " done.", C_FAINT);
+        } else {
+            ui.draw(f, pen, base, ".", C_FAINT);
+        }
+    } else {
+        ui.draw(f, PAD, base, "Up / Down  move     Enter  detail     O  open the folder", C_FAINT);
+    }
+
+    let hint : string = "Right / Left  fold     8  fold all     S  sort     L  local     B  sockets     /  filter     Space  pause     F1  keys     Esc  quit";
+    ui.drawRight(f, WIN_W - PAD, base, hint, C_FAINT);
+}

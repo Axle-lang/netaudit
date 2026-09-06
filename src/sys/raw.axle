@@ -1,0 +1,44 @@
+// sys/raw — the whole `unsafe` surface of this program, in one file.
+//
+// smalt owns the raw reads and writes: `Mem` is its public escape hatch,
+// every accessor is `static`, and the `unsafe` is on its side of the call.
+// What it cannot supply is the `ptr` type itself — `kernel::raw` is
+// `pub(crate)`, deliberately — and this program calls four Windows
+// libraries smalt has never heard of. `GetExtendedTcpTable`,
+// `DnsGetCacheDataTable`, `StartTraceW` and `ShellExecuteW` take and
+// answer pointers, so the four views between an address and a `ptr` live
+// here and nowhere else.
+//
+// `unsafe` is per-function in Axle (E0707 — it does not propagate across
+// a call), which is what makes that confinement enforceable rather than
+// aspirational: the grep for `unsafe` in this program returns this file
+// and the `extern "C"` blocks, and nothing in the model or the UI.
+
+/** A null `ptr`, for the optional out-parameters. */
+fn nullPtr() : ptr {
+    unsafe {
+        let z : i64 = 0;
+        return z as ptr;
+    }
+}
+
+/** View the integer address `addr` as a `ptr`. */
+fn asPtr(addr : i64) : ptr {
+    unsafe {
+        return addr as ptr;
+    }
+}
+
+/** The integer address of `p` — what `Mem` reads and writes through. */
+fn addrOf(p : ptr) : i64 {
+    unsafe {
+        return p as i64;
+    }
+}
+
+/** True when `p` is the null pointer (a failed create / open call). */
+fn isNull(p : ptr) : bool {
+    unsafe {
+        return (p as i64) == 0;
+    }
+}

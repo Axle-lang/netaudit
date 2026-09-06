@@ -1,0 +1,293 @@
+// model/pool — the readings this program takes of interned text.
+//
+// Every piece of text shown — a program name, an executable path, a
+// hostname, an AS name, a country — lives as bytes in one append-only run
+// and is referred to afterwards by an `(offset, length)` pair. The UI
+// draws straight out of it (`BitmapFont::drawBytes`), the filter matches
+// against it, and a repaint allocates nothing.
+//
+// The run itself is smalt's `BytePool`: the block, the append, the
+// `string` door and the case-folded search. What is here is the half a
+// network audit needs and a library cannot know about — a byte range
+// lifted out of an HTTP response, a UTF-16 name from a Windows record,
+// the FNV-1a fold the identity indexes are keyed on, the collation the
+// tree sorts by, and where an executable path's last separator is.
+//
+// It is append-only and never compacted, and that is safe here for a
+// reason worth stating: unlike a process list, the things this program
+// names are **stable identities** — an executable path, an IP address, a
+// hostname — each interned exactly once for the life of the session. The
+// run grows with the number of distinct things seen, which converges
+// within a minute of starting.
+//
+// Nothing is ever interned speculatively. A caller that does not yet know
+// whether a name will be wanted transcodes it into a block of its own and
+// appends only once a row has taken it — which is why there is no retract
+// here, and no offset whose validity depends on nothing having been
+// interned since.
+
+use smalt::{BytePool, Mem};
+
+/** Bytes the run starts with. */
+const POOL_CAP : i64 = 4194304;
+
+/** What replaces a byte the glyph tables cannot draw. */
+const UNKNOWN_BYTE : i32 = 63; // '?'
+
+/**
+ * The staging block a transcode lands in before it is appended.
+ *
+ * Longer than the longest thing this program interns — an executable path
+ * — so `putRange` and `putWide` never have to decide what to do with a
+ * value that fits the run but not the stage.
+ */
+const STAGE_BYTES : i64 = 1024;
+
+/**
+ * The program's interned text.
+ *
+ * A thin skin over `BytePool`: it holds the run and forwards the four
+ * operations a caller shares with every other program built on smalt, so
+ * that the six below can be about this one.
+ */
+class Pool : Closeable {
+    bytes : BytePool = new BytePool(POOL_CAP),
+    stage : i64 = Mem::take(STAGE_BYTES),
+
+    /** The run's address — what `drawBytes` and `Mem` read through. */
+    pub(crate) fn base(self) : i64 {
+        return self.bytes.base();
+    }
+
+    /** Bytes interned so far. */
+    pub(crate) fn used(self) : i64 {
+        return self.bytes.used();
+    }
+
+    /** Whether `n` more bytes fit. */
+    fn room(self, n : i64) : bool {
+        return self.bytes.room(n);
+    }
+
+    /** The byte at `off`. */
+    pub(crate) fn at(self, off : i64) : i32 {
+        return self.bytes.byteAt(off);
+    }
+
+    /**
+     * Copy `n` bytes from `src` and answer the offset they landed at, or
+     * `-1` when the run is full. A caller that gets `-1` shows the thing
+     * without its name rather than dropping the row: a hostname the pool
+     * could not hold is still an endpoint worth auditing.
+     */
+    pub(crate) fn put(mut self, src : i64, n : i32) : i64 {
+        return self.bytes.put(src, n);
+    }
+
+    /** Intern the UTF-8 bytes of `s`, at most `max` of them. */
+    pub(crate) fn putString(mut self, s : string, max : i32) : i64 {
+        return self.bytes.putString(s, max);
+    }
+
+    /** How many bytes `putString` would intern — the length of the pair. */
+    pub(crate) fn measure(self, s : string, max : i32) : i32 {
+        return self.bytes.measure(s, max);
+    }
+
+    /**
+     * Intern the bytes of `s` between `from` and `to`, at most `max` of
+     * them.
+     *
+     * How a value is lifted out of an HTTP response without ever cutting a
+     * `string` out of it: the response is one `string` that dies at the end
+     * of the call, and what survives is bytes in the run.
+     */
+    pub(crate) fn putRange(mut self, s : string, from : i64, to : i64, max : i32) : i64 {
+        let n : i64 = to - from;
+        if (n <= 0) {
+            return -1;
+        }
+        if (n > (max as i64)) {
+            n = max as i64;
+        }
+        if (!self.room(n)) {
+            return -1;
+        }
+        if (n > STAGE_BYTES) {
+            n = STAGE_BYTES;
+        }
+        for (i of 0..n) {
+            let c : i32 = s.byteAt(from + i);
+            if (c < 32 || c > 126) {
+                c = UNKNOWN_BYTE;
+            }
+            Mem::putByte(self.stage, i, c);
+        }
+        return self.bytes.put(self.stage, n as i32);
+    }
+
+    /** Intern `chars` UTF-16 code units from `src` as drawable bytes. */
+    pub(crate) fn putWide(mut self, src : i64, chars : i32, max : i32) : i64 {
+        let n : i32 = chars;
+        if (n > max) {
+            n = max;
+        }
+        if (n > (STAGE_BYTES as i32)) {
+            n = STAGE_BYTES as i32;
+        }
+        if (n <= 0 || !self.room(n as i64)) {
+            return -1;
+        }
+        wideInto(self.stage, src, n);
+        return self.bytes.put(self.stage, n);
+    }
+
+    /** An FNV-1a hash of an interned span, for the identity indexes. */
+    pub(crate) fn hash(self, off : i64, len : i32) : i64 {
+        let base : i64 = self.base();
+        let h : i64 = 0x811C9DC5;
+        let i : i64 = 0;
+        while (i < (len as i64)) {
+            h = (h ^ (Mem::byteAt(base, off + i) as i64)) * 16777619;
+            h = h & 0x7FFFFFFFFFFF;
+            i = i + 1;
+        }
+        return h;
+    }
+
+    /**
+     * Whether the span holds `needle` (`needleLen` bytes at `needle`),
+     * ignoring case.
+     *
+     * The filter's inner loop, and it runs over the run rather than over
+     * `string`s so typing in the filter field does not allocate.
+     */
+    pub(crate) fn contains(self, off : i64, len : i32, needle : i64, needleLen : i32) : bool {
+        if (off < 0) {
+            return needleLen == 0;
+        }
+        return containsAt(self.base() + off, len, needle, needleLen);
+    }
+
+    /** Case-insensitive three-way comparison of two interned spans. */
+    pub(crate) fn order(self, a : i64, alen : i32, b : i64, blen : i32) : i32 {
+        let base : i64 = self.base();
+        let n : i32 = alen;
+        if (blen < n) {
+            n = blen;
+        }
+        let i : i64 = 0;
+        while (i < (n as i64)) {
+            let x : i32 = lower(Mem::byteAt(base, a + i));
+            let y : i32 = lower(Mem::byteAt(base, b + i));
+            if (x != y) {
+                if (x < y) {
+                    return -1;
+                }
+                return 1;
+            }
+            i = i + 1;
+        }
+        if (alen < blen) {
+            return -1;
+        }
+        if (alen > blen) {
+            return 1;
+        }
+        return 0;
+    }
+
+    /**
+     * The offset of the last path separator in the span, or `-1`.
+     *
+     * The program name shown in the tree is the tail of the executable
+     * path, so a group carries one interned string and shows two readings
+     * of it.
+     */
+    pub(crate) fn lastSeparator(self, off : i64, len : i32) : i32 {
+        let base : i64 = self.base();
+        let i : i32 = len - 1;
+        while (i >= 0) {
+            let c : i32 = Mem::byteAt(base, off + (i as i64));
+            if (c == 92 || c == 47) { // '\' or '/'
+                return i;
+            }
+            i = i - 1;
+        }
+        return -1;
+    }
+
+    /** Release the run and the stage. */
+    fn close(self) : void {
+        self.bytes.close();
+        if (self.stage != 0) {
+            Mem::release(self.stage);
+        }
+    }
+}
+
+/**
+ * Transcode `n` UTF-16 code units at `src` into drawable bytes at `dst`.
+ *
+ * Anything outside the printable ASCII the glyph tables carry becomes
+ * `?` — a name shown with an unknown character reads better than a name
+ * with a hole in it. Split out of `putWide` because a caller that does
+ * not yet know whether the name will be wanted transcodes it into a block
+ * of its own first, and only appends once a row has taken it.
+ */
+fn wideInto(dst : i64, src : i64, n : i32) : void {
+    for (i of 0..n) {
+        let lo : i32 = Mem::byteAt(src, (i as i64) * 2);
+        let hi : i32 = Mem::byteAt(src, (i as i64) * 2 + 1);
+        let c : i32 = lo | (hi << 8);
+        if (c < 32 || c > 126) {
+            c = UNKNOWN_BYTE;
+        }
+        Mem::putByte(dst, i as i64, c);
+    }
+}
+
+/**
+ * Whether the `len` bytes at `hay` hold the `needleLen` bytes at `needle`,
+ * ignoring case.
+ *
+ * Kept free of the pool so the filter can also be matched against a
+ * formatted address sitting in a scratch buffer — typing `142.250` must
+ * find the row whose address is not in the pool at all, which is the one
+ * thing `BytePool::containsFold` cannot be asked, since its haystack is
+ * always an offset into the run.
+ */
+fn containsAt(hay : i64, len : i32, needle : i64, needleLen : i32) : bool {
+    if (needleLen == 0) {
+        return true;
+    }
+    if (needleLen > len) {
+        return false;
+    }
+    let start : i32 = 0;
+    while (start <= len - needleLen) {
+        let i : i32 = 0;
+        let hit : bool = true;
+        while (i < needleLen && hit) {
+            let a : i32 = lower(Mem::byteAt(hay, (start + i) as i64));
+            let b : i32 = lower(Mem::byteAt(needle, i as i64));
+            if (a != b) {
+                hit = false;
+            }
+            i = i + 1;
+        }
+        if (hit) {
+            return true;
+        }
+        start = start + 1;
+    }
+    return false;
+}
+
+/** ASCII lower-casing — the fold every search and sort in this program agrees on. */
+fn lower(c : i32) : i32 {
+    if (c >= 65 && c <= 90) {
+        return c + 32;
+    }
+    return c;
+}

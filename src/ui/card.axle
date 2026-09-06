@@ -1,0 +1,195 @@
+// ui/card — a cursor that content is emitted against, twice.
+//
+// Both floating surfaces in this window — the hover tooltip and the endpoint
+// detail — have the same problem: the box must be sized from its lines, and
+// the lines are only known by walking the model.
+//
+// The usual answer is to build an array of lines and then measure it. That
+// would mean an array of `string`, which for text that is almost entirely
+// literals means a refcount touched on every frame of a hover. So instead
+// the same builder runs **twice** against this cursor: once with `drawing`
+// false, which only measures, and again over the box that measurement
+// produced. One description of the content, no storage, and the two passes
+// cannot disagree about what is on the card because they are the same code.
+//
+// The cursor carries only its own position and tallies. The frame, the face
+// and the pool are handed to each emitter rather than held here: they are
+// borrowed for the length of a call, and a field would outlive the borrow.
+
+use smalt::{Scratch, Frame, BitmapFont};
+use crate::ui::parts;
+use crate::model::pool;
+use crate::theme::{C_DIM, C_FAINT, C_LINE};
+
+/** Padding inside a card. */
+const CARD_PAD : i32 = 14;
+/** Pitch of the lines inside it. */
+const CARD_LINE : i32 = 19;
+/** Extra space a section heading takes above itself. */
+const CARD_GAP : i32 = 10;
+/** Widest a card gets before its lines are elided. */
+const CARD_MAX_W : i32 = 700;
+
+/** The measuring / drawing cursor a card's content is emitted against. */
+class Card {
+    pub(crate) x : i32,
+    pub(crate) base : i32,
+    pub(crate) w : i32,
+    h : i32,
+    pub(crate) lines : i32,
+    pub(crate) drawing : bool,
+
+    constructor() {
+        self.x = 0;
+        self.base = 0;
+        self.w = 0;
+        self.h = 0;
+        self.lines = 0;
+        self.drawing = false;
+    }
+
+    /** Start a measuring pass. */
+    pub(crate) fn measure(mut self) : void {
+        self.w = 0;
+        self.h = 0;
+        self.lines = 0;
+        self.drawing = false;
+    }
+
+    /**
+     * Start a drawing pass at `(x, base)`. `lines` is reset with it: the two
+     * passes must agree on which line is the first, because that is what
+     * decides whether a section heading gets air above it — and a heading
+     * that measured without the gap and drew with it puts every line below
+     * it outside the box.
+     */
+    pub(crate) fn paint(mut self, x : i32, base : i32) : void {
+        self.x = x;
+        self.base = base;
+        self.lines = 0;
+        self.drawing = true;
+    }
+
+    /** Take one line of width `w`, having advanced `above` pixels first. */
+    pub(crate) fn took(mut self, w : i32, above : i32) : void {
+        self.lines = self.lines + 1;
+        if (self.drawing) {
+            self.base = self.base + CARD_LINE + above;
+            return;
+        }
+        if (w > self.w) {
+            self.w = w;
+        }
+        self.h = self.h + CARD_LINE + above;
+    }
+
+    /** The box this content needs, in pixels. */
+    pub(crate) fn boxWidth(self) : i32 {
+        let w : i32 = self.w + CARD_PAD * 2;
+        if (w > CARD_MAX_W) {
+            return CARD_MAX_W;
+        }
+        return w;
+    }
+
+    /** The box's height. */
+    pub(crate) fn boxHeight(self) : i32 {
+        return self.h + CARD_PAD * 2 - 4;
+    }
+
+    /** Where the first line's baseline sits inside a box at `y`. */
+    pub(crate) fn firstBase(self, y : i32) : i32 {
+        return y + CARD_PAD + 8;
+    }
+
+    /** How wide a line may be before it is elided. */
+    pub(crate) fn room(self) : i32 {
+        return CARD_MAX_W - CARD_PAD * 2;
+    }
+}
+
+/** Emit one line of literal text; an empty string emits nothing. */
+fn line(c : Card, f : Frame, ui : BitmapFont, s : string, ink : i32) : void {
+    if (s.byteLength == 0) {
+        return;
+    }
+    if (c.drawing) {
+        ui.draw(f, c.x, c.base, s, ink);
+    }
+    c.took(ui.width(s), 0);
+}
+
+/** Emit one line drawn from a pool span; an absent span emits nothing. */
+fn spanLine(c : Card, f : Frame, ui : BitmapFont, pool : Pool, off : i64, len : i32, ink : i32) : void {
+    if (off < 0 || len <= 0) {
+        return;
+    }
+    if (c.drawing) {
+        ui.drawBytesElided(f, c.x, c.base, pool.base() + off, 0, len, c.room(), ink);
+    }
+    c.took(ui.widthBytes(pool.base() + off, 0, len), 0);
+}
+
+/** Emit `label`, then a pool span on the same line. */
+fn spanField(
+    c : Card,
+    f : Frame,
+    ui : BitmapFont,
+    pool : Pool,
+    label : string,
+    off : i64,
+    len : i32,
+    ink : i32
+) : void {
+    if (off < 0 || len <= 0) {
+        return;
+    }
+    let lw : i32 = ui.width(label);
+    if (c.drawing) {
+        ui.draw(f, c.x, c.base, label, C_FAINT);
+        ui.drawBytesElided(f, c.x + lw, c.base, pool.base() + off, 0, len, c.room() - lw, ink);
+    }
+    c.took(lw + ui.widthBytes(pool.base() + off, 0, len), 0);
+}
+
+/**
+ * Emit `label`, then whatever the caller has just written into the card's
+ * cursor, then `suffix`.
+ *
+ * The figure is the caller's because the formatting differs per field — a
+ * byte count, a span, a count — and the card has no business knowing which.
+ */
+fn figField(
+    c : Card,
+    f : Frame,
+    ui : BitmapFont,
+    s : Scratch,
+    label : string,
+    suffix : string,
+    ink : i32
+) : void {
+    let lw : i32 = ui.width(label);
+    let fw : i32 = parts::figureWidth(ui, s);
+    if (c.drawing) {
+        ui.draw(f, c.x, c.base, label, C_FAINT);
+        let pen : i32 = parts::figure(f, ui, c.x + lw, c.base, s, ink);
+        ui.draw(f, pen, c.base, suffix, C_FAINT);
+    }
+    c.took(lw + fw + ui.width(suffix), 0);
+}
+
+/** Emit a section heading, with a little air above it. */
+fn head(c : Card, f : Frame, ui : BitmapFont, s : string) : void {
+    let above : i32 = CARD_GAP;
+    if (c.lines == 0) {
+        above = 0;
+    }
+    let tw : i32 = ui.width(s);
+    if (c.drawing) {
+        ui.draw(f, c.x, c.base + above, s, C_DIM);
+        // The rule runs to the edge of the box the measuring pass sized, not
+        // to the widest a card may ever be — otherwise it leaves the card.
+        f.hLine(c.x + tw + 10, c.base + above - 5, c.w - tw - 10, C_LINE);
+    }
+    c.took(tw, above);
+}

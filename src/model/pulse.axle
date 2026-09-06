@@ -1,0 +1,177 @@
+// model/pulse — the headline figures, sampled once per tick.
+//
+// The cards at the top of the window answer "how much is going on" at a
+// glance, and every one of them is a whole-table reduction: how many
+// endpoints are live, how many distinct networks are involved, how many are
+// flagged. Computing those inside the paint would run them sixty times a
+// second for an answer that changes once a second, so they are sampled on
+// the refresh tick and the paint just reads them.
+//
+// The rings are what turn a number into a shape. A count of live
+// conversations means little on its own; the same count with the last two
+// minutes drawn behind it says whether the machine just woke up, is holding
+// steady, or has started doing something it was not doing before.
+
+use smalt::SlotIndex;
+use crate::model::endpoints;
+use crate::model::hosts::{Hosts, Look};
+use crate::model::groups;
+use crate::model::pool;
+use crate::model::addr;
+
+/** Samples kept behind each card. */
+const PULSE_HIST : i32 = 120;
+/** Distinct networks and countries the tally can hold. */
+const PULSE_DISTINCT : i32 = 4096;
+
+/**
+ * The reduction of the whole model to what a card can show, plus its
+ * history.
+ */
+class Pulse {
+    pub(crate) liveHist : i32[],
+    pub(crate) flagHist : i32[],
+    pub(crate) histLen : i32,
+
+    pub(crate) live : i32,
+    pub(crate) journal : i32,
+    pub(crate) programs : i32,
+    pub(crate) processes : i32,
+    pub(crate) knownHosts : i32,
+    pub(crate) publicHosts : i32,
+    pub(crate) networks : i32,
+    pub(crate) countries : i32,
+    pub(crate) flagged : i32,
+    pub(crate) worst : i32,
+    pub(crate) pending : i32,
+    pub(crate) dropped : i32,
+    pub(crate) rateIn : i64,
+    pub(crate) rateOut : i64,
+
+    pub(crate) seenNet : SlotIndex,
+    pub(crate) seenCountry : SlotIndex,
+
+    constructor() {
+        self.liveHist = malloc<i32>(PULSE_HIST as i64);
+        self.flagHist = malloc<i32>(PULSE_HIST as i64);
+        self.histLen = 0;
+        self.live = 0;
+        self.journal = 0;
+        self.programs = 0;
+        self.processes = 0;
+        self.knownHosts = 0;
+        self.publicHosts = 0;
+        self.networks = 0;
+        self.countries = 0;
+        self.flagged = 0;
+        self.worst = -1;
+        self.pending = 0;
+        self.dropped = 0;
+        self.rateIn = 0;
+        self.rateOut = 0;
+        self.seenNet = new SlotIndex(PULSE_DISTINCT * 2);
+        self.seenCountry = new SlotIndex(PULSE_DISTINCT * 2);
+    }
+
+    /**
+     * Push one sample onto both rings, sliding the oldest off.
+     *
+     * There is no traffic ring: nothing measures a byte until the kernel
+     * trace exists, and a ring of zeroes drawn as a flat line is a picture
+     * of a measurement that was never taken.
+     */
+    pub(crate) fn push(mut self, live : i32, flagged : i32) : void {
+        if (self.histLen >= PULSE_HIST) {
+            for (i of 0..PULSE_HIST - 1) {
+                self.liveHist[i] = self.liveHist[i + 1];
+                self.flagHist[i] = self.flagHist[i + 1];
+            }
+            self.histLen = PULSE_HIST - 1;
+        }
+        self.liveHist[self.histLen] = live;
+        self.flagHist[self.histLen] = flagged;
+        self.histLen = self.histLen + 1;
+    }
+
+    /** Release the two tally indexes. */
+    pub(crate) fn dispose(mut self) : void {
+        self.seenNet.close();
+        self.seenCountry.close();
+    }
+}
+
+/**
+ * Re-derive every headline figure, and push one sample.
+ *
+ * The counts are over the **whole journal**, not over the filtered view: a
+ * card that changed when someone typed in the filter would stop being a
+ * reading of the machine and become a reading of the filter, and the two
+ * are needed at the same time.
+ */
+fn sample(p : Pulse, e : Endpoints, g : Groups, hosts : Hosts, pool : Pool) : void {
+    p.seenNet.clear();
+    p.seenCountry.clear();
+
+    p.live = 0;
+    p.journal = e.count;
+    p.flagged = 0;
+    p.worst = -1;
+    p.rateIn = 0;
+    p.rateOut = 0;
+
+    for (s of 0..e.count) {
+        if (e.liveNow[s] > 0) {
+            p.live = p.live + 1;
+        }
+        p.rateIn = p.rateIn + e.rateIn[s];
+        p.rateOut = p.rateOut + e.rateOut[s];
+        if (e.score[s] >= 0) {
+            if (e.score[s] <= 2) {
+                p.flagged = p.flagged + 1;
+            }
+            if (p.worst < 0 || e.score[s] < p.worst) {
+                p.worst = e.score[s];
+            }
+        }
+    }
+
+    p.dropped = e.dropped;
+    p.knownHosts = hosts.count;
+    p.publicHosts = 0;
+    p.pending = 0;
+    p.networks = 0;
+    p.countries = 0;
+    for (h of 0..hosts.count) {
+        if (hosts.reach[h] == Reach::Public) {
+            p.publicHosts = p.publicHosts + 1;
+            if (hosts.look[h] != Look::Done) {
+                p.pending = p.pending + 1;
+            }
+        }
+        if (hosts.asn[h] != 0 && p.seenNet.get(hosts.asn[h] as i64) < 0) {
+            p.seenNet.put(hosts.asn[h] as i64, 1);
+            p.networks = p.networks + 1;
+        }
+        // Keyed on the country's *bytes*, not on where they were interned:
+        // every host interns its own copy of `US`, so counting offsets would
+        // report one country per address and call it eighty-eight.
+        if (hosts.ccOff[h] >= 0) {
+            let code : i64 = pool.hash(hosts.ccOff[h], hosts.ccLen[h]);
+            if (p.seenCountry.get(code) < 0) {
+                p.seenCountry.put(code, 1);
+                p.countries = p.countries + 1;
+            }
+        }
+    }
+
+    p.programs = 0;
+    p.processes = 0;
+    for (gi of 0..g.count) {
+        if (g.pids[gi] > 0) {
+            p.programs = p.programs + 1;
+            p.processes = p.processes + g.pids[gi];
+        }
+    }
+
+    p.push(p.live, p.flagged);
+}

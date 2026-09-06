@@ -1,0 +1,299 @@
+// model/score — the trust reading, and the reasons behind it.
+//
+// A score nobody can explain is a score nobody acts on, so this file is
+// built the other way round from most: the **reasons** are the product, and
+// the number is what falls out of adding them up. Every endpoint carries the
+// bitmask of the reasons that applied to it, the detail card lists them in
+// words with their weights, and the pips on the row are just the total.
+//
+// The score is per **endpoint**, not per address, because two of the signals
+// are about behaviour rather than reputation: a rhythm belongs to a
+// conversation, and a listening socket bound to a public interface is a
+// property of that socket. The address's own reputation (`Hosts::rep`) is an
+// input, shared by every endpoint pointing at it.
+//
+// Scoring runs in tenths and lands on a fifth, so a half-point signal is
+// expressible without the score itself pretending to a precision it has not
+// got. An endpoint no signal applies to scores five: the burden is on the
+// evidence, not on the address.
+
+use crate::model::endpoints::{Endpoints, SocketKind};
+use crate::model::hosts::{Hosts, FLAG_PROXY, FLAG_HOSTING, FLAG_MOBILE, Look};
+use crate::model::rhythm;
+use crate::model::addr::{Reach};
+
+/** The address answers as a proxy, a VPN exit or a Tor relay. */
+const R_PROXY : i32 = 1;
+/** The address belongs to a datacenter rather than an access network. */
+const R_HOSTING : i32 = 4;
+/** Nobody publishes a name for the address. */
+const R_NO_PTR : i32 = 8;
+/** The owning network is not one of the majors this program knows. */
+const R_UNKNOWN_AS : i32 = 16;
+/** An unusual port, to a network that does not host public services. */
+const R_ODD_PORT : i32 = 32;
+/** A steady repeat towards a host nothing will name — the timer's signature. */
+const R_BEACON : i32 = 64;
+/** A socket accepting connections from outside this machine. */
+const R_OPEN_DOOR : i32 = 128;
+/** The machine itself resolved this name — the traffic was asked for. */
+const R_ASKED_FOR : i32 = 256;
+/** A network large enough that its behaviour is a matter of public record. */
+const R_MAJOR_AS : i32 = 512;
+
+/** Reasons this program can report, for the walk that lists them. */
+const REASON_COUNT : i32 = 9;
+
+/** Weight of each reason, in tenths of a point. */
+const W_PROXY : i32 = -20;
+/** See [`R_HOSTING`]. */
+const W_HOSTING : i32 = -5;
+/** See [`R_NO_PTR`]. */
+const W_NO_PTR : i32 = -5;
+/** See [`R_UNKNOWN_AS`]. */
+const W_UNKNOWN_AS : i32 = -5;
+/** See [`R_ODD_PORT`]. */
+const W_ODD_PORT : i32 = -10;
+/** See [`R_BEACON`]. */
+const W_BEACON : i32 = -10;
+/** See [`R_OPEN_DOOR`]. */
+const W_OPEN_DOOR : i32 = -10;
+/** See [`R_ASKED_FOR`]. */
+const W_ASKED_FOR : i32 = 5;
+/** See [`R_MAJOR_AS`]. */
+const W_MAJOR_AS : i32 = 5;
+
+/** A rhythm this steady was set by a timer, not by a person. */
+const BEACON_REGULARITY : i32 = 800;
+/** And it has to have happened this many times to be a rhythm at all. */
+const BEACON_VISITS : i32 = 4;
+
+/**
+ * Re-derive the score of every endpoint. Called once per tick, after the
+ * enrichment has folded in whatever came back — cheap enough to redo whole
+ * rather than track which addresses learned something, and a full redo
+ * cannot leave a stale score behind a fact that changed.
+ */
+fn assessAll(e : Endpoints, hosts : Hosts) : void {
+    for (s of 0..e.count) {
+        assess(e, hosts, s);
+    }
+}
+
+/** Score one endpoint, and record which reasons applied. */
+fn assess(e : Endpoints, hosts : Hosts, s : i32) : void {
+    let h : i32 = e.host[s];
+    e.reasons[s] = 0;
+    e.score[s] = -1;
+    if (h < 0) {
+        return;
+    }
+
+    // A peer on this machine or this network is outside the scoring: no
+    // registry answers for it, and a score derived from nothing would be a
+    // number that looks like evidence.
+    if (hosts.reach[h] != Reach::Public) {
+        return;
+    }
+
+    let known : bool = hosts.look[h] == Look::Done;
+    let behavioural : i32 = behaviour(e, hosts, s, h);
+    if (!known && behavioural == 0) {
+        return;
+    }
+
+    let reasons : i32 = behavioural;
+    if (known) {
+        reasons = reasons | reputation(hosts, h);
+    }
+    e.reasons[s] = reasons;
+    e.score[s] = fromReasons(reasons);
+}
+
+/** The reasons that come from the address itself. */
+fn reputation(hosts : Hosts, h : i32) : i32 {
+    let r : i32 = 0;
+    if (hosts.has(h, FLAG_PROXY)) {
+        r = r | R_PROXY;
+    }
+    if (hosts.has(h, FLAG_HOSTING)) {
+        r = r | R_HOSTING;
+    }
+    if (hosts.nameOff[h] < 0) {
+        r = r | R_NO_PTR;
+    }
+    if (isMajor(hosts.asn[h])) {
+        r = r | R_MAJOR_AS;
+    } else {
+        r = r | R_UNKNOWN_AS;
+    }
+    return r;
+}
+
+/** The reasons that come from what the conversation is doing. */
+fn behaviour(e : Endpoints, hosts : Hosts, s : i32, h : i32) : i32 {
+    let r : i32 = 0;
+    if (e.kind[s] == SocketKind::Listen) {
+        r = r | R_OPEN_DOOR;
+    }
+    if (e.kind[s] == SocketKind::Peer && oddPort(e.port[s]) && !hosts.has(h, FLAG_HOSTING)) {
+        r = r | R_ODD_PORT;
+    }
+    if (beaconing(e, hosts, s, h)) {
+        r = r | R_BEACON;
+    }
+    if (hosts.nameFrom[h] != NameSource::None && hosts.nameOff[h] >= 0) {
+        r = r | R_ASKED_FOR;
+    }
+    return r;
+}
+
+/**
+ * Whether this endpoint's rhythm is the shape a timer makes towards a host
+ * nothing will name.
+ *
+ * Both halves are required, and that is the whole judgement. A steady
+ * heartbeat to a *named* service is what a mail client, a chat app and an
+ * update checker all do — it is the most ordinary traffic on the machine.
+ * The same heartbeat to an address with no name and no known network is the
+ * one shape worth interrupting a reader for.
+ */
+fn beaconing(e : Endpoints, hosts : Hosts, s : i32, h : i32) : bool {
+    if (!hasRhythm(e.rhythm, s) || e.hits[s] < BEACON_VISITS) {
+        return false;
+    }
+    if (e.rhythm.regular[s] < BEACON_REGULARITY) {
+        return false;
+    }
+    return hosts.nameOff[h] < 0 && !isMajor(hosts.asn[h]);
+}
+
+/**
+ * A port that is neither a standard service nor an ephemeral answer. The
+ * ranges are deliberately wide: the signal is "this does not look like the
+ * web", not "this port is forbidden", and it is worth half a point on its
+ * own and nothing without company.
+ */
+fn oddPort(port : i32) : bool {
+    if (port == 80 || port == 443 || port == 53 || port == 123) {
+        return false;
+    }
+    if (port == 22 || port == 25 || port == 465 || port == 587 || port == 993 || port == 995) {
+        return false;
+    }
+    if (port == 8080 || port == 8443 || port == 5228 || port == 3478) {
+        return false;
+    }
+    return port > 1024;
+}
+
+/** Turn a set of reasons into a score out of five. */
+fn fromReasons(reasons : i32) : i32 {
+    let tenths : i32 = 50;
+    tenths = tenths + weightOf(reasons, R_PROXY, W_PROXY);
+    tenths = tenths + weightOf(reasons, R_HOSTING, W_HOSTING);
+    tenths = tenths + weightOf(reasons, R_NO_PTR, W_NO_PTR);
+    tenths = tenths + weightOf(reasons, R_UNKNOWN_AS, W_UNKNOWN_AS);
+    tenths = tenths + weightOf(reasons, R_ODD_PORT, W_ODD_PORT);
+    tenths = tenths + weightOf(reasons, R_BEACON, W_BEACON);
+    tenths = tenths + weightOf(reasons, R_OPEN_DOOR, W_OPEN_DOOR);
+    tenths = tenths + weightOf(reasons, R_ASKED_FOR, W_ASKED_FOR);
+    tenths = tenths + weightOf(reasons, R_MAJOR_AS, W_MAJOR_AS);
+    if (tenths < 0) {
+        tenths = 0;
+    }
+    if (tenths > 50) {
+        tenths = 50;
+    }
+    return (tenths + 5) / 10;
+}
+
+/** `w` when `reasons` carries `bit`, zero otherwise. */
+fn weightOf(reasons : i32, bit : i32, w : i32) : i32 {
+    if ((reasons & bit) != 0) {
+        return w;
+    }
+    return 0;
+}
+
+/** The `i`-th reason bit, for the walk that lists them in order. */
+fn reasonBit(i : i32) : i32 {
+    return match i {
+        0 => R_PROXY,
+        1 => R_BEACON,
+        2 => R_OPEN_DOOR,
+        3 => R_ODD_PORT,
+        4 => R_NO_PTR,
+        5 => R_UNKNOWN_AS,
+        6 => R_HOSTING,
+        7 => R_MAJOR_AS,
+        _ => R_ASKED_FOR,
+    };
+}
+
+/** The weight of the `i`-th reason, in tenths of a point. */
+fn reasonWeight(i : i32) : i32 {
+    return match i {
+        0 => W_PROXY,
+        1 => W_BEACON,
+        2 => W_OPEN_DOOR,
+        3 => W_ODD_PORT,
+        4 => W_NO_PTR,
+        5 => W_UNKNOWN_AS,
+        6 => W_HOSTING,
+        7 => W_MAJOR_AS,
+        _ => W_ASKED_FOR,
+    };
+}
+
+/** What the `i`-th reason says, in the words the detail card uses. */
+fn reasonText(i : i32) : string {
+    return match i {
+        0 => "the address answers as a proxy, VPN or Tor exit",
+        1 => "a steady repeat towards a host nothing will name",
+        2 => "this socket accepts connections from outside the machine",
+        3 => "an unusual port, to a network that hosts no public service",
+        4 => "no name is published for the address",
+        5 => "the owning network is not one of the majors",
+        6 => "the address is in a datacenter, not on an access network",
+        7 => "a major network, whose behaviour is a matter of public record",
+        _ => "this machine resolved the name itself — the traffic was asked for",
+    };
+}
+
+/**
+ * Whether this is one of the networks a machine talks to constantly. The
+ * list is deliberately short and deliberately public: it is not a
+ * whitelist — a major network still loses points for a missing name or an
+ * odd port — it only says that the *owner* of the address is a matter of
+ * record, which is the difference between "Google" and "a number".
+ */
+fn isMajor(asn : i32) : bool {
+    return match asn {
+        15169 => true,  // Google
+        396982 => true, // Google Cloud
+        13335 => true,  // Cloudflare
+        16509 => true,  // Amazon
+        14618 => true,  // Amazon
+        8075 => true,   // Microsoft
+        8068 => true,   // Microsoft
+        20940 => true,  // Akamai
+        16625 => true,  // Akamai
+        32787 => true,  // Akamai
+        54113 => true,  // Fastly
+        714 => true,    // Apple
+        6185 => true,   // Apple
+        32934 => true,  // Meta
+        13414 => true,  // X
+        36459 => true,  // GitHub
+        16276 => true,  // OVH
+        24940 => true,  // Hetzner
+        14061 => true,  // DigitalOcean
+        63949 => true,  // Akamai / Linode
+        3215 => true,   // Orange
+        12322 => true,  // Free
+        5410 => true,   // Bouygues
+        15557 => true,  // SFR
+        _ => false,
+    };
+}

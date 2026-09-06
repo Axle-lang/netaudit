@@ -1,0 +1,209 @@
+// fmt — the readings this program takes that a general formatter cannot.
+//
+// Every figure on screen is written afresh on each repaint, so routing one
+// through `string` would mint and free a few hundred allocations a second
+// for text thrown away in the same frame. A `Scratch` is a block and the
+// cursor into it: `reset`, a few appends, then `at()` and `length()` go to
+// `BitmapFont::drawBytes`. The repaint path allocates nothing.
+//
+// Everything here appends to that cursor, so a figure composes with the
+// decimals, spans and byte counts `Scratch` already carries: an address is
+// `s.reset(); fmt::addrPort(s, …)`, and an address followed by a count is
+// the same two lines with `s.decimal(…)` between them. No caller anywhere
+// in this program computes a byte offset.
+//
+// What is here is what an audit means and a library does not: an address in
+// its canonical text form, and three figures whose *empty* case carries
+// information. A rate of nothing is not `0/s` — this program runs without
+// the tier that measures bytes, and a zero in that column reads as "this
+// program sent nothing" when it means "nothing measured bytes".
+
+use smalt::{Mem, Scratch};
+use crate::model::addr;
+
+/** ASCII `0`. */
+const DIGIT0 : i32 = 48;
+/** ASCII `a` — the first hex letter. */
+const LOWER_A : i32 = 97;
+/** ASCII `.`. */
+const DOT : i32 = 46;
+/** ASCII `:`. */
+const COLON : i32 = 58;
+/** ASCII `/`. */
+const SLASH : i32 = 47;
+/** ASCII `[` and `]` — the brackets a v6 address wears before a port. */
+const LBRACKET : i32 = 91;
+const RBRACKET : i32 = 93;
+
+// ─── Quantities ──────────────────────────────────────────────
+
+/**
+ * A byte count per second, or an em dash when there is nothing to report.
+ *
+ * The dash is the whole point of the function. Byte counts come from the
+ * ETW tier, which needs elevation; without it every rate is zero, and a
+ * column of `0/s` says the programs sent nothing rather than that nothing
+ * was measured.
+ */
+fn rate(s : Scratch, n : i64) : void {
+    if (n <= 0) {
+        s.literal("—");
+        return;
+    }
+    s.rate(n);
+}
+
+/** A count of repetitions, as the tree shows it: `×214`. */
+fn times(s : Scratch, n : i64) : void {
+    s.literal("×");
+    s.decimal(n);
+}
+
+/** A score in fifths, as `3/5`. */
+fn outOfFive(s : Scratch, score : i32) : void {
+    s.decimal(score as i64);
+    s.ch(SLASH);
+    s.ch(DIGIT0 + 5);
+}
+
+// ─── Addresses ───────────────────────────────────────────────
+
+/** The dotted-quad form of the four bytes at `src`. */
+fn ipv4(s : Scratch, src : i64) : void {
+    for (i of 0..4) {
+        if (i > 0) {
+            s.ch(DOT);
+        }
+        s.decimal(Mem::byteAt(src, i) as i64);
+    }
+}
+
+/** One lowercase hex digit. */
+fn hexDigit(v : i32) : i32 {
+    if (v < 10) {
+        return DIGIT0 + v;
+    }
+    return LOWER_A + v - 10;
+}
+
+/**
+ * A 16-bit group with no leading zeros, as an IPv6 text form wants it.
+ *
+ * `Scratch::hex` is zero-padded to a fixed width, which is right for a flag
+ * word read down a column and wrong here: RFC 5952 says a group carries no
+ * leading zero, and `0db8` and `db8` are two spellings of one address that
+ * a typed filter would not match against each other.
+ */
+fn hexGroup(s : Scratch, v : i32) : void {
+    if (v == 0) {
+        s.ch(DIGIT0);
+        return;
+    }
+    let seen : bool = false;
+    let shift : i32 = 12;
+    while (shift >= 0) {
+        let d : i32 = (v >> shift) & 0xF;
+        if (seen || d != 0) {
+            s.ch(hexDigit(d));
+            seen = true;
+        }
+        shift = shift - 4;
+    }
+}
+
+/**
+ * The text form of the sixteen bytes at `src`, with the longest run of
+ * zero groups collapsed to `::` — the canonical form, so the same host
+ * always reads the same way and a filter typed against one row matches
+ * the other.
+ */
+fn ipv6(s : Scratch, src : i64) : void {
+    if (isV4Mapped(src)) {
+        s.literal("::ffff:");
+        ipv4(s, src + 12);
+        return;
+    }
+
+    let (bestAt, bestLen) = longestZeroRun(src);
+    let wroteGroup : bool = false;
+    let g : i32 = 0;
+    while (g < 8) {
+        if (g == bestAt) {
+            s.ch(COLON);
+            s.ch(COLON);
+            wroteGroup = false;
+            g = g + bestLen;
+        } else {
+            if (wroteGroup) {
+                s.ch(COLON);
+            }
+            hexGroup(s, hexAt(src, g));
+            wroteGroup = true;
+            g = g + 1;
+        }
+    }
+}
+
+/**
+ * The start and length of the longest run of zero groups, or `(-1, 0)` when
+ * no run is long enough to collapse. The first run wins a tie, and a run of
+ * one is not collapsed — both are RFC 5952.
+ */
+fn longestZeroRun(src : i64) : (at: i32, len: i32) {
+    let bestAt : i32 = -1;
+    let bestLen : i32 = 0;
+    let runAt : i32 = -1;
+    let runLen : i32 = 0;
+    for (g of 0..8) {
+        if (hexAt(src, g) == 0) {
+            if (runAt < 0) {
+                runAt = g;
+                runLen = 0;
+            }
+            runLen = runLen + 1;
+            if (runLen > bestLen) {
+                bestLen = runLen;
+                bestAt = runAt;
+            }
+        } else {
+            runAt = -1;
+            runLen = 0;
+        }
+    }
+    if (bestLen < 2) {
+        return (-1, 0);
+    }
+    return (bestAt, bestLen);
+}
+
+/** The 16-bit group `g` of the address at `src`, big-endian on the wire. */
+fn hexAt(src : i64, g : i32) : i32 {
+    let b : i64 = (g as i64) * 2;
+    return (Mem::byteAt(src, b) << 8) | Mem::byteAt(src, b + 1);
+}
+
+/**
+ * An address of either family, bracketed when a port follows a v6 form —
+ * `1.2.3.4:443` and `[2606:4700::1]:443` are the two shapes a reader
+ * expects, and an unbracketed v6 with a port is ambiguous to both of us.
+ */
+fn addrPort(s : Scratch, src : i64, family : i32, port : i32) : void {
+    if (family == 6) {
+        s.ch(LBRACKET);
+        ipv6(s, src);
+        s.ch(RBRACKET);
+    } else {
+        ipv4(s, src);
+    }
+    s.ch(COLON);
+    s.decimal(port as i64);
+}
+
+/** An address of either family, with no port — what a URL path carries. */
+fn address(s : Scratch, src : i64, family : i32) : void {
+    if (family == 6) {
+        ipv6(s, src);
+    } else {
+        ipv4(s, src);
+    }
+}

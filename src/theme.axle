@@ -1,0 +1,97 @@
+// theme — the palette and the layout grid, in one place.
+//
+// Colours are ARGB8888 with the alpha byte left clear: the surface is
+// blitted with no blending, so bit 31 never carries meaning and every
+// literal stays inside `i32`'s positive range. Blending happens on our
+// side, against the pixel already in the frame (`Frame::blend`, and the
+// two bits of coverage a glyph row carries), which is what lets
+// anti-aliased text sit on a card, a hovered row or a score pip without
+// knowing which.
+//
+// The grid has one property the rest of the program depends on: a group row
+// and an endpoint row are **different heights**. An endpoint carries two
+// lines (identity, then attribution) because squeezing an AS name, a
+// country, a score and a rhythm onto the same line as the address makes
+// every one of them unreadable. Nothing may assume a uniform row pitch —
+// `ui::tree` lays the rows out once per rebuild and everything else reads
+// the layout it produced.
+
+/** Window width — wide enough for the address, the host and the attribution. */
+const WIN_W : i32 = 1440;
+/** Window height. */
+const WIN_H : i32 = 900;
+
+// ─── Palette ─────────────────────────────────────────────────
+
+/** Page background. */
+const C_BG : i32 = 0x1B1B1B;
+/** Raised surface: the stat cards and the tree body. */
+const C_CARD : i32 = 0x252525;
+/** Header strip of the tree, and the filter field. */
+const C_HEADER : i32 = 0x2C2C2C;
+/** Hairline between surfaces. */
+const C_LINE : i32 = 0x383838;
+/** A group row's own surface, one step above the body. */
+const C_GROUP : i32 = 0x2A2A2A;
+/** Every other endpoint row, so a long row stays trackable across. */
+const C_STRIPE : i32 = 0x222222;
+/** Row under the pointer. */
+const C_HOVER : i32 = 0x303030;
+/** Selected row. */
+const C_SEL : i32 = 0x11405E;
+/** Left marker on the selected row. */
+const C_SEL_EDGE : i32 = 0x4CC2FF;
+/** Primary text. */
+const C_TEXT : i32 = 0xE8E8E8;
+/** Secondary text: column titles, units, hosts. */
+const C_DIM : i32 = 0x9A9A9A;
+/** Tertiary text: the keyboard legend, the units of a figure. */
+const C_FAINT : i32 = 0x6E6E6E;
+/** Accent — the disclosure triangle, the focused field, the throughput trace. */
+const C_ACCENT : i32 = 0x4CC2FF;
+/** A reading that is unremarkable: score 5, an established connection. */
+const C_OK : i32 = 0x4FD16C;
+/** A reading worth a second look: score 3, a closing connection. */
+const C_WARN : i32 = 0xE3C64A;
+/** A reading that is the endpoint's whole story: score 1, a blocklist hit. */
+const C_HOT : i32 = 0xE8503A;
+/** Byte counts and the traffic gauge. */
+const C_MEM : i32 = 0xB07CE8;
+/** Dialog surface, lifted above the dimmed page. */
+const C_MODAL : i32 = 0x2E2E2E;
+/** The tooltip's surface — lighter than the dialog, it sits on top of rows. */
+const C_TIP : i32 = 0x3A3A3A;
+
+/** TCP badge. */
+const C_TCP : i32 = 0x4CC2FF;
+/** UDP badge — a different hue because a UDP row means something weaker. */
+const C_UDP : i32 = 0xC29A4C;
+/** A row whose connection is gone and which is now only history. */
+const C_CLOSED : i32 = 0x5A5A5A;
+/** A local peer (loopback, private range, link-local): outside the scoring. */
+const C_LOCAL : i32 = 0x7FA3B8;
+
+// ─── Layout grid ─────────────────────────────────────────────
+
+/** Left and right page margin. */
+const PAD : i32 = 16;
+/** Title bar height. */
+const TITLE_H : i32 = 44;
+/** Stat card band. */
+const CARD_Y : i32 = 52;
+/** Stat card height. */
+const CARD_H : i32 = 104;
+/** Toolbar (filter + sort + counts) top. */
+const BAR_Y : i32 = 168;
+/** Toolbar height. */
+const BAR_H : i32 = 32;
+/** Tree top — column-legend strip included. */
+const TREE_Y : i32 = 212;
+/** Column-legend strip height. */
+const HEAD_H : i32 = 30;
+/** A collapsed or expanded program row. */
+const ROW_GROUP : i32 = 32;
+/** An endpoint row: identity on top, attribution beneath. */
+const ROW_ENDPOINT : i32 = 40;
+/** Status bar height, pinned to the bottom of the window. */
+const STATUS_H : i32 = 28;

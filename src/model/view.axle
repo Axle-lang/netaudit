@@ -1,0 +1,661 @@
+// model/view — the flattened tree: which rows exist, in which order, at
+// which height.
+//
+// The tree is drawn from a flat list because a tree is only a tree while you
+// are building it; once it is on screen it is a run of rows with different
+// heights, and hit-testing, scrolling and keyboard movement all want the
+// flat form. So one rebuild produces `rowKind` / `rowRef` / `rowTop`, and
+// every consumer reads that.
+//
+// Two properties of this file are what keep the window usable while the
+// machine underneath it changes every second.
+//
+// **The order is remembered as keys, not slots.** `model/endpoints` compacts
+// its storage when a row expires, so a slot index is meaningless one tick
+// later. Holding the previous order as keys means the sort starts from where
+// the reader last saw it, which is what makes the sort *stable* rather than
+// merely deterministic.
+//
+// **The sort is damped, and can be frozen.** A row only overtakes its
+// neighbour when it beats it by a margin, so a reading that wobbles by a
+// percent does not reshuffle the list; and while the pointer is inside the
+// tree, no reordering happens at all. Nothing moves under a reader's hand.
+
+use smalt::{Scratch, Mem};
+use crate::model::pool::{Pool, containsAt};
+use crate::model::endpoints::{Endpoints, MAX_ENDPOINTS, SocketKind};
+use crate::model::groups::{Groups, MAX_GROUPS};
+use crate::model::hosts;
+use crate::model::rhythm;
+use crate::model::addr::{Reach};
+use crate::fmt;
+use crate::theme::{ROW_GROUP, ROW_ENDPOINT};
+
+/** Rows the flat list can hold: every group, plus the endpoints of the open ones. */
+const VIEW_MAX_ROWS : i32 = 16384;
+
+/** What a row of the flattened tree stands for. */
+enum RowKind : i32 {
+    /** A program row. */
+    Group = 0,
+    /** An endpoint row, belonging to the group above it. */
+    Endpoint = 1,
+}
+
+/**
+ * What the rows are ranked by.
+ *
+ * The order is the cycle the `S` key walks, so a ranking added here joins
+ * that cycle by construction rather than by someone remembering to widen a
+ * modulus.
+ */
+enum Sort : i32 {
+    /** Repeats, rhythm, risk, traffic and recency, weighted. */
+    Salience = 0,
+    /** Most bytes moving first. */
+    Traffic = 1,
+    /** Worst trust score first. */
+    Risk = 2,
+    /** Steadiest repeat interval first. */
+    Rhythm = 3,
+    /** Most repeat visits first. */
+    Hits = 4,
+    /** By host name, A to Z. */
+    Name = 5,
+    /** Most recently seen first. */
+    Recent = 6,
+}
+
+/** How many rankings the `S` key cycles through. */
+const SORT_COUNT : i32 = 7;
+
+/**
+ * The ranking at position `i` of that cycle.
+ *
+ * The only place the numbering is read back. Everywhere else names the
+ * variant, so adding one is an arm the compiler asks for rather than a
+ * modulus somebody has to remember to widen.
+ */
+fn sortAt(i : i32) : Sort {
+    return match i {
+        1 => Sort::Traffic,
+        2 => Sort::Risk,
+        3 => Sort::Rhythm,
+        4 => Sort::Hits,
+        5 => Sort::Name,
+        6 => Sort::Recent,
+        _ => Sort::Salience,
+    };
+}
+
+/**
+ * How far a row must beat its neighbour before it is allowed to overtake
+ * it, per unit of the sort key. Salience runs 0–10000, so 250 is two and a
+ * half percent — enough that measurement wobble never reorders the list,
+ * small enough that a real change shows within a tick or two.
+ */
+const HYST_SALIENCE : i64 = 250;
+/** A traffic reading must change by this many bytes per second to overtake. */
+const HYST_TRAFFIC : i64 = 4096;
+/** Everything else is a count or a timestamp, where a tie is a genuine tie. */
+const HYST_NONE : i64 = 0;
+
+/** Bytes of the scratch the filter formats an address into. */
+const MATCH_CAP : i64 = 256;
+
+/**
+ * The flattened tree, plus the remembered orders that make it stable.
+ */
+class View {
+    pub(crate) rowKind : RowKind[],
+    pub(crate) rowRef : i32[],
+    pub(crate) rowTop : i32[],
+    pub(crate) rowH : i32[],
+    pub(crate) count : i32,
+    pub(crate) height : i32,
+
+    pub(crate) orderKeys : i64[],
+    pub(crate) orderLen : i32,
+    pub(crate) slots : i32[],
+    pub(crate) bucket : i32[],
+    pub(crate) at : i32[],
+    pub(crate) mark : i32[],
+
+    pub(crate) groupKeys : i64[],
+    pub(crate) groupLen : i32,
+    pub(crate) gslots : i32[],
+    pub(crate) gmark : i32[],
+    pub(crate) gen : i32,
+
+    pub(crate) shown : i32,
+    pub(crate) hiddenLocal : i32,
+    pub(crate) hiddenBound : i32,
+    pub(crate) scratch : Scratch,
+
+    constructor() {
+        self.rowKind = malloc<RowKind>(VIEW_MAX_ROWS as i64);
+        self.rowRef = malloc<i32>(VIEW_MAX_ROWS as i64);
+        self.rowTop = malloc<i32>(VIEW_MAX_ROWS as i64);
+        self.rowH = malloc<i32>(VIEW_MAX_ROWS as i64);
+        self.count = 0;
+        self.height = 0;
+
+        self.orderKeys = malloc<i64>(MAX_ENDPOINTS as i64);
+        self.orderLen = 0;
+        self.slots = malloc<i32>(MAX_ENDPOINTS as i64);
+        self.bucket = malloc<i32>(MAX_ENDPOINTS as i64);
+        self.at = malloc<i32>(MAX_GROUPS as i64);
+        self.mark = malloc<i32>(MAX_ENDPOINTS as i64);
+
+        self.groupKeys = malloc<i64>(MAX_GROUPS as i64);
+        self.groupLen = 0;
+        self.gslots = malloc<i32>(MAX_GROUPS as i64);
+        self.gmark = malloc<i32>(MAX_GROUPS as i64);
+        self.gen = 0;
+
+        self.shown = 0;
+        self.hiddenLocal = 0;
+        self.hiddenBound = 0;
+        self.scratch = new Scratch(MATCH_CAP);
+    }
+
+    /** Release the match scratch; the column arrays go with the object. */
+    pub(crate) fn dispose(mut self) : void {
+        self.scratch.close();
+    }
+}
+
+/**
+ * Rebuild the flat row list.
+ *
+ * Two toggles decide what the tree is *about*, and both default to off
+ * because both are dominated by rows that are not traffic.
+ *
+ * `showLocal` keeps the conversations that never leave the building — this
+ * machine talking to itself, and this machine talking to the box next to it.
+ * On a working machine those outnumber everything else several times over
+ * (an IDE, a language server, a launcher and a sync client each hold a dozen),
+ * and an audit of what *leaves* is drowned by them.
+ *
+ * `showBound` keeps listening sockets and UDP handles. Windows names no
+ * peer for either, so they are not conversations — they are doors that are
+ * open. Worth auditing, and worth auditing *separately*: one `svchost`
+ * contributes forty of them and would bury the two addresses it is actually
+ * talking to. The counts of what each toggle is hiding stay on screen.
+ *
+ * `freeze` suspends reordering — the caller raises it while the pointer is
+ * over the tree.
+ */
+fn rebuild(
+    v : View,
+    e : Endpoints,
+    g : Groups,
+    hosts : Hosts,
+    pool : Pool,
+    needle : i64,
+    needleLen : i32,
+    sortKey : Sort,
+    showLocal : bool,
+    showBound : bool,
+    freeze : bool
+) : void {
+    selectEndpoints(v, e, g, hosts, pool, needle, needleLen, showLocal, showBound);
+    rollUp(v, e, g, hosts);
+    if (!freeze) {
+        sortEndpoints(v, e, hosts, pool, sortKey);
+    }
+    bucketByGroup(v, e, g);
+    selectGroups(v, g);
+    if (!freeze) {
+        sortGroups(v, g, pool, sortKey);
+    }
+    emit(v, e, g);
+}
+
+/**
+ * Choose the endpoints the filter admits, keeping the order the reader last
+ * saw: the remembered keys are walked first and the survivors kept in place,
+ * then anything new is appended. A new row therefore arrives at the bottom
+ * and climbs, instead of appearing in the middle of what someone is reading.
+ */
+fn selectEndpoints(
+    v : View,
+    e : Endpoints,
+    g : Groups,
+    hosts : Hosts,
+    pool : Pool,
+    needle : i64,
+    needleLen : i32,
+    showLocal : bool,
+    showBound : bool
+) : void {
+    v.gen = v.gen + 1;
+    let taken : i32 = 0;
+    let hiddenLocal : i32 = 0;
+    let hiddenBound : i32 = 0;
+
+    for (i of 0..v.orderLen) {
+        let s : i32 = e.bySlotKey(v.orderKeys[i]);
+        if (s >= 0 && v.mark[s] != v.gen) {
+            v.mark[s] = v.gen;
+            if (admits(v, e, g, hosts, pool, s, needle, needleLen, showLocal, showBound)) {
+                v.slots[taken] = s;
+                taken = taken + 1;
+            }
+        }
+    }
+
+    // Whatever the remembered order did not carry is new to the view — a row
+    // minted this tick, or one the filter excluded last time. New rows are
+    // appended, so they arrive at the bottom and climb, rather than
+    // materialising in the middle of what someone is reading.
+    for (s of 0..e.count) {
+        if (v.mark[s] != v.gen) {
+            v.mark[s] = v.gen;
+            if (taken < MAX_ENDPOINTS && admits(v, e, g, hosts, pool, s, needle, needleLen, showLocal, showBound)) {
+                v.slots[taken] = s;
+                taken = taken + 1;
+            }
+        }
+        if (!showLocal && isLocal(e, s)) {
+            hiddenLocal = hiddenLocal + 1;
+        } else if (!showBound && e.kind[s] != SocketKind::Peer) {
+            hiddenBound = hiddenBound + 1;
+        }
+    }
+
+    v.shown = taken;
+    v.hiddenLocal = hiddenLocal;
+    v.hiddenBound = hiddenBound;
+}
+
+/** Whether endpoint `s` talks to something that never leaves the building. */
+fn isLocal(e : Endpoints, s : i32) : bool {
+    let r : Reach = e.reachOf(s);
+    return r == Reach::Loopback || r == Reach::Private;
+}
+
+/** Whether the filter and the local-traffic toggle admit endpoint `s`. */
+fn admits(
+    v : View,
+    e : Endpoints,
+    g : Groups,
+    hosts : Hosts,
+    pool : Pool,
+    s : i32,
+    needle : i64,
+    needleLen : i32,
+    showLocal : bool,
+    showBound : bool
+) : bool {
+    if (!showLocal && isLocal(e, s)) {
+        return false;
+    }
+    if (!showBound && e.kind[s] != SocketKind::Peer) {
+        return false;
+    }
+    if (needleLen == 0) {
+        return true;
+    }
+    let gi : i32 = e.group[s];
+    if (gi >= 0 && pool.contains(g.pathOff[gi], g.pathLen[gi], needle, needleLen)) {
+        return true;
+    }
+    let h : i32 = e.host[s];
+    if (h >= 0) {
+        if (pool.contains(hosts.nameOff[h], hosts.nameLen[h], needle, needleLen)) {
+            return true;
+        }
+        if (pool.contains(hosts.netOff[h], hosts.netLen[h], needle, needleLen)) {
+            return true;
+        }
+        if (pool.contains(hosts.orgOff[h], hosts.orgLen[h], needle, needleLen)) {
+            return true;
+        }
+        if (pool.contains(hosts.countryOff[h], hosts.countryLen[h], needle, needleLen)) {
+            return true;
+        }
+    }
+    // The address itself is not in the pool, so it is written into the
+    // view's own cursor and matched there — typing `142.250` has to find the
+    // row whose only identifier is its address.
+    v.scratch.reset();
+    fmt::addrPort(v.scratch, e.addrAt(s), e.family[s], e.port[s]);
+    return containsAt(v.scratch.at(), v.scratch.length(), needle, needleLen);
+}
+
+/**
+ * Fold what is shown into the group totals. The roll-ups reflect the
+ * **filtered** view on purpose: a program's row must add up to the rows
+ * underneath it, or the reader is left reconciling two numbers that were
+ * never meant to agree.
+ */
+fn rollUp(v : View, e : Endpoints, g : Groups, hosts : Hosts) : void {
+    g.beginRollup();
+    for (i of 0..v.shown) {
+        let s : i32 = v.slots[i];
+        g.rollup(
+            e.group[s], e.liveNow[s] > 0, e.score[s],
+            e.rateIn[s], e.rateOut[s], e.bytesIn[s], e.bytesOut[s], e.lastMs[s]
+        );
+    }
+}
+
+/** The ranking figure of endpoint `s` under `sortKey`. */
+fn endpointRank(e : Endpoints, hosts : Hosts, s : i32, sortKey : Sort) : i64 {
+    return match sortKey {
+        Sort::Traffic => e.rate(s),
+        Sort::Hits => e.hits[s] as i64,
+        Sort::Recent => e.lastMs[s],
+        Sort::Rhythm => rhythmRank(e, s),
+        Sort::Risk => riskRank(e.score[s]),
+        _ => e.salience[s],
+    };
+}
+
+/** Regularity, but only for a row that has enough arrivals to claim one. */
+fn rhythmRank(e : Endpoints, s : i32) : i64 {
+    if (!hasRhythm(e.rhythm, s)) {
+        return -1;
+    }
+    return e.rhythm.regular[s] as i64;
+}
+
+/**
+ * Risk as a ranking figure: worst first, and an unknown score ranks below
+ * every known one rather than above them. An address whose lookup has not
+ * come back is not evidence of anything, and putting it at the top of a
+ * risk-sorted list would train the reader to ignore the top of the list.
+ */
+fn riskRank(score : i32) : i64 {
+    if (score < 0) {
+        return -1;
+    }
+    return (5 - score) as i64;
+}
+
+/** The hysteresis band that applies to `sortKey`. */
+fn band(sortKey : Sort) : i64 {
+    return match sortKey {
+        Sort::Salience => HYST_SALIENCE,
+        Sort::Traffic => HYST_TRAFFIC,
+        _ => HYST_NONE,
+    };
+}
+
+/**
+ * Insertion sort of the selected endpoints, descending, damped.
+ *
+ * Insertion sort because the input is the previous frame's order, which a
+ * tick perturbs by a few positions at most — so it is near-linear here and,
+ * being stable, two rows reading the same figure keep the order the reader
+ * already learned.
+ */
+fn sortEndpoints(v : View, e : Endpoints, hosts : Hosts, pool : Pool, sortKey : Sort) : void {
+    if (sortKey == Sort::Name) {
+        sortEndpointsByName(v, e, hosts, pool);
+        return;
+    }
+    let hyst : i64 = band(sortKey);
+    for (a of 1..v.shown) {
+        let x : i32 = v.slots[a];
+        let xr : i64 = endpointRank(e, hosts, x, sortKey);
+        let b : i32 = a - 1;
+        while (b >= 0 && xr > endpointRank(e, hosts, v.slots[b], sortKey) + hyst) {
+            v.slots[b + 1] = v.slots[b];
+            b = b - 1;
+        }
+        v.slots[b + 1] = x;
+    }
+}
+
+/** The same sort, on the host name, ascending — where a band makes no sense. */
+fn sortEndpointsByName(v : View, e : Endpoints, hosts : Hosts, pool : Pool) : void {
+    for (a of 1..v.shown) {
+        let x : i32 = v.slots[a];
+        let b : i32 = a - 1;
+        while (b >= 0 && nameOrder(e, hosts, pool, v.slots[b], x) > 0) {
+            v.slots[b + 1] = v.slots[b];
+            b = b - 1;
+        }
+        v.slots[b + 1] = x;
+    }
+}
+
+/** Three-way name comparison of two endpoints; an unnamed host sorts last. */
+fn nameOrder(e : Endpoints, hosts : Hosts, pool : Pool, x : i32, y : i32) : i32 {
+    let hx : i32 = e.host[x];
+    let hy : i32 = e.host[y];
+    let nx : bool = hx >= 0 && hosts.nameOff[hx] >= 0;
+    let ny : bool = hy >= 0 && hosts.nameOff[hy] >= 0;
+    if (!nx && !ny) {
+        return 0;
+    }
+    if (!nx) {
+        return 1;
+    }
+    if (!ny) {
+        return -1;
+    }
+    return pool.order(
+        hosts.nameOff[hx], hosts.nameLen[hx],
+        hosts.nameOff[hy], hosts.nameLen[hy]
+    );
+}
+
+/**
+ * Scatter the sorted endpoints into per-group runs, keeping the sorted
+ * order inside each run. One counting pass and one scatter pass, so the
+ * cost is linear rather than one scan of the whole list per group.
+ */
+fn bucketByGroup(v : View, e : Endpoints, g : Groups) : void {
+    for (gi of 0..g.count) {
+        v.at[gi] = 0;
+    }
+    for (i of 0..v.shown) {
+        let gx : i32 = e.group[v.slots[i]];
+        if (gx >= 0 && gx < g.count) {
+            v.at[gx] = v.at[gx] + 1;
+        }
+    }
+    let run : i32 = 0;
+    for (gi of 0..g.count) {
+        let n : i32 = v.at[gi];
+        v.at[gi] = run;
+        run = run + n;
+    }
+    for (i of 0..v.shown) {
+        let s : i32 = v.slots[i];
+        let gx : i32 = e.group[s];
+        if (gx >= 0 && gx < g.count) {
+            v.bucket[v.at[gx]] = s;
+            v.at[gx] = v.at[gx] + 1;
+        }
+    }
+    // `at` now holds each group's run END; the start is the previous end.
+}
+
+/** The first index of group `gi`'s run in `bucket`. */
+fn runStart(v : View, gi : i32) : i32 {
+    if (gi == 0) {
+        return 0;
+    }
+    return v.at[gi - 1];
+}
+
+/** One past the last index of group `gi`'s run in `bucket`. */
+fn runEnd(v : View, gi : i32) : i32 {
+    return v.at[gi];
+}
+
+/** Keep the groups that still have a visible endpoint, in remembered order. */
+fn selectGroups(v : View, g : Groups) : void {
+    let taken : i32 = 0;
+    for (i of 0..v.groupLen) {
+        let gi : i32 = g.byKey(v.groupKeys[i]);
+        if (gi >= 0 && v.gmark[gi] != v.gen) {
+            v.gmark[gi] = v.gen;
+            if (g.endpoints[gi] > 0) {
+                v.gslots[taken] = gi;
+                taken = taken + 1;
+            }
+        }
+    }
+    for (gi of 0..g.count) {
+        if (v.gmark[gi] != v.gen) {
+            v.gmark[gi] = v.gen;
+            if (g.endpoints[gi] > 0 && taken < MAX_GROUPS) {
+                v.gslots[taken] = gi;
+                taken = taken + 1;
+            }
+        }
+    }
+    v.groupLen = taken;
+}
+
+/** The ranking figure of group `gi` under `sortKey`. */
+fn groupRank(g : Groups, gi : i32, sortKey : Sort) : i64 {
+    return match sortKey {
+        Sort::Traffic => g.rate(gi),
+        Sort::Recent => g.lastMs[gi],
+        Sort::Hits => g.endpoints[gi] as i64,
+        Sort::Risk => groupRisk(g, gi),
+        Sort::Rhythm => g.flagged[gi] as i64,
+        _ => groupSalience(g, gi),
+    };
+}
+
+/** A group's risk, worst first, with "nothing known" ranking last. */
+fn groupRisk(g : Groups, gi : i32) : i64 {
+    if (g.worst[gi] < 0) {
+        return -1;
+    }
+    return (5 - g.worst[gi]) as i64;
+}
+
+/**
+ * A program's own salience: what its endpoints add up to. Flagged endpoints
+ * dominate — one bad address in a program's list is the reason to open it,
+ * and a program with thirty ordinary endpoints must not outrank it just by
+ * being busy.
+ */
+fn groupSalience(g : Groups, gi : i32) : i64 {
+    let flagged : i64 = (g.flagged[gi] as i64) * 2000;
+    let live : i64 = (g.live[gi] as i64) * 100;
+    let breadth : i64 = (g.endpoints[gi] as i64) * 20;
+    let traffic : i64 = g.rate(gi) * 1000 / 1048576;
+    if (traffic > 2000) {
+        traffic = 2000;
+    }
+    return flagged + live + breadth + traffic;
+}
+
+/** Sort the selected groups, damped, as `sortEndpoints` does its own. */
+fn sortGroups(v : View, g : Groups, pool : Pool, sortKey : Sort) : void {
+    let hyst : i64 = band(sortKey);
+    for (a of 1..v.groupLen) {
+        let x : i32 = v.gslots[a];
+        let b : i32 = a - 1;
+        if (sortKey == Sort::Name) {
+            while (b >= 0 && pool.order(
+                g.nameOff[v.gslots[b]], g.nameLen[v.gslots[b]],
+                g.nameOff[x], g.nameLen[x]
+            ) > 0) {
+                v.gslots[b + 1] = v.gslots[b];
+                b = b - 1;
+            }
+        } else {
+            let xr : i64 = groupRank(g, x, sortKey);
+            while (b >= 0 && xr > groupRank(g, v.gslots[b], sortKey) + hyst) {
+                v.gslots[b + 1] = v.gslots[b];
+                b = b - 1;
+            }
+        }
+        v.gslots[b + 1] = x;
+    }
+}
+
+/**
+ * Walk the sorted groups and their runs into the flat row list, and record
+ * the orders so the next rebuild starts from what the reader is looking at.
+ */
+fn emit(v : View, e : Endpoints, g : Groups) : void {
+    let rows : i32 = 0;
+    let y : i32 = 0;
+    let keys : i32 = 0;
+
+    let i : i32 = 0;
+    while (i < v.groupLen && rows < VIEW_MAX_ROWS) {
+        let gi : i32 = v.gslots[i];
+        v.groupKeys[i] = g.key[gi];
+        v.rowKind[rows] = RowKind::Group;
+        v.rowRef[rows] = gi;
+        v.rowTop[rows] = y;
+        v.rowH[rows] = ROW_GROUP;
+        y = y + ROW_GROUP;
+        rows = rows + 1;
+
+        let lo : i32 = runStart(v, gi);
+        let hi : i32 = runEnd(v, gi);
+        for (k of lo..hi) {
+            let s : i32 = v.bucket[k];
+            if (keys < MAX_ENDPOINTS) {
+                v.orderKeys[keys] = e.key[s];
+                keys = keys + 1;
+            }
+            if (g.isOpen(gi) && rows < VIEW_MAX_ROWS) {
+                v.rowKind[rows] = RowKind::Endpoint;
+                v.rowRef[rows] = s;
+                v.rowTop[rows] = y;
+                v.rowH[rows] = ROW_ENDPOINT;
+                y = y + ROW_ENDPOINT;
+                rows = rows + 1;
+            }
+        }
+        i = i + 1;
+    }
+
+    v.count = rows;
+    v.height = y;
+    v.orderLen = keys;
+}
+
+/** The row whose band contains `contentY`, or `-1`. */
+fn rowAt(v : View, contentY : i32) : i32 {
+    if (contentY < 0 || contentY >= v.height) {
+        return -1;
+    }
+    let lo : i32 = 0;
+    let hi : i32 = v.count - 1;
+    while (lo <= hi) {
+        let mid : i32 = (lo + hi) / 2;
+        if (contentY < v.rowTop[mid]) {
+            hi = mid - 1;
+        } else if (contentY >= v.rowTop[mid] + v.rowH[mid]) {
+            lo = mid + 1;
+        } else {
+            return mid;
+        }
+    }
+    return -1;
+}
+
+/** The flat-list position of the endpoint carrying `key`, or `-1`. */
+fn rowOfEndpoint(v : View, e : Endpoints, key : i64) : i32 {
+    for (i of 0..v.count) {
+        if (v.rowKind[i] == RowKind::Endpoint && e.key[v.rowRef[i]] == key) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/** The flat-list position of the group carrying `key`, or `-1`. */
+fn rowOfGroup(v : View, g : Groups, key : i64) : i32 {
+    for (i of 0..v.count) {
+        if (v.rowKind[i] == RowKind::Group && g.key[v.rowRef[i]] == key) {
+            return i;
+        }
+    }
+    return -1;
+}

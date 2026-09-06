@@ -1,0 +1,133 @@
+// sys/tiers — which sources of truth are actually running.
+//
+// This program reads the network three different ways, and only the first
+// always works. The window says so, permanently, in three badges next to the
+// title: a reader must never have to guess whether an empty traffic column
+// means "no traffic" or "no way to measure traffic".
+//
+//   POLL  the per-process connection tables. No privileges. Always on.
+//   DNS   the machine's own DNS cache, which turns an address into the name
+//         something asked for. No privileges; an undocumented interface, so
+//         it can go dark and the badge goes with it.
+//   ETW   a real-time kernel trace: bytes per process, the connections too
+//         short for polling to catch, and the domain each process resolved.
+//         Needs elevation, and the badge is the only honest way to say so.
+//
+// Each tier carries the sentence that explains its state, because "off" is
+// not a diagnosis. `note` is what the status bar and the tooltip show, and
+// it is a `match` over both enums so that a tier added here cannot ship
+// without one: the compiler names the arm that is missing.
+
+/** One of the three readings. */
+enum Tier : i32 {
+    /** The per-process connection tables. */
+    Poll = 0,
+    /** The machine's own resolver cache. */
+    Dns = 1,
+    /** The kernel network trace. */
+    Etw = 2,
+}
+
+/** What a reading is doing. */
+enum TierState : i32 {
+    /** Running, and its readings are on screen. */
+    On = 0,
+    /** Could not start, and the reason is in its note. */
+    Off = 1,
+    /** Started, and then stopped answering. */
+    Lost = 2,
+}
+
+/** The state of the three readings, and why each is in it. */
+class Tiers {
+    pub(crate) poll : TierState = TierState::On,
+    pub(crate) dns : TierState = TierState::Off,
+    pub(crate) etw : TierState = TierState::Off,
+    pub(crate) elevated : bool = false,
+    etwLost : i64 = 0,
+
+    /** Whether byte counts are being measured rather than left blank. */
+    pub(crate) fn bytesMeasured(self) : bool {
+        return self.etw == TierState::On;
+    }
+
+    /** The state of one badge, for the code that draws all three the same way. */
+    pub(crate) fn stateOf(self, which : Tier) : TierState {
+        return match which {
+            Tier::Poll => self.poll,
+            Tier::Dns => self.dns,
+            Tier::Etw => self.etw,
+        };
+    }
+}
+
+/** The three-letter badge of a tier. */
+fn tierName(which : Tier) : string {
+    return match which {
+        Tier::Poll => "POLL",
+        Tier::Dns => "DNS",
+        Tier::Etw => "ETW",
+    };
+}
+
+/**
+ * The second line of a tier's card: what it actually read, when it read
+ * anything. A badge that only says "on" is a badge a reader cannot use to
+ * tell a working source from an empty one.
+ */
+fn tierReading(which : Tier, state : TierState) : string {
+    if (which != Tier::Dns || state != TierState::On) {
+        return "";
+    }
+    return "names in the resolver's cache, matched against the addresses on screen:";
+}
+
+/** The sentence a tier's badge explains itself with. */
+fn tierNote(which : Tier, state : TierState, elevated : bool) : string {
+    return match which {
+        Tier::Poll => pollNote(state),
+        Tier::Dns => dnsNote(state),
+        Tier::Etw => etwNote(state, elevated),
+    };
+}
+
+/** Why the connection tables are, or are not, being read. */
+fn pollNote(state : TierState) : string {
+    return match state {
+        TierState::On => "Reading the per-process TCP and UDP tables once a second.",
+        _ => "Windows refused the connection tables — nothing can be read.",
+    };
+}
+
+/** Why the resolver cache is, or is not, being read. */
+fn dnsNote(state : TierState) : string {
+    return match state {
+        TierState::On =>
+            "Reading this machine's DNS cache, so addresses carry the name that was resolved.",
+        TierState::Lost =>
+            "The DNS cache stopped answering; addresses keep their reverse-DNS names.",
+        TierState::Off =>
+            "The DNS cache is not readable here; addresses keep their reverse-DNS names.",
+    };
+}
+
+/**
+ * Why the kernel trace is, or is not, running.
+ *
+ * The unelevated case is named separately from the failed one because they
+ * are two different things a reader can do something about: one is a
+ * restart as administrator, the other is not.
+ */
+fn etwNote(state : TierState, elevated : bool) : string {
+    return match state {
+        TierState::On =>
+            "Tracing the kernel network provider: bytes per process, short connections, and resolved names.",
+        TierState::Lost =>
+            "The kernel trace stopped. Byte counts are frozen at their last reading.",
+        TierState::Off => match elevated {
+            true => "The kernel trace could not be started, so byte counts are not measured.",
+            false =>
+                "Byte counts need a kernel trace, which needs administrator. Run as administrator to measure them.",
+        },
+    };
+}

@@ -1,0 +1,158 @@
+// ui/parts — the pieces every surface in this window is assembled from.
+//
+// Nothing here knows about endpoints or programs. It draws a chip, a row of
+// score pips, a disclosure triangle and a reading's trace — and it is one
+// file so that a chip in the toolbar and a chip in a tree row cannot drift
+// into two slightly different chips, which is exactly what happens when
+// each surface grows its own.
+//
+// The shapes themselves are `Frame`'s: the rounded fill and its outline,
+// the ring, the disc, the trace. What is left here is which of them a
+// reading is drawn with, and the band it is drawn against — a decision
+// about the figure, not about the pixels.
+
+use smalt::{Scratch, Frame, Rect, Color, BitmapFont};
+use crate::theme::{C_CARD, C_LINE, C_FAINT, C_OK, C_WARN, C_HOT};
+
+/** Pips a score is drawn as. */
+const PIPS : i32 = 5;
+/** Diameter of one pip. */
+const PIP_D : i32 = 7;
+/** Centre-to-centre spacing of the pips. */
+const PIP_STEP : i32 = 10;
+
+/**
+ * A trust score on the green → amber → red ramp. The hinges are where a
+ * score stops being unremarkable (4) and where it is the endpoint's whole
+ * story (2).
+ */
+fn scoreColor(score : i32) : i32 {
+    if (score < 0) {
+        return C_FAINT;
+    }
+    if (score >= 4) {
+        return C_OK;
+    }
+    if (score >= 3) {
+        return C_WARN;
+    }
+    return C_HOT;
+}
+
+/**
+ * Five pips, `score` of them filled. An unknown score draws five hollow
+ * pips in the faintest ink — visibly "nothing is known", which must not
+ * look like "nothing is wrong".
+ */
+fn pips(f : Frame, x : i32, cy : i32, score : i32) : i32 {
+    let color : i32 = scoreColor(score);
+    for (i of 0..PIPS) {
+        let cx : i32 = x + i * PIP_STEP;
+        if (score >= 0 && i < score) {
+            f.disc(cx + PIP_D / 2, cy, PIP_D / 2, color);
+        } else {
+            f.ring(cx + PIP_D / 2, cy, PIP_D / 2, Color::mix(C_CARD, color, 1, 2));
+        }
+    }
+    return x + PIPS * PIP_STEP;
+}
+
+/**
+ * A small filled label — a protocol badge, a toggle, a tier. The fill is the
+ * ink at a third strength, so a chip reads as coloured without competing
+ * with the text next to it.
+ */
+fn chip(f : Frame, fo : BitmapFont, x : i32, y : i32, label : string, ink : i32, on : bool) : i32 {
+    let w : i32 = fo.width(label) + 16;
+    let back : i32 = Color::mix(C_CARD, ink, 1, 4);
+    if (!on) {
+        back = C_CARD;
+    }
+    f.fillRound(Rect::make(x, y, w, 18), 5, back);
+    let text : i32 = ink;
+    if (!on) {
+        text = C_FAINT;
+        f.roundBorder(Rect::make(x, y, w, 18), 5, Color::mix(C_CARD, C_LINE, 2, 3));
+    }
+    fo.draw(f, x + 8, y + 13, label, text);
+    return x + w;
+}
+
+/**
+ * A trace of `hist` across the box, newest sample at the right edge.
+ *
+ * The band is computed here and handed to `Frame::spark`, because the
+ * vertical scale is a reading decision rather than a drawing one: it is the
+ * span the samples actually occupy, padded a little either side, not
+ * zero-to-peak. Drawn from zero, a reading that sits near a hundred and
+ * sixty and wobbles by four is a solid block — the shape that matters is
+ * four pixels tall at the top of forty, and the forty say nothing a reader
+ * did not already read off the figure beside it. Scaled to its own band,
+ * that same wobble is the whole picture, and a perfectly flat run draws a
+ * line across the middle, which is the honest picture of a reading that has
+ * not changed.
+ */
+fn spark(f : Frame, x : i32, y : i32, w : i32, h : i32, hist : i32[], n : i32, color : i32) : void {
+    if (n < 2) {
+        return;
+    }
+    let lo : i32 = hist[0];
+    let hi : i32 = hist[0];
+    for (i of 1..n) {
+        if (hist[i] < lo) {
+            lo = hist[i];
+        }
+        if (hist[i] > hi) {
+            hi = hist[i];
+        }
+    }
+    // A run that never left zero has nothing to show, and a band drawn
+    // around it fills half the box — which on the flagged card is a wide red
+    // stripe announcing that nothing has been flagged.
+    if (hi == 0 && lo == 0) {
+        return;
+    }
+    let pad : i32 = (hi - lo) / 4 + 1;
+    f.spark(
+        Rect::make(x, y, w, h),
+        hist,
+        n,
+        lo - pad,
+        hi + pad,
+        color,
+        Color::mix(C_CARD, color, 1, 6)
+    );
+}
+
+/** A disclosure triangle: pointing right when shut, down when open. */
+fn twisty(f : Frame, x : i32, cy : i32, open : bool, color : i32) : void {
+    for (i of 0..5) {
+        if (open) {
+            f.fillRect(Rect::make(x + i, cy - 2 + i, 9 - i * 2, 1), color);
+        } else {
+            f.fillRect(Rect::make(x + 2 + i, cy - 4 + i, 1, 9 - i * 2), color);
+        }
+    }
+}
+
+/**
+ * The figure standing in `s`, right-aligned at `right`.
+ *
+ * Named for what it draws rather than for how: a *figure* is a number this
+ * frame formatted and will throw away, as against a label, which is a
+ * literal. The two take different doors into a face, and the name is what
+ * says which one a reader is looking at.
+ */
+fn figureRight(f : Frame, fo : BitmapFont, right : i32, base : i32, s : Scratch, color : i32) : i32 {
+    return fo.drawBytesRight(f, right, base, s.at(), 0, s.length(), color);
+}
+
+/** The figure standing in `s`, left-aligned at `x`. */
+fn figure(f : Frame, fo : BitmapFont, x : i32, base : i32, s : Scratch, color : i32) : i32 {
+    return fo.drawBytes(f, x, base, s.at(), 0, s.length(), color);
+}
+
+/** How wide that figure draws, without drawing it. */
+fn figureWidth(fo : BitmapFont, s : Scratch) : i32 {
+    return fo.widthBytes(s.at(), 0, s.length());
+}

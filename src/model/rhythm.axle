@@ -1,0 +1,210 @@
+// model/rhythm — how often an endpoint comes back, and how regularly.
+//
+// This is the half of the program that a connection list does not give you.
+// A machine talks to a few hundred addresses; what separates them is not
+// volume but **shape**. A browser tab opens a burst of connections and stops.
+// An update service reconnects every few hours, raggedly, because it waits
+// on a timer that drifts. A beacon reconnects every thirty seconds, to the
+// millisecond, forever — and that regularity, not its size, is the signature.
+//
+// So each endpoint carries a small ring of the instants at which it became
+// live again, and three readings derived from it:
+//
+//   period    the median gap between two arrivals
+//   jitter    the mean deviation from that median
+//   regular   `1 − jitter/period`, in tenths of a percent
+//
+// The **median**, not the mean: one long gap (a laptop asleep, a network
+// dropped) shifts a mean enough to hide a metronome, and the whole point is
+// to not lose the metronome.
+//
+// Nothing here decides anything about risk. It reports a shape; `model/score`
+// is what decides that a regular shape towards a nameless host is worth a
+// warning, and `model/endpoints` is what decides where the row sorts.
+
+
+use smalt::Mem;
+
+/** Arrivals kept per endpoint. Sixteen spans four hours of a 15-minute
+ *  beacon and four minutes of a 15-second one — both readable shapes. */
+const RING : i32 = 16;
+/** Gaps needed before a regularity reading means anything. */
+const MIN_GAPS : i32 = 3;
+/** A period below this is a burst, not a rhythm; regularity is not claimed. */
+const MIN_PERIOD_MS : i64 = 250;
+
+/**
+ * The arrival rings of every endpoint, and the three readings taken from
+ * them. Indexed by endpoint slot; `model/endpoints` owns the object and the
+ * slot numbering, and compacts both together.
+ */
+class Rhythm {
+    stamps : i64,
+    head : i32[],
+    pub(crate) count : i32[],
+    pub(crate) periodMs : i64[],
+    pub(crate) jitterMs : i64[],
+    pub(crate) regular : i32[],
+    gaps : i64,
+
+    constructor(slots : i32) {
+        self.stamps = Mem::take((slots as i64) * (RING as i64) * 8);
+        self.head = malloc<i32>(slots as i64);
+        self.count = malloc<i32>(slots as i64);
+        self.periodMs = malloc<i64>(slots as i64);
+        self.jitterMs = malloc<i64>(slots as i64);
+        self.regular = malloc<i32>(slots as i64);
+        self.gaps = Mem::take((RING as i64) * 8);
+    }
+
+    /** Byte address of ring position `k` of slot `s`. */
+    fn at(self, s : i32, k : i32) : i64 {
+        return self.stamps + ((s as i64) * (RING as i64) + (k as i64)) * 8;
+    }
+
+    /** Start slot `s` empty — called when the slot is minted or reused. */
+    pub(crate) fn reset(mut self, s : i32) : void {
+        self.head[s] = 0;
+        self.count[s] = 0;
+        self.periodMs[s] = 0;
+        self.jitterMs[s] = 0;
+        self.regular[s] = 0;
+    }
+
+    /**
+     * Record that slot `s` became live again at `atMs`, and re-derive its
+     * three readings. Called on the 0 → live transition only: a connection
+     * that simply stays open is one arrival, not one per second, or a
+     * long-lived socket would read as the most regular thing on the machine.
+     */
+    pub(crate) fn arrive(mut self, s : i32, atMs : i64) : void {
+        if (self.stamps == 0 || self.gaps == 0) {
+            return;
+        }
+        Mem::putQword(self.at(s, self.head[s]), 0, atMs);
+        self.head[s] = (self.head[s] + 1) % RING;
+        if (self.count[s] < RING) {
+            self.count[s] = self.count[s] + 1;
+        }
+        self.derive(s);
+    }
+
+    /** The `k`-th oldest arrival held for slot `s`. */
+    fn oldest(self, s : i32, k : i32) : i64 {
+        let n : i32 = self.count[s];
+        let first : i32 = (self.head[s] - n + RING * 2) % RING;
+        return Mem::qwordAt(self.at(s, (first + k) % RING), 0);
+    }
+
+    /**
+     * Re-derive period, jitter and regularity from the ring.
+     *
+     * Below `MIN_GAPS` the readings are cleared rather than guessed: two
+     * arrivals make one gap, and one gap is a coincidence with a number
+     * attached. A caller reading `regular == 0` cannot tell "irregular"
+     * from "not enough evidence", which is why `count` is public and the UI
+     * says "×2" instead of claiming a rhythm.
+     */
+    fn derive(mut self, s : i32) : void {
+        let n : i32 = self.count[s];
+        if (n < MIN_GAPS + 1) {
+            self.periodMs[s] = 0;
+            self.jitterMs[s] = 0;
+            self.regular[s] = 0;
+            return;
+        }
+        for (g of 0..n - 1) {
+            Mem::putQword(self.gaps, (g as i64) * 8, self.oldest(s, g + 1) - self.oldest(s, g));
+        }
+        let count : i32 = n - 1;
+        sortGaps(self.gaps, count);
+
+        let period : i64 = Mem::qwordAt(self.gaps, ((count / 2) as i64) * 8);
+        self.periodMs[s] = period;
+        if (period < MIN_PERIOD_MS) {
+            self.jitterMs[s] = 0;
+            self.regular[s] = 0;
+            return;
+        }
+
+        let sum : i64 = 0;
+        for (i of 0..count) {
+            let d : i64 = Mem::qwordAt(self.gaps, (i as i64) * 8) - period;
+            if (d < 0) {
+                d = 0 - d;
+            }
+            sum = sum + d;
+        }
+        let jitter : i64 = sum / (count as i64);
+        self.jitterMs[s] = jitter;
+
+        let spread : i64 = (jitter * 1000) / period;
+        if (spread > 1000) {
+            spread = 1000;
+        }
+        self.regular[s] = (1000 - spread) as i32;
+    }
+
+    /** Copy slot `from` onto slot `to` — the tail-fill of a compaction. */
+    pub(crate) fn copyFrom(mut self, to : i32, from : i32) : void {
+        for (k of 0..RING) {
+            Mem::putQword(self.at(to, k), 0, Mem::qwordAt(self.at(from, k), 0));
+        }
+        self.head[to] = self.head[from];
+        self.count[to] = self.count[from];
+        self.periodMs[to] = self.periodMs[from];
+        self.jitterMs[to] = self.jitterMs[from];
+        self.regular[to] = self.regular[from];
+    }
+
+    /** Release the raw blocks; the column arrays go with the object. */
+    pub(crate) fn dispose(mut self) : void {
+        if (self.stamps != 0) {
+            Mem::release(self.stamps);
+            self.stamps = 0;
+        }
+        if (self.gaps != 0) {
+            Mem::release(self.gaps);
+            self.gaps = 0;
+        }
+    }
+}
+
+/** Insertion sort of `n` gaps — `n` is at most fifteen. */
+fn sortGaps(base : i64, n : i32) : void {
+    for (a of 1..n) {
+        let v : i64 = Mem::qwordAt(base, (a as i64) * 8);
+        let b : i32 = a - 1;
+        while (b >= 0 && Mem::qwordAt(base, (b as i64) * 8) > v) {
+            Mem::putQword(base, ((b + 1) as i64) * 8, Mem::qwordAt(base, (b as i64) * 8));
+            b = b - 1;
+        }
+        Mem::putQword(base, ((b + 1) as i64) * 8, v);
+    }
+}
+
+/** Whether a slot's ring holds enough arrivals to claim a rhythm at all. */
+fn hasRhythm(r : Rhythm, s : i32) : bool {
+    return r.count[s] >= MIN_GAPS + 1 && r.periodMs[s] >= MIN_PERIOD_MS;
+}
+
+/**
+ * The plain-language reading of a regularity, which is what the tree row
+ * shows. A number between 0 and 1000 tells a reader nothing; "very regular"
+ * next to "every 30 s" tells them what they are looking at.
+ */
+fn regularityWord(regular : i32) : string {
+    if (regular >= 900) {
+        return "clockwork";
+    }
+    if (regular >= 750) {
+        return "very regular";
+    }
+    if (regular >= 500) {
+        return "regular";
+    }
+    if (regular >= 250) {
+        return "loose";
+    }
+    return "irregular";
+}

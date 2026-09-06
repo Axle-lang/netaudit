@@ -1,0 +1,211 @@
+// enrich/queue — which addresses get looked up, in what order, how often.
+//
+// The lookup service is free and keyless, which means it is also rate
+// limited, and a monitoring tool that hammers a public endpoint deserves to
+// be blocked by it. So this file is mostly restraint:
+//
+//   · **one batch in flight**, never two;
+//   · **up to a hundred addresses per batch**, which is the service's own
+//     limit and turns a hundred round-trips into one;
+//   · **a floor between batches**, well under the published rate;
+//   · **an exponential back-off** on failure, so a network that is down or a
+//     service that is angry is not asked again immediately;
+//   · **a permanent session cache** — an address is asked about once, ever.
+//     That is what `Hosts::look` is, and it is why the queue can be this
+//     simple: it never has to remember what it has already asked.
+//
+// Only routable addresses are queued. `Hosts` marks everything else
+// `Look::Local` on sight, because no registry answers for a peer on this
+// machine or this network, and asking would be both useless and a leak of
+// what is on it.
+
+use smalt::{Scratch, Mem};
+use crate::model::hosts::{Hosts, Look};
+use crate::model::pool;
+use crate::fmt;
+use std::text::StringBuilder;
+
+/** Addresses per batch — the service's own ceiling. */
+const BATCH_MAX : i32 = 100;
+/** Shortest gap between two batches. */
+const BATCH_GAP_MS : i64 = 3000;
+/** How long to wait after the first failure. */
+const BACKOFF_MS : i64 = 15000;
+/** Ceiling on the doubling back-off. */
+const BACKOFF_MAX_MS : i64 = 300000;
+/** Shortest gap between two registry lookups — one address at a time. */
+const WHOIS_GAP_MS : i64 = 1500;
+
+/** Which registry question is in flight. */
+enum WhoisKind : i32 {
+    /** The lookup asks which network announces the address. */
+    Origin = 0,
+    /** The lookup asks what that network is called. */
+    AsName = 1,
+    /** The lookup asks what name the address's owner publishes. */
+    Ptr = 2,
+}
+
+
+/**
+ * The one place a lookup service is named.
+ *
+ * Plain HTTP because the free tier of this service does not answer on TLS,
+ * and what is sent is a list of the addresses this machine is already
+ * talking to — the query reveals nothing the network path has not already
+ * seen. The fields are named explicitly so the response carries what is
+ * used and nothing else.
+ */
+fn batchUrl() : string {
+    return "http://ip-api.com/batch?fields=status,message,country,countryCode,city,isp,org,as,asname,reverse,mobile,proxy,hosting,query";
+}
+
+/** What is outstanding, and when the next batch may go. */
+class Queue {
+    pub(crate) sent : i32[],
+    pub(crate) sentLen : i32,
+    pub(crate) inFlight : bool,
+    nextDueMs : i64,
+    backoffMs : i64,
+    pub(crate) resolved : i32,
+    pub(crate) lastError : bool,
+
+    pub(crate) whoisHost : i32,
+    pub(crate) whoisKind : WhoisKind,
+    pub(crate) whoisAsn : i32,
+    pub(crate) whoisInFlight : bool,
+    whoisDueMs : i64,
+
+    constructor() {
+        self.sent = malloc<i32>(BATCH_MAX as i64);
+        self.sentLen = 0;
+        self.inFlight = false;
+        self.nextDueMs = 0;
+        self.backoffMs = 0;
+        self.resolved = 0;
+        self.lastError = false;
+        self.whoisHost = -1;
+        self.whoisKind = WhoisKind::Origin;
+        self.whoisAsn = 0;
+        self.whoisInFlight = false;
+        self.whoisDueMs = 0;
+    }
+
+    /** Whether a registry lookup may go out right now. */
+    pub(crate) fn whoisReady(self, nowMs : i64) : bool {
+        return !self.whoisInFlight && nowMs >= self.whoisDueMs;
+    }
+
+    /** Note that a registry lookup finished, cleanly or not. */
+    pub(crate) fn whoisDone(mut self, nowMs : i64) : void {
+        self.whoisInFlight = false;
+        self.whoisHost = -1;
+        self.whoisDueMs = nowMs + WHOIS_GAP_MS;
+    }
+
+    /** Whether a batch may go out right now. */
+    pub(crate) fn ready(self, nowMs : i64) : bool {
+        return !self.inFlight && nowMs >= self.nextDueMs;
+    }
+
+    /** Note that a batch came back cleanly. */
+    pub(crate) fn succeeded(mut self, nowMs : i64) : void {
+        self.inFlight = false;
+        self.backoffMs = 0;
+        self.lastError = false;
+        self.nextDueMs = nowMs + BATCH_GAP_MS;
+    }
+
+    /**
+     * Note that a batch failed, and push the next one further out. The
+     * addresses go back to `Look::New` rather than being marked failed: the
+     * network being down says nothing about the address, and a row that
+     * gave up on the first refused connection would never recover when the
+     * link came back.
+     */
+    pub(crate) fn failed(mut self, hosts : Hosts, nowMs : i64) : void {
+        self.inFlight = false;
+        self.lastError = true;
+        if (self.backoffMs == 0) {
+            self.backoffMs = BACKOFF_MS;
+        } else {
+            self.backoffMs = self.backoffMs * 2;
+        }
+        if (self.backoffMs > BACKOFF_MAX_MS) {
+            self.backoffMs = BACKOFF_MAX_MS;
+        }
+        self.nextDueMs = nowMs + self.backoffMs;
+
+        for (i of 0..self.sentLen) {
+            let h : i32 = self.sent[i];
+            if (h >= 0 && hosts.look[h] == Look::Sent) {
+                hosts.look[h] = Look::New;
+            }
+        }
+        self.sentLen = 0;
+    }
+}
+
+/**
+ * Build the next batch's request body, and mark what went into it.
+ *
+ * The body is a plain JSON array of address strings, which is the shortest
+ * form the service accepts. Order matters and is the contract with
+ * `enrich/ipapi`: the response comes back in request order, and that is how
+ * an answer finds its row without re-parsing an address back into bytes.
+ */
+fn build(q : Queue, hosts : Hosts, s : Scratch) : string {
+    q.sentLen = 0;
+    let sb : StringBuilder = new StringBuilder();
+    sb.append("[");
+
+    let h : i32 = 0;
+    while (h < hosts.count && q.sentLen < BATCH_MAX) {
+        if (hosts.look[h] == Look::New) {
+            if (q.sentLen > 0) {
+                sb.append(",");
+            }
+            sb.append("\"");
+            appendAddress(sb, hosts, h, s);
+            sb.append("\"");
+            hosts.look[h] = Look::Sent;
+            q.sent[q.sentLen] = h;
+            q.sentLen = q.sentLen + 1;
+        }
+        h = h + 1;
+    }
+
+    sb.append("]");
+    return sb.toString();
+}
+
+/** Whether anything is waiting to be looked up. */
+fn pending(hosts : Hosts) : bool {
+    for (h of 0..hosts.count) {
+        if (hosts.look[h] == Look::New) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Append host `h`'s address in text form. It is formatted into the scratch
+ * by the same code that draws it on screen, so the string in the request and
+ * the string on the row cannot disagree about which address this is.
+ */
+fn appendAddress(sb : StringBuilder, hosts : Hosts, h : i32, s : Scratch) : void {
+    s.reset();
+    fmt::address(s, hosts.addrAt(h), hosts.family[h]);
+    for (i of 0..s.length()) {
+        sb.appendChar(Mem::byteAt(s.at(), i as i64));
+    }
+}
+
+/** The sentence the status bar uses while the lookups are struggling. */
+fn troubleNote(q : Queue) : string {
+    if (!q.lastError) {
+        return "";
+    }
+    return "The address lookup service is not answering — names and scores will fill in when it does.";
+}

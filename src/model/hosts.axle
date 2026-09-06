@@ -1,0 +1,285 @@
+// model/hosts — everything known about one address, in one row.
+//
+// An endpoint is a conversation; a host is the other end of it, and several
+// endpoints share one. Three programs talking to `142.250.75.174` are three
+// rows in the tree and one row here, so the address is looked up once, the
+// enrichment is fetched once, and a name learned from the DNS cache lights
+// up every row that points at it in the same frame.
+//
+// Every text field is an `(offset, length)` into the shared pool. Nothing
+// here holds a `string`: these rows are redrawn sixty times a second when
+// the pointer moves, and a `string` field would be a refcount touched on
+// every repaint.
+//
+// A host is keyed on its address **bytes** (`model/addr::hostKey`), so the
+// same machine reached over v4 and over a dual-stack socket is one row.
+
+use smalt::{Mem, SlotIndex};
+use crate::model::addr::{reach, hostKey, shownFamily, shownOffset, Reach};
+
+/** Hosts the table can hold. */
+const MAX_HOSTS : i32 = 4096;
+/** Address bytes per row. */
+const HOST_ADDR_BYTES : i64 = 16;
+/** Longest hostname kept. */
+const HOST_MAX : i32 = 96;
+/** Longest network / organisation name kept. */
+const ORG_MAX : i32 = 48;
+/** Longest place name kept. */
+const PLACE_MAX : i32 = 32;
+
+/** How far a row has got through the registry lookup. */
+enum Look : i32 {
+    /** Nothing has been asked about this address yet. */
+    New = 0,
+    /** The address is in the batch currently in flight. */
+    Sent = 1,
+    /** The lookup came back and the fields below are filled. */
+    Done = 2,
+    /** The lookup came back and said it knew nothing, or the network refused. */
+    Failed = 3,
+    /** Not routable: there is no registry that could answer for it. */
+    Local = 4,
+}
+
+/**
+ * Where a row's name came from.
+ *
+ * The order is a ranking, and the code that folds a name in reads it as one:
+ * a later source overwrites an earlier one and never the reverse, so what a
+ * program actually asked for beats what the address's owner published.
+ */
+enum NameSource : i32 {
+    /** No name yet. */
+    None = 0,
+    /** A reverse-DNS record: what the address's owner published. */
+    Ptr = 1,
+    /** Windows' own DNS cache — a program really asked for this name. */
+    Cache = 2,
+    /** An ETW DNS event, attributed to the process that asked. */
+    Etw = 3,
+}
+
+/** The address answers as a proxy, VPN or Tor exit. */
+const FLAG_PROXY : i32 = 1;
+/** The address belongs to a datacenter rather than to an access network. */
+const FLAG_HOSTING : i32 = 2;
+/** The address belongs to a mobile carrier. */
+const FLAG_MOBILE : i32 = 4;
+
+/**
+ * One row per distinct address seen.
+ *
+ * There is no score here. A reputation is a property of an address, but what
+ * a reader is shown is a property of a **conversation** — the same address
+ * reached on a standard port and on an odd one is not the same finding — so
+ * the score lives on the endpoint (`model/score`) and this row carries only
+ * the evidence it is built from.
+ */
+/**
+ * How strong a claim a source has on a row's name.
+ *
+ * A name is overwritten only by a *better* source, never by an equal or
+ * weaker one — so what a program actually asked for beats what the
+ * address's owner published, and neither is replaced by a later reading of
+ * the same kind. An enum carries no order of its own, and spelling the cast
+ * at each comparison would be four places that could disagree about which
+ * source wins.
+ */
+fn nameRank(from : NameSource) : i32 {
+    return from as i32;
+}
+
+class Hosts {
+    addrs : i64,
+    pub(crate) family : i32[],
+    pub(crate) reach : Reach[],
+    pub(crate) look : Look[],
+
+    pub(crate) nameOff : i64[],
+    pub(crate) nameLen : i32[],
+    pub(crate) nameFrom : NameSource[],
+
+    pub(crate) asn : i32[],
+    pub(crate) netOff : i64[],
+    pub(crate) netLen : i32[],
+    pub(crate) orgOff : i64[],
+    pub(crate) orgLen : i32[],
+
+    pub(crate) ccOff : i64[],
+    pub(crate) ccLen : i32[],
+    pub(crate) countryOff : i64[],
+    pub(crate) countryLen : i32[],
+    pub(crate) cityOff : i64[],
+    pub(crate) cityLen : i32[],
+
+    flags : i32[],
+
+    pub(crate) count : i32,
+    index : SlotIndex,
+
+    constructor() {
+        self.addrs = Mem::take((MAX_HOSTS as i64) * HOST_ADDR_BYTES);
+        self.family = malloc<i32>(MAX_HOSTS as i64);
+        self.reach = malloc<Reach>(MAX_HOSTS as i64);
+        self.look = malloc<Look>(MAX_HOSTS as i64);
+        self.nameOff = malloc<i64>(MAX_HOSTS as i64);
+        self.nameLen = malloc<i32>(MAX_HOSTS as i64);
+        self.nameFrom = malloc<NameSource>(MAX_HOSTS as i64);
+        self.asn = malloc<i32>(MAX_HOSTS as i64);
+        self.netOff = malloc<i64>(MAX_HOSTS as i64);
+        self.netLen = malloc<i32>(MAX_HOSTS as i64);
+        self.orgOff = malloc<i64>(MAX_HOSTS as i64);
+        self.orgLen = malloc<i32>(MAX_HOSTS as i64);
+        self.ccOff = malloc<i64>(MAX_HOSTS as i64);
+        self.ccLen = malloc<i32>(MAX_HOSTS as i64);
+        self.countryOff = malloc<i64>(MAX_HOSTS as i64);
+        self.countryLen = malloc<i32>(MAX_HOSTS as i64);
+        self.cityOff = malloc<i64>(MAX_HOSTS as i64);
+        self.cityLen = malloc<i32>(MAX_HOSTS as i64);
+        self.flags = malloc<i32>(MAX_HOSTS as i64);
+        self.count = 0;
+        self.index = new SlotIndex(MAX_HOSTS * 2);
+    }
+
+    /** Byte address of row `s`'s sixteen address bytes. */
+    pub(crate) fn addrAt(self, s : i32) : i64 {
+        return self.addrs + (s as i64) * HOST_ADDR_BYTES;
+    }
+
+    /**
+     * The row for the address at `src`, minting it if this is the first
+     * sighting. `-1` only when the table is full, which the status bar
+     * reports rather than the row silently losing its attribution.
+     */
+    pub(crate) fn intern(mut self, src : i64, family : i32) : i32 {
+        let fam : i32 = shownFamily(src, family);
+        let at : i64 = src + shownOffset(src, family);
+        let key : i64 = hostKey(at, fam);
+        let s : i32 = self.index.get(key);
+        if (s >= 0) {
+            return s;
+        }
+        if (self.count >= MAX_HOSTS || self.addrs == 0) {
+            return -1;
+        }
+        s = self.count;
+        self.count = s + 1;
+
+        Mem::clear(self.addrAt(s), HOST_ADDR_BYTES);
+        let n : i64 = 4;
+        if (fam == 6) {
+            n = 16;
+        }
+        for (i of 0..n) {
+            Mem::putByte(self.addrAt(s), i, Mem::byteAt(at, i));
+        }
+
+        self.family[s] = fam;
+        self.reach[s] = reach(at, fam);
+        self.look[s] = Look::New;
+        if (self.reach[s] != Reach::Public) {
+            self.look[s] = Look::Local;
+        }
+        self.nameOff[s] = -1;
+        self.nameLen[s] = 0;
+        self.nameFrom[s] = NameSource::None;
+        self.asn[s] = 0;
+        self.netOff[s] = -1;
+        self.netLen[s] = 0;
+        self.orgOff[s] = -1;
+        self.orgLen[s] = 0;
+        self.ccOff[s] = -1;
+        self.ccLen[s] = 0;
+        self.countryOff[s] = -1;
+        self.countryLen[s] = 0;
+        self.cityOff[s] = -1;
+        self.cityLen[s] = 0;
+        self.flags[s] = 0;
+
+        self.index.put(key, s);
+        return s;
+    }
+
+    /** The row for the address at `src`, or `-1` if it has never been seen. */
+    pub(crate) fn lookup(self, src : i64, family : i32) : i32 {
+        let fam : i32 = shownFamily(src, family);
+        return self.index.get(hostKey(src + shownOffset(src, family), fam));
+    }
+
+    /**
+     * Attach a name to row `s`, keeping the more trustworthy source when
+     * two disagree. A name Windows resolved for a process (`NameSource::Etw`,
+     * `NameSource::Cache`) is what that process asked for; a PTR record is
+     * only what the address's owner chose to publish, and for a CDN that is
+     * usually a machine number. Higher wins, and a name already set by a
+     * better source is never overwritten by a worse one.
+     */
+    pub(crate) fn name(mut self, s : i32, off : i64, len : i32, from : NameSource) : void {
+        if (s < 0 || off < 0) {
+            return;
+        }
+        if (self.nameOff[s] >= 0 && nameRank(self.nameFrom[s]) >= nameRank(from)) {
+            return;
+        }
+        self.nameOff[s] = off;
+        self.nameLen[s] = len;
+        self.nameFrom[s] = from;
+    }
+
+    /** Whether row `s` carries flag `f`. */
+    pub(crate) fn has(self, s : i32, f : i32) : bool {
+        return s >= 0 && (self.flags[s] & f) != 0;
+    }
+
+    /** Raise flag `f` on row `s`. */
+    pub(crate) fn raise(mut self, s : i32, f : i32) : void {
+        if (s >= 0) {
+            self.flags[s] = self.flags[s] | f;
+        }
+    }
+
+    /**
+     * Whether row `s` is routable, answered for, and still has no name — the
+     * one case a reverse lookup is worth making.
+     */
+    pub(crate) fn unnamed(self, s : i32) : bool {
+        return s >= 0 && self.nameOff[s] < 0 && self.reach[s] == Reach::Public
+            && self.look[s] == Look::Done;
+    }
+
+    /** Whether row `s` still needs an enrichment lookup. */
+    fn wants(self, s : i32) : bool {
+        return s >= 0 && self.look[s] == Look::New;
+    }
+
+    /** Release the address block and the index. */
+    pub(crate) fn dispose(mut self) : void {
+        if (self.addrs != 0) {
+            Mem::release(self.addrs);
+            self.addrs = 0;
+        }
+        self.index.close();
+    }
+}
+
+/** How the tooltip explains where a name came from. */
+fn nameSource(from : NameSource) : string {
+    return match from {
+        NameSource::Etw => "the name this program asked Windows to resolve",
+        NameSource::Cache => "found in this machine's DNS cache",
+        NameSource::Ptr => "reverse DNS — what the address owner publishes",
+        _ => "",
+    };
+}
+
+/** How the status bar explains a lookup that has not answered. */
+fn lookNote(look : Look) : string {
+    return match look {
+        Look::New => "waiting for lookup",
+        Look::Sent => "looking up…",
+        Look::Failed => "the lookup service did not answer for this address",
+        Look::Local => "not routable — no registry answers for it",
+        _ => "",
+    };
+}

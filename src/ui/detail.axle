@@ -1,0 +1,274 @@
+// ui/detail — the card behind Enter: one endpoint, said in full, with the
+// score taken apart.
+//
+// The tree row has to fit seven facts on two lines, which means every one of
+// them is abbreviated. This is where they are not. Its most important
+// section is the last one: **why the score is what it is**, one line per
+// signal, each with the points it cost or earned. A trust reading that
+// cannot be interrogated is a reading that will be either believed blindly
+// or ignored entirely, and both are worse than no reading.
+//
+// The help card lives here too, for the same reason a keyboard reference
+// usually lives next to the thing it drives: it is the other card the window
+// can put in front of everything else, and it shares the frame that does so.
+
+use smalt::{Fmt, Frame, Rect, BitmapFont};
+use crate::fmt;
+use crate::ui::card;
+use crate::ui::parts;
+use crate::ui::card;
+use crate::app::{App, Modal};
+use crate::model::pool;
+use crate::model::view::{View, RowKind, rowOfEndpoint};
+use crate::model::endpoints::{Endpoints, SocketKind, kindBadge};
+use crate::model::groups;
+use crate::model::hosts::{Hosts, nameSource, lookNote, Look};
+use crate::model::rhythm::{hasRhythm, regularityWord};
+use crate::model::addr;
+use crate::model::score::{reasonBit, reasonWeight, reasonText, REASON_COUNT};
+use crate::sys::conn::{Proto, stateName};
+use crate::sys::tiers;
+use crate::theme::{WIN_W, WIN_H, C_MODAL, C_LINE, C_TEXT, C_DIM, C_FAINT, C_MEM, C_OK, C_HOT, C_ACCENT};
+
+/**
+ * The whole card, dimming the page behind it. Nothing is drawn when the
+ * selection has gone — an endpoint can expire while its card is open, and a
+ * card showing a row that no longer exists is worse than no card.
+ */
+fn drawCard(
+    f : Frame,
+    ui : BitmapFont,
+    big : BitmapFont,
+    v : View,
+    e : Endpoints,
+    g : Groups,
+    hosts : Hosts,
+    pool : Pool,
+    t : Tiers,
+    a : App
+) : void {
+    if (a.modal == Modal::None) {
+        return;
+    }
+    let c : Card = new Card();
+    c.measure();
+    if (a.modal == Modal::Help) {
+        help(c, f, ui);
+    } else {
+        let s : i32 = endpointOf(v, e, a);
+        if (s < 0) {
+            return;
+        }
+        endpointCard(c, f, ui, pool, e, g, hosts, t, a, s);
+    }
+    if (c.lines == 0) {
+        return;
+    }
+
+    f.shade(Rect::make(0, 0, WIN_W, WIN_H), 0x000000, 3, 5);
+    let w : i32 = c.boxWidth();
+    let h : i32 = c.boxHeight();
+    let x : i32 = (WIN_W - w) / 2;
+    let y : i32 = (WIN_H - h) / 2;
+    f.fillRound(Rect::make(x, y, w, h), 10, C_MODAL);
+    f.roundBorder(Rect::make(x, y, w, h), 10, C_LINE);
+
+    c.paint(x + 20, c.firstBase(y));
+    if (a.modal == Modal::Help) {
+        help(c, f, ui);
+    } else {
+        endpointCard(c, f, ui, pool, e, g, hosts, t, a, endpointOf(v, e, a));
+    }
+    ui.drawRight(f, x + w - 20, y + h - 14, "Esc closes", C_FAINT);
+}
+
+/** The endpoint the card is about, or `-1` if it is gone. */
+fn endpointOf(v : View, e : Endpoints, a : App) : i32 {
+    if (!a.selected || a.selKind != RowKind::Endpoint) {
+        return -1;
+    }
+    return e.bySlotKey(a.selKey);
+}
+
+/** One endpoint, in full. */
+fn endpointCard(
+    c : Card,
+    f : Frame,
+    ui : BitmapFont,
+    pool : Pool,
+    e : Endpoints,
+    g : Groups,
+    hosts : Hosts,
+    t : Tiers,
+    a : App,
+    s : i32
+) : void {
+    if (s < 0) {
+        return;
+    }
+    let h : i32 = e.host[s];
+
+    card::head(c, f, ui, "ENDPOINT");
+    if (h >= 0 && hosts.nameOff[h] >= 0) {
+        card::spanLine(c, f, ui, pool, hosts.nameOff[h], hosts.nameLen[h], C_TEXT);
+    }
+    a.scratch.reset();
+    fmt::addrPort(a.scratch, e.addrAt(s), e.family[s], e.port[s]);
+    card::figField(c, f, ui, a.scratch, kindBadge(e.kind[s], e.proto[s]), "", C_TEXT);
+    if (e.liveNow[s] > 0) {
+        card::line(c, f, ui, stateName(e.state[s]), C_OK);
+    } else {
+        card::line(c, f, ui, "no socket open right now — kept as history", C_FAINT);
+    }
+    card::spanField(
+        c,
+        f,
+        ui,
+        pool,
+        "program  ",
+        g.pathOff[e.group[s]],
+        g.pathLen[e.group[s]],
+        C_DIM
+    );
+
+    attribution(c, f, ui, pool, hosts, h);
+    repetition(c, f, ui, e, a, s);
+    traffic(c, f, ui, e, t, a, s);
+    trust(c, f, ui, e, s);
+}
+
+/** Who owns the address, and where the name came from. */
+fn attribution(c : Card, f : Frame, ui : BitmapFont, pool : Pool, hosts : Hosts, h : i32) : void {
+    if (h < 0) {
+        return;
+    }
+    card::head(c, f, ui, "ATTRIBUTION");
+    card::spanField(c, f, ui, pool, "network  ", hosts.netOff[h], hosts.netLen[h], C_DIM);
+    card::spanField(c, f, ui, pool, "operator  ", hosts.orgOff[h], hosts.orgLen[h], C_DIM);
+    card::spanField(c, f, ui, pool, "city  ", hosts.cityOff[h], hosts.cityLen[h], C_DIM);
+    card::spanField(c, f, ui, pool, "country  ", hosts.countryOff[h], hosts.countryLen[h], C_DIM);
+    card::line(c, f, ui, reachWord(hosts.reach[h]), C_FAINT);
+    card::line(c, f, ui, nameSource(hosts.nameFrom[h]), C_FAINT);
+    card::line(c, f, ui, lookNote(hosts.look[h]), C_FAINT);
+}
+
+/** How often it came back, and how evenly. */
+fn repetition(c : Card, f : Frame, ui : BitmapFont, e : Endpoints, a : App, s : i32) : void {
+    card::head(c, f, ui, "REPETITION");
+    a.scratch.reset();
+    a.scratch.decimal(e.hits[s] as i64);
+    card::figField(c, f, ui, a.scratch, "visits  ", "", C_TEXT);
+
+    if (hasRhythm(e.rhythm, s)) {
+        a.scratch.reset();
+        a.scratch.elapsed(e.rhythm.periodMs[s]);
+        card::figField(c, f, ui, a.scratch, "typical gap  ", "", C_TEXT);
+        a.scratch.reset();
+        a.scratch.elapsed(e.rhythm.jitterMs[s]);
+        card::figField(c, f, ui, a.scratch, "wander  ", "", C_DIM);
+        a.scratch.reset();
+        a.scratch.decimal((e.rhythm.regular[s] / 10) as i64);
+        card::figField(
+            c,
+            f,
+            ui,
+            a.scratch,
+            "steadiness  ",
+            "%  " + regularityWord(e.rhythm.regular[s]),
+            C_ACCENT
+        );
+    } else {
+        card::line(c, f, ui, "too few visits to read a rhythm", C_FAINT);
+    }
+
+    a.scratch.reset();
+    a.scratch.elapsed(e.lastMs[s] - e.firstMs[s] + 1);
+    card::figField(c, f, ui, a.scratch, "known for  ", "", C_DIM);
+    a.scratch.reset();
+    a.scratch.decimal(e.sockets[s] as i64);
+    card::figField(c, f, ui, a.scratch, "sockets right now  ", "", C_DIM);
+}
+
+/** What moved, or why nothing is known about what moved. */
+fn traffic(c : Card, f : Frame, ui : BitmapFont, e : Endpoints, t : Tiers, a : App, s : i32) : void {
+    card::head(c, f, ui, "TRAFFIC");
+    if (!t.bytesMeasured()) {
+        card::line(c, f, ui, "not measured — byte counts need the kernel trace", C_FAINT);
+        card::line(c, f, ui, "Run this program as administrator to turn it on.", C_FAINT);
+        return;
+    }
+    a.scratch.reset();
+    a.scratch.byteCount(e.bytesIn[s]);
+    card::figField(c, f, ui, a.scratch, "received  ", "", C_MEM);
+    a.scratch.reset();
+    a.scratch.byteCount(e.bytesOut[s]);
+    card::figField(c, f, ui, a.scratch, "sent  ", "", C_MEM);
+    a.scratch.reset();
+    fmt::rate(a.scratch, e.rate(s));
+    card::figField(c, f, ui, a.scratch, "now  ", "", C_MEM);
+}
+
+/**
+ * The score, taken apart. Every signal that applied is listed with what it
+ * cost or earned; the ones that did not apply are left out rather than shown
+ * at zero, because a list of twenty zeroes hides the three lines that matter.
+ */
+fn trust(c : Card, f : Frame, ui : BitmapFont, e : Endpoints, s : i32) : void {
+    card::head(c, f, ui, "TRUST");
+    if (e.score[s] < 0) {
+        card::line(c, f, ui, "nothing is known about this address yet", C_FAINT);
+        card::line(c, f, ui, "A score would be a number with no evidence behind it.", C_FAINT);
+        return;
+    }
+
+    for (i of 0..REASON_COUNT) {
+        if ((e.reasons[s] & reasonBit(i)) != 0) {
+            let w : i32 = reasonWeight(i);
+            let ink : i32 = C_HOT;
+            if (w > 0) {
+                ink = C_OK;
+            }
+            card::line(c, f, ui, signed(w) + reasonText(i), ink);
+        }
+    }
+}
+
+/** A weight in tenths, rendered as the sign and figure a list column wants. */
+fn signed(tenths : i32) : string {
+    if (tenths == -20) {
+        return "−2.0   ";
+    }
+    if (tenths == -10) {
+        return "−1.0   ";
+    }
+    if (tenths == -5) {
+        return "−0.5   ";
+    }
+    if (tenths == 5) {
+        return "+0.5   ";
+    }
+    return "  ·    ";
+}
+
+/** The keyboard reference. */
+fn help(c : Card, f : Frame, ui : BitmapFont) : void {
+    card::head(c, f, ui, "MOVING");
+    card::line(c, f, ui, "Up / Down          move between rows", C_DIM);
+    card::line(c, f, ui, "Right / Left       open and fold a program", C_DIM);
+    card::line(c, f, ui, "8                  fold or open every program", C_DIM);
+    card::line(c, f, ui, "Enter              this card, on an endpoint", C_DIM);
+    card::line(c, f, ui, "Page / Home / End  move by screens", C_DIM);
+
+    card::head(c, f, ui, "WHAT IS SHOWN");
+    card::line(c, f, ui, "S                  next ranking", C_DIM);
+    card::line(c, f, ui, "L                  traffic that stays on this machine or network", C_DIM);
+    card::line(c, f, ui, "B                  listening sockets and UDP handles", C_DIM);
+    card::line(c, f, ui, "/                  filter by program, host, network or address", C_DIM);
+
+    card::head(c, f, ui, "DOING");
+    card::line(c, f, ui, "O                  open the folder holding the program", C_DIM);
+    card::line(c, f, ui, "C                  clear the history back to what is live", C_DIM);
+    card::line(c, f, ui, "Space              pause and resume", C_DIM);
+    card::line(c, f, ui, "R / F5             re-read now", C_DIM);
+    card::line(c, f, ui, "Esc                close, clear the filter, or quit", C_DIM);
+}

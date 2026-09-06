@@ -1,0 +1,700 @@
+// ui/tree — the list itself: program rows, the endpoint rows folded under
+// them, the scrollbar, and the hit-testing that turns a click into a row.
+//
+// The layout was decided in `model/view`, which produced a flat run of rows
+// with a top and a height each. This file only draws it and answers "which
+// row is under this point", both of which are reads of that layout — so a
+// row can never be drawn at one place and clicked at another.
+//
+// An endpoint takes two lines. It has to: the address, the name behind it,
+// the network that owns it, the country, the trust score, the rhythm and the
+// traffic are seven facts, and squeezing seven onto one line makes all seven
+// unreadable. The first line is *what it is*, the second is *what is known
+// about it* — so a reader skimming for addresses reads only odd lines, and
+// one auditing attribution reads only even ones.
+
+use smalt::{Fmt, Frame, Rect, BitmapFont};
+use crate::fmt;
+use crate::ui::parts;
+use crate::app::App;
+use crate::model::pool;
+use crate::model::view::{View, RowKind, rowAt, Sort};
+use crate::model::endpoints::{Endpoints, SocketKind, kindBadge};
+use crate::model::groups;
+use crate::model::hosts::{Hosts, Look};
+use crate::model::rhythm::{hasRhythm, regularityWord};
+use crate::model::addr::{reachWord, Reach};
+use crate::sys::conn::{Proto, stateName};
+use crate::theme::{WIN_H, TREE_Y, HEAD_H, STATUS_H, C_CARD, C_HEADER, C_LINE, C_STRIPE, C_HOVER, C_SEL, C_SEL_EDGE, C_GROUP, C_TEXT, C_DIM, C_FAINT, C_ACCENT, C_MEM, C_TCP, C_UDP, C_CLOSED, C_LOCAL, C_HOT};
+
+/** How wide the disclosure triangle's click target is on a program row. */
+const TWISTY_W : i32 = 24;
+
+/** Left edge of the tree box. */
+const T_X : i32 = 16;
+/** Width of the tree box. */
+const T_W : i32 = 1408;
+/** Top of the scrolling rows, below the column legend. */
+const ROWS_Y : i32 = 242;
+/** Height of the scrolling rows. */
+const ROWS_H : i32 = 620;
+/** Right edge available to a row's content. */
+const X_RIGHT : i32 = 1404;
+
+/** Left edge of the scrollbar. */
+const BAR_X : i32 = 1414;
+/** Width of the scrollbar. */
+const BAR_W : i32 = 8;
+/** Shortest the scrollbar thumb is allowed to get. */
+const THUMB_MIN : i32 = 34;
+
+/** Disclosure triangle. */
+const X_TWISTY : i32 = 28;
+/** Program name on a group row. */
+const X_GROUP_NAME : i32 = 48;
+/** How wide a program name may be before it is elided. */
+const W_GROUP_NAME : i32 = 380;
+
+/** Protocol chip on an endpoint row. */
+const X_CHIP : i32 = 56;
+/** The address, and the connection state beneath it. */
+const X_ADDR : i32 = 150;
+/** How wide an address may be before it is elided. */
+const W_ADDR : i32 = 268;
+/** The host name, and the owning network beneath it. */
+const X_HOST : i32 = 430;
+/** How wide a name or a network may be before it is elided. */
+const W_HOST : i32 = 300;
+/** The two-letter country code. */
+const X_CC : i32 = 745;
+/** The trust pips. */
+const X_PIPS : i32 = 785;
+/** The rhythm reading. */
+const X_RHY : i32 = 894;
+/** How wide the rhythm reading may be. */
+const W_RHY : i32 = 330;
+
+// A group row reuses the endpoint row's TRUST lane so the pips line up down
+// the whole tree, and everything it counts is placed **outside** that lane —
+// the counts are right-aligned, so they grow leftwards into the space before
+// it or rightwards after it, and never through it.
+
+/** Process count on a group row, right-aligned. */
+const G_PROCS : i32 = 730;
+/** Flagged count on a group row, left-aligned after the pips. */
+const G_FLAGGED : i32 = 900;
+/** Endpoint count on a group row, right-aligned. */
+const G_ENDPOINTS : i32 = 1150;
+/** Live count on a group row, right-aligned. */
+const G_LIVE : i32 = 1270;
+
+/** How far the wheel moves the rows in one notch. */
+const WHEEL_STEP : i32 = 60;
+
+/** The largest scroll offset that still shows content. */
+fn maxScroll(v : View) : i32 {
+    let over : i32 = v.height - ROWS_H;
+    if (over < 0) {
+        return 0;
+    }
+    return over;
+}
+
+/** Whether `(mx, my)` is inside the scrolling rows. */
+fn inRows(mx : i32, my : i32) : bool {
+    return mx >= T_X && mx < T_X + T_W && my >= ROWS_Y && my < ROWS_Y + ROWS_H;
+}
+
+/**
+ * Whether `(mx, my)` is on a program row's disclosure triangle.
+ *
+ * Folding is the triangle's job and selecting is the row's. A row that did
+ * both would make it impossible to look at a program's totals without
+ * closing the endpoints you were reading.
+ */
+fn onTwisty(mx : i32) : bool {
+    return mx >= T_X && mx < X_TWISTY + TWISTY_W;
+}
+
+/** The row under `(mx, my)`, or `-1`. */
+fn rowAtPoint(v : View, a : App, mx : i32, my : i32) : i32 {
+    if (!inRows(mx, my)) {
+        return -1;
+    }
+    return rowAt(v, my - ROWS_Y + a.scroll);
+}
+
+/**
+ * A scroll offset that brings row `r` fully into view, moving as little as
+ * possible. Scrolling further than needed loses the reader's place, which
+ * is the thing keyboard navigation exists to preserve.
+ */
+fn reveal(v : View, r : i32, scroll : i32) : i32 {
+    if (r < 0 || r >= v.count) {
+        return scroll;
+    }
+    let top : i32 = v.rowTop[r];
+    let bottom : i32 = top + v.rowH[r];
+    if (top < scroll) {
+        return top;
+    }
+    if (bottom > scroll + ROWS_H) {
+        return bottom - ROWS_H;
+    }
+    return scroll;
+}
+
+/** Move the rows by `dy` pixels, held inside the content. */
+fn scrollBy(a : App, v : View, dy : i32) : void {
+    a.scroll = (a.scroll + dy).max(0).min(maxScroll(v));
+    a.dirty = true;
+}
+
+/** Move the rows by `notches` wheel steps. */
+fn wheel(a : App, v : View, notches : i32) : void {
+    scrollBy(a, v, 0 - notches * WHEEL_STEP);
+}
+
+/** The whole tree: surface, legend, rows, scrollbar. */
+fn drawTree(
+    f : Frame,
+    ui : BitmapFont,
+    v : View,
+    e : Endpoints,
+    g : Groups,
+    hosts : Hosts,
+    pool : Pool,
+    a : App,
+    nowMs : i64
+) : void {
+    let h : i32 = WIN_H - STATUS_H - 10 - TREE_Y;
+    f.fillRound(Rect::make(T_X, TREE_Y, T_W, h), 8, C_CARD);
+    legend(f, ui, a);
+    if (v.count == 0) {
+        empty(f, ui, a);
+        return;
+    }
+    body(f, ui, v, e, g, hosts, pool, a, nowMs);
+    scrollbar(f, v, a);
+}
+
+/**
+ * The column legend, which is also the ranking control.
+ *
+ * A header that names a column and does nothing when clicked is a header
+ * every reader tries once. Each of these ranks by what it names, and the
+ * active one is drawn in the accent ink with a marker, so the order on
+ * screen always has a visible cause.
+ */
+fn legend(f : Frame, ui : BitmapFont, a : App) : void {
+    f.fillRound(Rect::make(T_X, TREE_Y, T_W, HEAD_H), 8, C_HEADER);
+    f.fillRect(Rect::make(T_X, TREE_Y + HEAD_H - 8, T_W, 8), C_HEADER);
+    f.hLine(T_X, TREE_Y + HEAD_H - 1, T_W, C_LINE);
+    let base : i32 = TREE_Y + 20;
+
+    header(f, ui, a, X_GROUP_NAME, base, "PROGRAM  /  ENDPOINT", Sort::Salience, false);
+    // `NAME / NETWORK` is deliberately not a control: the name it shows is
+    // the one the first column already ranks by, and two headers that claim
+    // the same ranking leave a reader unable to tell which one they pressed.
+    ui.draw(f, X_HOST, base, "NAME  /  NETWORK", C_FAINT);
+    ui.draw(f, X_CC, base, "CC", C_DIM);
+    header(f, ui, a, X_PIPS, base, "TRUST", Sort::Risk, false);
+    header(f, ui, a, X_RHY, base, "REPETITION  /  RHYTHM", Sort::Hits, false);
+    header(f, ui, a, X_RIGHT, base, "TRAFFIC  /  LAST SEEN", Sort::Traffic, true);
+}
+
+/** One header, lit when it is the reason the rows are in this order. */
+fn header(
+    f : Frame,
+    ui : BitmapFont,
+    a : App,
+    x : i32,
+    base : i32,
+    label : string,
+    key : Sort,
+    right : bool
+) : void {
+    let on : bool = a.sortKey == key || a.sortKey == alternate(key);
+    let ink : i32 = C_DIM;
+    if (on) {
+        ink = C_ACCENT;
+    }
+    let left : i32 = x;
+    if (right) {
+        left = x - ui.width(label);
+        ui.drawRight(f, x, base, label, ink);
+    } else {
+        ui.draw(f, x, base, label, ink);
+    }
+    if (on) {
+        f.fillRect(Rect::make(left, base + 6, ui.width(label), 2), C_ACCENT);
+    }
+}
+
+/** The second reading a two-part column offers when clicked again. */
+fn alternate(key : Sort) : Sort {
+    return match key {
+        Sort::Salience => Sort::Name,
+        Sort::Hits => Sort::Rhythm,
+        Sort::Traffic => Sort::Recent,
+        _ => key,
+    };
+}
+
+/**
+ * The ranking the header under `mx` asks for, or `-1`. Answers the *first*
+ * of the column's two readings; `App::sortByColumn` decides which of the
+ * pair a click lands on.
+ */
+fn headerAt(mx : i32, my : i32) : (onHeader: bool, key: Sort) {
+    if (my < TREE_Y || my >= TREE_Y + HEAD_H) {
+        return (false, Sort::Salience);
+    }
+    if (mx >= X_RIGHT - 160 && mx <= X_RIGHT) {
+        return (true, Sort::Traffic);
+    }
+    if (mx >= X_RHY && mx < X_RHY + W_RHY) {
+        return (true, Sort::Hits);
+    }
+    if (mx >= X_CC && mx < X_RHY) {
+        return (true, Sort::Risk);
+    }
+    if (mx >= X_GROUP_NAME && mx < X_HOST) {
+        return (true, Sort::Salience);
+    }
+    return (false, Sort::Salience);
+}
+
+/** What the tree says when the filter admits nothing. */
+fn empty(f : Frame, ui : BitmapFont, a : App) : void {
+    let y : i32 = ROWS_Y + 60;
+    if (a.filterLen > 0) {
+        let pen : i32 = ui.draw(f, T_X + 24, y, "Nothing matches ", C_FAINT);
+        ui.drawBytes(f, pen, y, a.filter, 0, a.filterLen, C_DIM);
+        ui.draw(f, T_X + 24, y + 24, "Esc clears the filter.", C_FAINT);
+        return;
+    }
+    ui.draw(f, T_X + 24, y, "Nothing on this machine is talking to the internet.", C_FAINT);
+    ui.draw(
+        f,
+        T_X + 24,
+        y + 24,
+        "L also shows local traffic, B also shows listening and UDP sockets.",
+        C_FAINT
+    );
+}
+
+/** Every visible row, clipped to the scrolling area. */
+fn body(
+    f : Frame,
+    ui : BitmapFont,
+    v : View,
+    e : Endpoints,
+    g : Groups,
+    hosts : Hosts,
+    pool : Pool,
+    a : App,
+    nowMs : i64
+) : void {
+    // One clipped view for the whole pass. `clipped` answers a copy, so
+    // there is nothing to restore: a row crossing the viewport edge is cut
+    // mid-pixel, and no row can draw over the chrome above or below it.
+    let rows = f.clipped(Rect::make(T_X, ROWS_Y, T_W, ROWS_H));
+    for (r of 0..v.count) {
+        let y : i32 = ROWS_Y + v.rowTop[r] - a.scroll;
+        if (y + v.rowH[r] > ROWS_Y && y < ROWS_Y + ROWS_H) {
+            if (v.rowKind[r] == RowKind::Group) {
+                groupRow(rows, ui, g, pool, a, v.rowRef[r], r, y);
+            } else {
+                endpointRow(rows, ui, e, hosts, pool, a, v.rowRef[r], r, y, nowMs);
+            }
+        }
+    }
+}
+
+/** The background a row sits on, given what the pointer and selection say. */
+fn rowBack(f : Frame, y : i32, h : i32, selected : bool, hovered : bool, base : i32) : void {
+    let color : i32 = base;
+    if (hovered) {
+        color = C_HOVER;
+    }
+    if (selected) {
+        color = C_SEL;
+    }
+    f.fillRect(Rect::make(T_X, y, T_W, h), color);
+    if (selected) {
+        f.fillRect(Rect::make(T_X, y, 3, h), C_SEL_EDGE);
+    }
+}
+
+/** One program row: the fold, the name, and what its endpoints add up to. */
+fn groupRow(f : Frame, ui : BitmapFont, g : Groups, pool : Pool, a : App, gi : i32, r : i32, y : i32) : void {
+    let selected : bool = a.isSelected(RowKind::Group, g.key[gi]);
+    rowBack(f, y, 32, selected, a.hoverRow == r, C_GROUP);
+    f.hLine(T_X, y, T_W, C_LINE);
+
+    let base : i32 = y + 21;
+    parts::twisty(f, X_TWISTY, y + 16, g.isOpen(gi), C_DIM);
+    let pen : i32 = X_GROUP_NAME;
+    if (g.nameLen[gi] > 0) {
+        ui.drawBytesElided(
+            f,
+            X_GROUP_NAME,
+            base,
+            pool.base() + g.nameOff[gi],
+            0,
+            g.nameLen[gi],
+            W_GROUP_NAME,
+            C_TEXT
+        );
+        pen = pen + ui.widthBytes(pool.base() + g.nameOff[gi], 0, g.nameLen[gi]);
+    } else {
+        // A pid the kernel named with an empty string: the System process
+        // and a few drivers. The row still has to say something a reader can
+        // point at, and "" is not it.
+        pen = ui.draw(f, X_GROUP_NAME, base, "System and drivers", C_TEXT);
+    }
+    if (!g.identified(gi)) {
+        ui.draw(f, pen + 10, base, "grouped by name", C_FAINT);
+    }
+
+    count(f, ui, a, G_PROCS, base, g.pids[gi], plural(g.pids[gi], " process", " processes"));
+    count(
+        f,
+        ui,
+        a,
+        G_ENDPOINTS,
+        base,
+        g.endpoints[gi],
+        plural(g.endpoints[gi], " endpoint", " endpoints")
+    );
+    count(f, ui, a, G_LIVE, base, g.live[gi], " live");
+
+    parts::pips(f, X_PIPS, y + 16, g.worst[gi]);
+    if (g.flagged[gi] > 0) {
+        a.scratch.reset();
+        a.scratch.decimal(g.flagged[gi] as i64);
+        let pen : i32 = parts::figure(f, ui, G_FLAGGED, base, a.scratch, C_HOT);
+        ui.draw(f, pen, base, " flagged", C_FAINT);
+    }
+    if (g.rate(gi) > 0) {
+        a.scratch.reset();
+        fmt::rate(a.scratch, g.rate(gi));
+        parts::figureRight(f, ui, X_RIGHT, base, a.scratch, C_MEM);
+    }
+}
+
+/** `one` when there is one of something, `many` otherwise. */
+fn plural(n : i32, one : string, many : string) : string {
+    if (n == 1) {
+        return one;
+    }
+    return many;
+}
+
+/** A figure and its unit, right-aligned at `right`. */
+fn count(f : Frame, ui : BitmapFont, a : App, right : i32, base : i32, n : i32, unit : string) : void {
+    let w : i32 = ui.width(unit);
+    ui.drawRight(f, right, base, unit, C_FAINT);
+    a.scratch.reset();
+    a.scratch.decimal(n as i64);
+    parts::figureRight(f, ui, right - w, base, a.scratch, C_DIM);
+}
+
+/** The ink a protocol chip is drawn in. */
+fn protoInk(e : Endpoints, s : i32) : i32 {
+    if (e.kind[s] == SocketKind::Listen) {
+        return C_ACCENT;
+    }
+    if (e.proto[s] == Proto::Udp) {
+        return C_UDP;
+    }
+    return C_TCP;
+}
+
+/**
+ * One endpoint, over two lines: what it is, then what is known about it.
+ *
+ * A row whose sockets are all gone is drawn in the closed ink and says how
+ * long ago that was. It is still there because this is a journal — a
+ * conversation that ended two minutes ago is often the one being looked for.
+ */
+fn endpointRow(
+    f : Frame,
+    ui : BitmapFont,
+    e : Endpoints,
+    hosts : Hosts,
+    pool : Pool,
+    a : App,
+    s : i32,
+    r : i32,
+    y : i32,
+    nowMs : i64
+) : void {
+    let selected : bool = a.isSelected(RowKind::Endpoint, e.key[s]);
+    let stripe : i32 = C_CARD;
+    if (r % 2 == 1) {
+        stripe = C_STRIPE;
+    }
+    rowBack(f, y, 40, selected, a.hoverRow == r, stripe);
+
+    let live : bool = e.liveNow[s] > 0;
+    let ink : i32 = C_TEXT;
+    if (!live) {
+        ink = C_CLOSED;
+    }
+    let b1 : i32 = y + 17;
+    let b2 : i32 = y + 33;
+
+    parts::chip(f, ui, X_CHIP, y + 4, kindBadge(e.kind[s], e.proto[s]), protoInk(e, s), live);
+
+    a.scratch.reset();
+    fmt::addrPort(a.scratch, e.addrAt(s), e.family[s], e.port[s]);
+    parts::figure(f, ui, X_ADDR, b1, a.scratch, ink);
+    stateLine(f, ui, e, s, b2, live);
+
+    identity(f, ui, e, hosts, pool, s, b1, b2, live);
+    rhythmLine(f, ui, e, a, s, b1, b2);
+    trafficLine(f, ui, e, a, s, b1, b2, nowMs);
+}
+
+/** Line two, left: what the socket is doing, or when it stopped. */
+fn stateLine(f : Frame, ui : BitmapFont, e : Endpoints, s : i32, base : i32, live : bool) : void {
+    if (live) {
+        ui.draw(f, X_ADDR, base, stateName(e.state[s]), C_FAINT);
+        return;
+    }
+    // How long ago it closed is the right-hand column's job; saying it twice
+    // on one row makes a reader check whether the two agree.
+    ui.draw(f, X_ADDR, base, "closed", C_FAINT);
+}
+
+/**
+ * The two attribution lines: the name on top, the network beneath.
+ *
+ * When neither is known the row says which of the three reasons applies —
+ * not routable, not looked up yet, or looked up and unanswered — because
+ * those are three different situations and only one of them is a wait.
+ */
+fn identity(
+    f : Frame,
+    ui : BitmapFont,
+    e : Endpoints,
+    hosts : Hosts,
+    pool : Pool,
+    s : i32,
+    b1 : i32,
+    b2 : i32,
+    live : bool
+) : void {
+    let h : i32 = e.host[s];
+    if (h < 0) {
+        return;
+    }
+    let ink : i32 = C_DIM;
+    if (!live) {
+        ink = C_CLOSED;
+    }
+
+    if (hosts.nameOff[h] >= 0) {
+        ui.drawBytesElided(
+            f,
+            X_HOST,
+            b1,
+            pool.base() + hosts.nameOff[h],
+            0,
+            hosts.nameLen[h],
+            W_HOST,
+            ink
+        );
+    } else if (hosts.reach[h] != Reach::Public) {
+        ui.draw(f, X_HOST, b1, reachWord(hosts.reach[h]), C_LOCAL);
+    } else if (hosts.look[h] == Look::Done) {
+        ui.draw(f, X_HOST, b1, "no name published", C_FAINT);
+    } else {
+        ui.draw(f, X_HOST, b1, "looking up…", C_FAINT);
+    }
+
+    if (hosts.netOff[h] >= 0) {
+        ui.drawBytesElided(
+            f,
+            X_HOST,
+            b2,
+            pool.base() + hosts.netOff[h],
+            0,
+            hosts.netLen[h],
+            W_HOST,
+            C_FAINT
+        );
+    }
+    if (hosts.ccOff[h] >= 0) {
+        ui.drawBytes(f, X_CC, b1, pool.base() + hosts.ccOff[h], 0, hosts.ccLen[h], C_FAINT);
+    }
+    parts::pips(f, X_PIPS, b1 - 4, e.score[s]);
+}
+
+/**
+ * Repetition on line one, rhythm on line two — the pair of readings this
+ * program exists to surface. A row visited once says so plainly rather than
+ * claiming a period it cannot have measured.
+ */
+fn rhythmLine(f : Frame, ui : BitmapFont, e : Endpoints, a : App, s : i32, b1 : i32, b2 : i32) : void {
+    if (e.hits[s] == 1) {
+        ui.draw(f, X_RHY, b1, "seen once", C_FAINT);
+    } else {
+        a.scratch.reset();
+        fmt::times(a.scratch, e.hits[s] as i64);
+        let ink : i32 = C_DIM;
+        if (e.hits[s] >= 5) {
+            ink = C_TEXT;
+        }
+        let pen : i32 = parts::figure(f, ui, X_RHY, b1, a.scratch, ink);
+        ui.draw(f, pen + 6, b1, "visits", C_FAINT);
+    }
+
+    if (!hasRhythm(e.rhythm, s)) {
+        // A row seen once has already said so on the line above; repeating
+        // "not enough visits" under every one of forty rows is noise that
+        // teaches the reader to stop looking at this column.
+        if (e.hits[s] > 1) {
+            ui.draw(f, X_RHY, b2, "no steady interval yet", C_FAINT);
+        }
+        return;
+    }
+    let p : i32 = ui.draw(f, X_RHY, b2, "every ", C_FAINT);
+    a.scratch.reset();
+    a.scratch.elapsed(e.rhythm.periodMs[s]);
+    p = parts::figure(f, ui, p, b2, a.scratch, C_DIM);
+    p = ui.draw(f, p, b2, " · ", C_FAINT);
+    let word : i32 = C_FAINT;
+    if (e.rhythm.regular[s] >= 750) {
+        word = C_ACCENT;
+    }
+    ui.draw(f, p, b2, regularityWord(e.rhythm.regular[s]), word);
+}
+
+/**
+ * The right-hand column: what moved on line one, how long this has been
+ * going on beneath it.
+ *
+ * Without the kernel trace there is no byte figure, so line one says whether
+ * the conversation is open and, when it is not, how long ago it stopped.
+ * Leaving it blank would waste the one column a reader scans for "is this
+ * current", and printing a zero would claim a measurement never taken.
+ */
+fn trafficLine(
+    f : Frame,
+    ui : BitmapFont,
+    e : Endpoints,
+    a : App,
+    s : i32,
+    b1 : i32,
+    b2 : i32,
+    nowMs : i64
+) : void {
+    if (e.bytesIn[s] + e.bytesOut[s] > 0) {
+        a.scratch.reset();
+        fmt::rate(a.scratch, e.rate(s));
+        parts::figureRight(f, ui, X_RIGHT, b1, a.scratch, C_MEM);
+    } else if (e.liveNow[s] > 0) {
+        ui.drawRight(f, X_RIGHT, b1, "open now", C_DIM);
+    } else {
+        let since : i64 = e.lastMs[s];
+        if (e.closedMs[s] > 0) {
+            since = e.closedMs[s];
+        }
+        a.scratch.reset();
+        a.scratch.elapsed(nowMs - since + 1);
+        let left : i32 = X_RIGHT - ui.width(" ago");
+        ui.drawRight(f, X_RIGHT, b1, " ago", C_FAINT);
+        parts::figureRight(f, ui, left, b1, a.scratch, C_CLOSED);
+    }
+
+    a.scratch.reset();
+    a.scratch.elapsed(e.lastMs[s] - e.firstMs[s] + 1);
+    let left : i32 = X_RIGHT - ui.widthBytes(a.scratch.at(), 0, a.scratch.length());
+    ui.drawRight(f, left, b2, "known for ", C_FAINT);
+    parts::figureRight(f, ui, X_RIGHT, b2, a.scratch, C_FAINT);
+}
+
+/** The scrollbar, drawn only when there is something to scroll. */
+fn scrollbar(f : Frame, v : View, a : App) : void {
+    if (maxScroll(v) <= 0) {
+        return;
+    }
+    f.fillRound(Rect::make(BAR_X, ROWS_Y, BAR_W, ROWS_H), BAR_W / 2, C_HEADER);
+    let ink : i32 = C_LINE;
+    if (a.dragging || onBar(a.mouseX, a.mouseY)) {
+        ink = C_DIM;
+    }
+    f.fillRound(
+        Rect::make(BAR_X, ROWS_Y + thumbTop(v, a.scroll), BAR_W, thumbHeight(v)),
+        BAR_W / 2,
+        ink
+    );
+}
+
+/** How tall the thumb is, floored so it stays grabbable on a long list. */
+fn thumbHeight(v : View) : i32 {
+    if (v.height <= 0) {
+        return ROWS_H;
+    }
+    let h : i32 = (ROWS_H * ROWS_H) / v.height;
+    if (h < THUMB_MIN) {
+        return THUMB_MIN;
+    }
+    if (h > ROWS_H) {
+        return ROWS_H;
+    }
+    return h;
+}
+
+/** Where the thumb sits for a given scroll offset. */
+fn thumbTop(v : View, scroll : i32) : i32 {
+    let over : i32 = maxScroll(v);
+    if (over <= 0) {
+        return 0;
+    }
+    return ((ROWS_H - thumbHeight(v)) * scroll) / over;
+}
+
+/** The scroll offset that would put the thumb's top at `top`. */
+fn scrollForThumb(v : View, top : i32) : i32 {
+    let travel : i32 = ROWS_H - thumbHeight(v);
+    if (travel <= 0) {
+        return 0;
+    }
+    return ((maxScroll(v) * top) / travel).max(0).min(maxScroll(v));
+}
+
+/** Whether `(mx, my)` is on the scrollbar's track. */
+fn onBar(mx : i32, my : i32) : bool {
+    return mx >= BAR_X - 3 && mx < BAR_X + BAR_W + 3
+        && my >= ROWS_Y && my < ROWS_Y + ROWS_H;
+}
+
+/**
+ * Begin a drag, or jump. Pressing on the thumb grabs it where it was
+ * grabbed — the list must not lurch by however far the pointer happened to
+ * be from the thumb's top — and pressing anywhere else on the track centres
+ * the thumb there, which is what a reader means by clicking below it.
+ */
+fn grab(a : App, v : View, my : i32) : void {
+    let top : i32 = thumbTop(v, a.scroll);
+    let h : i32 = thumbHeight(v);
+    let at : i32 = my - ROWS_Y;
+    if (at >= top && at < top + h) {
+        a.dragGrip = at - top;
+    } else {
+        a.dragGrip = h / 2;
+        a.scroll = scrollForThumb(v, at - h / 2);
+    }
+    a.dragging = true;
+    a.dirty = true;
+}
+
+/** Continue a drag: the grip stays under the pointer. */
+fn dragTo(a : App, v : View, my : i32) : void {
+    a.scroll = scrollForThumb(v, my - ROWS_Y - a.dragGrip);
+    a.dirty = true;
+}

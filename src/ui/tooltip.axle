@@ -1,0 +1,182 @@
+// ui/tooltip — the card that appears when the pointer rests on a row.
+//
+// It exists because two of this program's most useful facts do not fit on a
+// row and must not be hidden behind a click: **where a program's binary
+// actually lives**, and **what is known about an address**. A path is two
+// hundred characters and an attribution is a sentence; neither belongs in a
+// column, and both are the first thing a reader wants.
+//
+// The card waits for the pointer to settle (`App::tipReady`) so that
+// sweeping down the tree does not strobe cards at the reader, and it is
+// placed so it never leaves the window and never lands under the pointer
+// that summoned it.
+//
+// Its content is emitted through `ui/card`'s two-pass cursor — see that
+// file for why the lines are described rather than stored.
+
+use smalt::{Scratch, Fmt, Frame, Rect, BitmapFont};
+use crate::ui::parts;
+use crate::ui::card;
+use crate::ui::card;
+use crate::app::App;
+use crate::model::pool;
+use crate::model::view::{View, RowKind};
+use crate::model::endpoints;
+use crate::model::groups::{Groups, mergeNote};
+use crate::model::hosts::{Hosts, nameSource, lookNote};
+use crate::model::addr;
+use crate::sys::procs::{pathNote, PathState};
+use crate::sys::tiers::{Tier, TierState, Tiers, tierNote, tierReading};
+use crate::sys::dnscache;
+use crate::fmt;
+use crate::ui::card;
+use crate::theme::{WIN_W, WIN_H, STATUS_H, C_TIP, C_LINE, C_TEXT, C_DIM, C_FAINT};
+
+/** A program: its full path, and how it was identified. */
+fn forGroup(c : Card, f : Frame, ui : BitmapFont, pool : Pool, g : Groups, gi : i32) : void {
+    if (g.identified(gi)) {
+        card::spanLine(c, f, ui, pool, g.pathOff[gi], g.pathLen[gi], C_DIM);
+        card::line(
+            c,
+            f,
+            ui,
+            "Click to fold. O opens the folder with the binary selected.",
+            C_FAINT
+        );
+        return;
+    }
+    card::spanLine(c, f, ui, pool, g.nameOff[gi], g.nameLen[gi], C_TEXT);
+    card::line(c, f, ui, mergeNote(false), C_FAINT);
+    card::line(c, f, ui, pathNote(PathState::Denied), C_FAINT);
+}
+
+/**
+ * An endpoint: everything the two lines had to elide — the full name, the
+ * network's full title, the place, where the name came from, and why the
+ * lookup has not answered when it has not.
+ */
+fn forEndpoint(c : Card, f : Frame, ui : BitmapFont, pool : Pool, e : Endpoints, hosts : Hosts, s : i32) : void {
+    let h : i32 = e.host[s];
+    if (h < 0) {
+        return;
+    }
+    card::spanLine(c, f, ui, pool, hosts.nameOff[h], hosts.nameLen[h], C_TEXT);
+    card::spanLine(c, f, ui, pool, hosts.netOff[h], hosts.netLen[h], C_DIM);
+    card::spanLine(c, f, ui, pool, hosts.orgOff[h], hosts.orgLen[h], C_DIM);
+    card::spanLine(c, f, ui, pool, hosts.cityOff[h], hosts.cityLen[h], C_FAINT);
+    card::spanLine(c, f, ui, pool, hosts.countryOff[h], hosts.countryLen[h], C_FAINT);
+    card::line(c, f, ui, nameSource(hosts.nameFrom[h]), C_FAINT);
+    card::line(c, f, ui, lookNote(hosts.look[h]), C_FAINT);
+    if (hosts.nameOff[h] < 0 && hosts.netOff[h] < 0) {
+        card::line(c, f, ui, reachWord(hosts.reach[h]), C_FAINT);
+    }
+    card::line(c, f, ui, "Enter opens the full card.", C_FAINT);
+}
+
+/** A tier badge: the one card that is not about a row. */
+fn forTier(
+    c : Card,
+    f : Frame,
+    ui : BitmapFont,
+    s : Scratch,
+    t : Tiers,
+    dns : DnsCache,
+    which : Tier
+) : void {
+    let state : TierState = t.stateOf(which);
+    card::line(c, f, ui, tierNote(which, state, t.elevated), C_TEXT);
+    if (which == Tier::Dns && state == TierState::On) {
+        card::line(c, f, ui, tierReading(which, state), C_FAINT);
+        s.reset();
+        s.decimal(dns.names as i64);
+        card::figField(c, f, ui, s, "cached names  ", "", C_DIM);
+        s.reset();
+        s.decimal(dns.matched as i64);
+        card::figField(c, f, ui, s, "matched here  ", "", C_DIM);
+    }
+}
+
+/** Emit the card for whatever is under the pointer, in whichever pass. */
+fn content(
+    c : Card,
+    f : Frame,
+    ui : BitmapFont,
+    pool : Pool,
+    v : View,
+    e : Endpoints,
+    g : Groups,
+    hosts : Hosts,
+    t : Tiers,
+    dns : DnsCache,
+    a : App,
+    overTier : bool,
+    tierHover : Tier
+) : void {
+    if (overTier) {
+        forTier(c, f, ui, a.scratch, t, dns, tierHover);
+        return;
+    }
+    if (a.hoverRow < 0 || a.hoverRow >= v.count) {
+        return;
+    }
+    if (v.rowKind[a.hoverRow] == RowKind::Group) {
+        forGroup(c, f, ui, pool, g, v.rowRef[a.hoverRow]);
+    } else {
+        forEndpoint(c, f, ui, pool, e, hosts, v.rowRef[a.hoverRow]);
+    }
+}
+
+/**
+ * Draw whatever the pointer is resting on. Nothing appears when the row has
+ * nothing to add beyond its own line — a tooltip that repeats the row
+ * teaches the reader to stop waiting for tooltips.
+ */
+fn drawTip(
+    f : Frame,
+    ui : BitmapFont,
+    v : View,
+    e : Endpoints,
+    g : Groups,
+    hosts : Hosts,
+    pool : Pool,
+    t : Tiers,
+    dns : DnsCache,
+    a : App,
+    nowMs : i64,
+    overTier : bool,
+    tierHover : Tier
+) : void {
+    if (!overTier && !a.tipReady(nowMs)) {
+        return;
+    }
+    let c : Card = new Card();
+    c.measure();
+    content(c, f, ui, pool, v, e, g, hosts, t, dns, a, overTier, tierHover);
+    if (c.lines == 0) {
+        return;
+    }
+
+    let w : i32 = c.boxWidth();
+    let h : i32 = c.boxHeight();
+    let x : i32 = a.mouseX + 16;
+    if (x + w > WIN_W - 8) {
+        x = a.mouseX - w - 8;
+    }
+    if (x < 8) {
+        x = 8;
+    }
+    let y : i32 = a.mouseY + 20;
+    if (y + h > WIN_H - STATUS_H - 8) {
+        y = a.mouseY - h - 10;
+    }
+    if (y < 8) {
+        y = 8;
+    }
+
+    f.shade(Rect::make(x + 3, y + 3, w, h), 0x000000, 1, 3);
+    f.fillRound(Rect::make(x, y, w, h), 7, C_TIP);
+    f.roundBorder(Rect::make(x, y, w, h), 7, C_LINE);
+
+    c.paint(x + 14, c.firstBase(y));
+    content(c, f, ui, pool, v, e, g, hosts, t, dns, a, overTier, tierHover);
+}

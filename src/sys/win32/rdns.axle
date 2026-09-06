@@ -1,0 +1,203 @@
+// sys/rdns — the name an address's owner publishes, when nothing better is
+// known.
+//
+// Three sources can name an address, and they are not equally good. The best
+// is the name a program asked Windows to resolve (`sys/dnscache`): that is
+// what the program meant. Below it is this one — a PTR record, which is what
+// the address's *owner* chose to publish. For a home router that is exact;
+// for a CDN it is a machine number, `a23-45-67-89.deploy.static.example.net`,
+// true and nearly useless.
+//
+// It is worth asking anyway, because the alternative on those rows is a bare
+// number, and "some machine at Akamai" is more than none. It runs last, on
+// the addresses the other two could not name, and its answer never
+// overwrites theirs.
+//
+// The lookup goes through `DnsQuery_W` — the same entry point the cache
+// reader binds, borrowed from `sys/dnscache` rather than declared a second
+// time — instead of `getnameinfo`. The socket API would mean `WSAStartup`
+// and a `SOCKADDR` union for a call that wants a name and answers with one.
+
+use smalt::Mem;
+use crate::sys::raw::{asPtr, nullPtr};
+use crate::sys::dnscache::{DnsQuery_W, DnsRecordListFree};
+use crate::model::hosts;
+use crate::fmt;
+use std::text::StringBuilder;
+
+/** `DNS_TYPE_PTR`. */
+const DNS_TYPE_PTR : i32 = 12;
+/** `DNS_TYPE_TEXT`. */
+const DNS_TYPE_TXT : i32 = 16;
+/** `DNS_TXT_DATA.pStringArray[0]` — past `dwStringCount` and its padding. */
+const TXT_REC_FIRST : i64 = 40;
+/** `DnsFreeRecordList`. */
+const PTR_FREE_LIST : i32 = 1;
+/** `DNS_RECORD.pNext`. */
+const PTR_REC_NEXT : i64 = 0;
+/** `DNS_RECORD.wType`. */
+const PTR_REC_TYPE : i64 = 16;
+/** `DNS_RECORD.Data.PTR.pNameHost`. */
+const PTR_REC_NAME : i64 = 32;
+/** Ceiling on the record list. */
+const PTR_MAX_RECORDS : i32 = 16;
+/** Longest name accepted back, in UTF-16 units. */
+const PTR_NAME_CHARS : i32 = 255;
+/** Characters the query-name scratch holds. */
+const PTR_QUERY_CHARS : i32 = 128;
+
+/** Lowercase hex, for the nibble form an IPv6 reverse name is spelled in. */
+const HEX : string = "0123456789abcdef";
+
+/**
+ * The reverse-lookup name of host `h` — `4.3.2.1.in-addr.arpa` for IPv4, or
+ * the thirty-two nibbles of `ip6.arpa` for IPv6.
+ *
+ * Built on the main thread and handed to the worker as a plain string,
+ * because a spawned call takes its arguments by value and the host table is
+ * not one of them.
+ */
+fn arpaName(hosts : Hosts, h : i32) : string {
+    let sb : StringBuilder = new StringBuilder();
+    let base : i64 = hosts.addrAt(h);
+    if (hosts.family[h] == 6) {
+        let i : i32 = 15;
+        while (i >= 0) {
+            let b : i32 = Mem::byteAt(base, i as i64);
+            sb.appendChar(nibble(b & 0xF));
+            sb.append(".");
+            sb.appendChar(nibble((b >> 4) & 0xF));
+            sb.append(".");
+            i = i - 1;
+        }
+        sb.append("ip6.arpa");
+        return sb.toString();
+    }
+    let i : i32 = 3;
+    while (i >= 0) {
+        sb.appendI32(Mem::byteAt(base, i as i64));
+        sb.append(".");
+        i = i - 1;
+    }
+    sb.append("in-addr.arpa");
+    return sb.toString();
+}
+
+/** One lowercase hex digit, for the nibble form. */
+fn nibble(v : i32) : i32 {
+    return HEX.byteAt(v as i64);
+}
+
+/**
+ * Ask the resolver for `name`'s TXT record and answer the first string in
+ * it, or the empty string.
+ *
+ * This is how the routing table is read — see `enrich/cymru`. Runs on a
+ * spawned thread for the same reason `reverse` does.
+ */
+fn txt(name : string) : string {
+    return query(name, DNS_TYPE_TXT);
+}
+
+/**
+ * Ask the resolver for `arpa`'s PTR record and answer the name, or the empty
+ * string. Runs on a spawned thread — the call goes to the network and can
+ * take seconds.
+ */
+fn reverse(arpa : string) : string {
+    return query(arpa, DNS_TYPE_PTR);
+}
+
+/** One resolver round-trip for `name`, answering the first record's text. */
+fn query(name : string, kind : i32) : string {
+    let wide : i64 = Mem::take((PTR_QUERY_CHARS as i64) * 2);
+    let slot : i64 = Mem::take(8);
+    if (wide == 0 || slot == 0) {
+        freePtrScratch(wide, slot);
+        return "";
+    }
+
+    let n : i64 = name.byteLength;
+    if (n > (PTR_QUERY_CHARS as i64) - 1) {
+        n = (PTR_QUERY_CHARS as i64) - 1;
+    }
+    for (i of 0..n) {
+        Mem::putWord(wide, i * 2, name.byteAt(i));
+    }
+    Mem::putWord(wide, n * 2, 0);
+
+    Mem::putQword(slot, 0, 0);
+    if (DnsQuery_W(asPtr(wide), kind, 0, nullPtr(), asPtr(slot), nullPtr()) != 0) {
+        freePtrScratch(wide, slot);
+        return "";
+    }
+
+    let records : i64 = Mem::qwordAt(slot, 0);
+    let answer : string = firstText(records, kind);
+    if (records != 0) {
+        DnsRecordListFree(asPtr(records), PTR_FREE_LIST);
+    }
+    freePtrScratch(wide, slot);
+    return answer;
+}
+
+/**
+ * The first record of the wanted kind, as text.
+ *
+ * A `PTR` record's payload is the name itself; a `TXT` record's is a counted
+ * array of strings, and the first of them is the answer. The two differ only
+ * in where the pointer sits, which is why one walk serves both.
+ */
+fn firstText(records : i64, kind : i32) : string {
+    let rec : i64 = records;
+    let walked : i32 = 0;
+    while (rec != 0 && walked < PTR_MAX_RECORDS) {
+        if (Mem::wordAt(rec, PTR_REC_TYPE) == kind) {
+            let at : i64 = PTR_REC_NAME;
+            if (kind == DNS_TYPE_TXT) {
+                at = TXT_REC_FIRST;
+            }
+            let name : i64 = Mem::qwordAt(rec, at);
+            if (name != 0) {
+                return wideToString(name);
+            }
+        }
+        let next : i64 = Mem::qwordAt(rec, PTR_REC_NEXT);
+        if (next == rec) {
+            rec = 0;
+        } else {
+            rec = next;
+        }
+        walked = walked + 1;
+    }
+    return "";
+}
+
+/** A NUL-terminated UTF-16 name as an Axle string, printable range only. */
+fn wideToString(p : i64) : string {
+    let sb : StringBuilder = new StringBuilder();
+    let i : i32 = 0;
+    while (i < PTR_NAME_CHARS) {
+        let c : i32 = Mem::wordAt(p, (i as i64) * 2);
+        if (c == 0) {
+            i = PTR_NAME_CHARS;
+        } else {
+            if (c < 32 || c > 126) {
+                c = 63; // '?'
+            }
+            sb.appendChar(c);
+            i = i + 1;
+        }
+    }
+    return sb.toString();
+}
+
+/** Give back the two scratch blocks. */
+fn freePtrScratch(wide : i64, slot : i64) : void {
+    if (wide != 0) {
+        Mem::release(wide);
+    }
+    if (slot != 0) {
+        Mem::release(slot);
+    }
+}

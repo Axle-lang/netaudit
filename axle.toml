@@ -2,12 +2,29 @@
 name = "netaudit"
 version = "0.1.0"
 
-# No `[link]`. The window, the framebuffer, the event queue, the 2-D
-# surface, the two faces and the BMP writer come from smalt, which is
-# Axle calling Win32 directly. Everything this program reads from the OS
-# on its own — the connection tables, the DNS cache, the ETW session — is
-# named by the `extern "C" from "<dll>"` block that imports it, so the
-# link line learns of `iphlpapi`, `dnsapi`, `advapi32` and `shell32` from
-# the declarations themselves.
+# The targets this program promises to serve. The port checks read this: a
+# seam the win32 port implements and another does not is an error only for a
+# target named here, so adding one is the first line of a port rather than a
+# hundred errors at once.
+targets = ["x86_64-pc-windows-msvc"]
+
+# No `[link]` section. Every OS library is named by the `extern "C" from "…"`
+# block that imports from it — `iphlpapi` for the connection tables, `dnsapi`
+# for the resolver cache, `shell32` to reveal a binary, `kernel32` for the
+# process handles, and `gdi32` through smalt — so the link line learns of
+# each from the declaration that needed it, and a consumer links what it uses
+# without being told twice.
 [dependencies]
 smalt = { path = "vendor/smalt" }
+
+# The port: one condition, and the directory that carries it.
+#
+# Everything that reads the machine is behind a seam — `Conns`, `Procs`,
+# `DnsCache`, the reverse lookup, revealing a binary in a file manager — and
+# `src/sys/win32/` is the Windows answer to all five. Nothing above `sys/`
+# names an operating system, so a second port is those five files and no
+# edit anywhere else: the module path stays `crate::sys::conn`, and the
+# build's `--target` picks which file it resolves to.
+[port.win32]
+when = { os = "windows" }
+dirs = ["win32"]

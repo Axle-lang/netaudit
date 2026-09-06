@@ -1,0 +1,287 @@
+// sys/dnscache — the names this machine actually asked for.
+//
+// A reverse-DNS record says what an address's owner chose to publish, which
+// for a CDN is a machine number: `a23-45-67-89.deploy.static.akamaitechnologies.com`
+// is true and tells a reader nothing. What they want is the name the program
+// typed — `api.stripe.com` — and Windows knows it, because it resolved it.
+//
+// The resolver's cache is readable without any privilege at all, through two
+// calls in `dnsapi`:
+//
+//   DnsGetCacheDataTable   the list of names currently cached
+//   DnsQuery_W             each name's addresses, with the wire query
+//                          suppressed so nothing leaves the machine
+//
+// Together they invert the cache: `name → addresses` becomes
+// `address → name`, and every endpoint pointing at one of those addresses
+// gets the name its program asked for.
+//
+// # Why this is written defensively
+//
+// `DnsGetCacheDataTable` is not documented. Its record has been the same
+// four fields for twenty years and every tool that reads the cache reads it
+// this way, but "undocumented" means the contract is observed rather than
+// promised. So the walk is bounded, every pointer is checked, and anything
+// that does not look like the record this file expects **turns the tier
+// off** rather than following it. The badge in the title bar goes dark, the
+// reverse-DNS names take over, and nothing else in the program notices.
+
+use smalt::Mem;
+use crate::sys::raw::{asPtr, isNull, nullPtr};
+use crate::model::hosts::{Hosts, NameSource, nameRank, HOST_MAX};
+use crate::model::pool::{Pool, wideInto};
+
+extern "C" from "dnsapi" {
+    /**
+     * `DNS_STATUS DnsGetCacheDataTable(PDNSCACHEENTRY)` — undocumented.
+     * The caller passes a zeroed head record; the list hangs off its `pNext`.
+     */
+    fn DnsGetCacheDataTable(head : ptr) : i32;
+
+    /**
+     * `DNS_STATUS DnsQuery_W(PCWSTR, WORD, DWORD, PVOID, PDNS_RECORD *, PVOID *)`.
+     * `0` on success, and the record list must be freed.
+     */
+    fn DnsQuery_W(
+        name : ptr,
+        wType : i32,
+        options : i32,
+        extra : ptr,
+        results : ptr,
+        reserved : ptr
+    ) : i32;
+
+    /** `void DnsRecordListFree(PDNS_RECORD, DNS_FREE_TYPE)`. */
+    fn DnsRecordListFree(records : ptr, freeType : i32) : void;
+
+    /** `void DnsFree(PVOID, DNS_FREE_TYPE)` — for the cache table's strings. */
+    fn DnsFree(data : ptr, freeType : i32) : void;
+}
+
+// ─── DNSCACHEENTRY (x64) ─────────────────────────────────────
+
+/** Bytes of one cache record. */
+const CACHE_ENTRY : i64 = 24;
+/** `struct _DNS_CACHE_ENTRY *pNext`. */
+const CACHE_NEXT : i64 = 0;
+/** `PWSTR pszName`. */
+const CACHE_NAME : i64 = 8;
+/** `unsigned short wType`. */
+const CACHE_TYPE : i64 = 16;
+
+// ─── DNS_RECORD (x64) ────────────────────────────────────────
+
+/** `DNS_RECORD *pNext`. */
+const REC_NEXT : i64 = 0;
+/** `WORD wType`. */
+const REC_TYPE : i64 = 16;
+/** The start of the record's data union. */
+const REC_DATA : i64 = 32;
+
+/** `DNS_TYPE_A`. */
+const DNS_TYPE_A : i32 = 1;
+/** `DNS_TYPE_AAAA`. */
+const DNS_TYPE_AAAA : i32 = 28;
+/** `DNS_QUERY_NO_WIRE_QUERY` — answer from the cache or not at all. */
+const DNS_QUERY_NO_WIRE_QUERY : i32 = 0x100;
+/** `DnsFreeRecordList`. */
+const DNS_FREE_RECORD_LIST : i32 = 1;
+/** `DnsFreeFlat` — how the cache table's strings are released. */
+const DNS_FREE_FLAT : i32 = 0;
+
+/** Longest a cached name may be, in UTF-16 units. */
+const NAME_CHARS : i32 = 255;
+/** Ceiling on the cache walk — a runaway list is a corrupt list. */
+const MAX_ENTRIES : i32 = 4096;
+/** Ceiling on one name's record list. */
+const MAX_RECORDS : i32 = 64;
+/** How often the cache is re-read. */
+const SWEEP_MS : i64 = 5000;
+
+/**
+ * The reader, and what it learned last time.
+ *
+ * `ok` is the tier's own switch: it starts true, and the first record that
+ * does not look like a `DNSCACHEENTRY` turns it off for the session. There
+ * is no retry — a resolver whose cache record has a different shape will
+ * still have that shape a minute later, and re-walking a structure this file
+ * has already failed to understand is how a monitoring tool becomes the
+ * reason a machine falls over.
+ */
+class DnsCache {
+    pub(crate) ok : bool,
+    pub(crate) head : i64,
+    pub(crate) slot : i64,
+    /**
+     * Where a cached name is transcoded before anything wants it.
+     *
+     * A sweep reads every name the resolver holds, and most of them belong
+     * to addresses this machine is not currently talking to. Landing them
+     * here rather than in the pool is what keeps the run holding only the
+     * names a row actually took.
+     */
+    pub(crate) name : i64,
+    pub(crate) names : i32,
+    pub(crate) matched : i32,
+    pub(crate) nextSweepMs : i64,
+
+    constructor() {
+        self.head = Mem::take(CACHE_ENTRY);
+        self.slot = Mem::take(8);
+        self.name = Mem::take(HOST_MAX as i64);
+        self.ok = self.head != 0 && self.slot != 0 && self.name != 0;
+        self.names = 0;
+        self.matched = 0;
+        self.nextSweepMs = 0;
+    }
+
+    /** Whether a sweep is due. */
+    pub(crate) fn due(self, nowMs : i64) : bool {
+        return self.ok && nowMs >= self.nextSweepMs;
+    }
+
+    /** Release the scratch blocks. */
+    pub(crate) fn dispose(mut self) : void {
+        if (self.name != 0) {
+            Mem::release(self.name);
+            self.name = 0;
+        }
+        if (self.head != 0) {
+            Mem::release(self.head);
+            self.head = 0;
+        }
+        if (self.slot != 0) {
+            Mem::release(self.slot);
+            self.slot = 0;
+        }
+        self.ok = false;
+    }
+}
+
+/**
+ * Read the cache and attach every name it can to a known address. Answers
+ * whether anything on screen changed.
+ */
+fn sweep(dns : DnsCache, hosts : Hosts, pool : Pool, nowMs : i64) : bool {
+    if (!dns.ok) {
+        return false;
+    }
+    dns.nextSweepMs = nowMs + SWEEP_MS;
+    dns.names = 0;
+    dns.matched = 0;
+
+    Mem::clear(dns.head, CACHE_ENTRY);
+    if (DnsGetCacheDataTable(asPtr(dns.head)) == 0) {
+        dns.ok = false;
+        return false;
+    }
+
+    let entry : i64 = Mem::qwordAt(dns.head, CACHE_NEXT);
+    let walked : i32 = 0;
+    let learned : bool = false;
+    while (entry != 0 && walked < MAX_ENTRIES) {
+        // The next pointer is read before the record is released, and a list
+        // that points at itself is not followed: this is the structure whose
+        // shape is assumed rather than promised, and the assumption is
+        // allowed to be wrong exactly once.
+        let next : i64 = Mem::qwordAt(entry, CACHE_NEXT);
+        let kind : i32 = Mem::wordAt(entry, CACHE_TYPE);
+        let name : i64 = Mem::qwordAt(entry, CACHE_NAME);
+        if (name != 0 && (kind == DNS_TYPE_A || kind == DNS_TYPE_AAAA)) {
+            dns.names = dns.names + 1;
+            if (attach(dns, hosts, pool, name, kind)) {
+                learned = true;
+            }
+        }
+        if (name != 0) {
+            DnsFree(asPtr(name), DNS_FREE_FLAT);
+        }
+        DnsFree(asPtr(entry), DNS_FREE_FLAT);
+        if (next == entry) {
+            entry = 0;
+        } else {
+            entry = next;
+        }
+        walked = walked + 1;
+    }
+
+    return learned;
+}
+
+/**
+ * Resolve one cached name from the cache alone, and give it to every host
+ * row it names.
+ *
+ * The name is transcoded into the cache's own block first and interned only
+ * once a row has taken it. That keeps one copy in the pool however many rows
+ * share the name, and leaves nothing behind for the names — most of them —
+ * that belong to addresses this machine is not currently talking to.
+ */
+fn attach(dns : DnsCache, hosts : Hosts, pool : Pool, name : i64, kind : i32) : bool {
+    let chars : i32 = wideLen(name);
+    if (chars == 0) {
+        return false;
+    }
+    let len : i32 = chars;
+    if (len > HOST_MAX) {
+        len = HOST_MAX;
+    }
+    wideInto(dns.name, name, len);
+    // `-1` until a row wants the name; the first one that does interns it,
+    // and every later row shares that offset.
+    let off : i64 = -1;
+
+    Mem::putQword(dns.slot, 0, 0);
+    if (DnsQuery_W(asPtr(name), kind, DNS_QUERY_NO_WIRE_QUERY, nullPtr(), asPtr(dns.slot), nullPtr()) != 0) {
+        return false;
+    }
+
+    let records : i64 = Mem::qwordAt(dns.slot, 0);
+    let rec : i64 = records;
+    let walked : i32 = 0;
+    let used : bool = false;
+    while (rec != 0 && walked < MAX_RECORDS) {
+        let rtype : i32 = Mem::wordAt(rec, REC_TYPE);
+        let family : i32 = 0;
+        if (rtype == DNS_TYPE_A) {
+            family = 4;
+        } else if (rtype == DNS_TYPE_AAAA) {
+            family = 6;
+        }
+        if (family != 0) {
+            let h : i32 = hosts.lookup(rec + REC_DATA, family);
+            if (h >= 0 && nameRank(hosts.nameFrom[h]) < nameRank(NameSource::Cache)) {
+                if (off < 0) {
+                    off = pool.put(dns.name, len);
+                }
+                if (off >= 0) {
+                    hosts.name(h, off, len, NameSource::Cache);
+                    dns.matched = dns.matched + 1;
+                    used = true;
+                }
+            }
+        }
+        let next : i64 = Mem::qwordAt(rec, REC_NEXT);
+        if (next == rec) {
+            rec = 0;
+        } else {
+            rec = next;
+        }
+        walked = walked + 1;
+    }
+
+    if (records != 0) {
+        DnsRecordListFree(asPtr(records), DNS_FREE_RECORD_LIST);
+    }
+    return used;
+}
+
+/** The length of the NUL-terminated UTF-16 string at `p`, in code units. */
+fn wideLen(p : i64) : i32 {
+    for (n of 0..NAME_CHARS) {
+        if (Mem::wordAt(p, (n as i64) * 2) == 0) {
+            return n;
+        }
+    }
+    return NAME_CHARS;
+}

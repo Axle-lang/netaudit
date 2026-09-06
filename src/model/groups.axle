@@ -1,0 +1,298 @@
+// model/groups — one row per program, not one per process.
+//
+// A browser is thirty processes and one program. A reader auditing what
+// leaves this machine wants "the browser talked to 37 addresses", not
+// thirty rows that each hold a fraction of the answer and none of which can
+// be judged on its kept. So the group key is the **image path**, and every
+// pid running that image folds into it.
+//
+// The path, not the name: two different binaries called `updater.exe` are
+// two programs, and merging them is exactly the mistake that lets one hide
+// behind the other. When Windows refuses the path — a protected process,
+// which is most of `svchost` — the group falls back to the name and says
+// so on the row, because a wrong merge announced is recoverable and a wrong
+// merge hidden is not.
+//
+// Groups are minted and never removed. A session sees a few dozen programs
+// with sockets, the table holds five hundred, and never removing them means
+// no slot ever moves — which matters because `model/endpoints` refers to a
+// group by its slot, and a compaction here would silently re-parent every
+// endpoint that pointed past the hole.
+
+use smalt::SlotIndex;
+use crate::model::pool;
+use crate::model::key::{hashStep, seed};
+use crate::sys::procs::{Procs, PathState};
+
+/** Programs the table can hold. */
+const MAX_GROUPS : i32 = 512;
+/** Pids the per-tick sighting set can hold. */
+const MAX_PIDS : i32 = 4096;
+
+/**
+ * Every program that has been seen holding a socket, with what its
+ * endpoints add up to.
+ *
+ * The roll-ups (`endpoints`, `flagged`, `worst`, `rateIn`, `rateOut`,
+ * `lastMs`) are recomputed from the endpoint table on every rebuild rather
+ * than maintained incrementally: an incremental total drifts the first time
+ * a row expires without telling anyone, and the recompute is one sweep of a
+ * few thousand slots.
+ */
+class Groups {
+    pub(crate) key : i64[],
+    pub(crate) pathOff : i64[],
+    pub(crate) pathLen : i32[],
+    pub(crate) nameOff : i64[],
+    pub(crate) nameLen : i32[],
+    hasPath : i32[],
+
+    pub(crate) pids : i32[],
+    pub(crate) endpoints : i32[],
+    pub(crate) live : i32[],
+    pub(crate) flagged : i32[],
+    pub(crate) worst : i32[],
+    rateIn : i64[],
+    rateOut : i64[],
+    bytesIn : i64[],
+    bytesOut : i64[],
+    pub(crate) lastMs : i64[],
+    expanded : i32[],
+
+    pub(crate) count : i32,
+    index : SlotIndex,
+    seenPids : SlotIndex,
+
+    constructor() {
+        self.key = malloc<i64>(MAX_GROUPS as i64);
+        self.pathOff = malloc<i64>(MAX_GROUPS as i64);
+        self.pathLen = malloc<i32>(MAX_GROUPS as i64);
+        self.nameOff = malloc<i64>(MAX_GROUPS as i64);
+        self.nameLen = malloc<i32>(MAX_GROUPS as i64);
+        self.hasPath = malloc<i32>(MAX_GROUPS as i64);
+        self.pids = malloc<i32>(MAX_GROUPS as i64);
+        self.endpoints = malloc<i32>(MAX_GROUPS as i64);
+        self.live = malloc<i32>(MAX_GROUPS as i64);
+        self.flagged = malloc<i32>(MAX_GROUPS as i64);
+        self.worst = malloc<i32>(MAX_GROUPS as i64);
+        self.rateIn = malloc<i64>(MAX_GROUPS as i64);
+        self.rateOut = malloc<i64>(MAX_GROUPS as i64);
+        self.bytesIn = malloc<i64>(MAX_GROUPS as i64);
+        self.bytesOut = malloc<i64>(MAX_GROUPS as i64);
+        self.lastMs = malloc<i64>(MAX_GROUPS as i64);
+        self.expanded = malloc<i32>(MAX_GROUPS as i64);
+        self.count = 0;
+        self.index = new SlotIndex(MAX_GROUPS * 2);
+        self.seenPids = new SlotIndex(MAX_PIDS * 2);
+    }
+
+    /**
+     * Start a tick: forget which pids have been counted, and zero the
+     * per-tick pid tallies. The roll-ups are cleared by `beginRollup`
+     * instead, which runs later — the two are separate because the pid
+     * count comes from the connection table and the rest comes from the
+     * endpoint table.
+     */
+    pub(crate) fn beginTick(mut self) : void {
+        self.seenPids.clear();
+        for (g of 0..self.count) {
+            self.pids[g] = 0;
+        }
+    }
+
+    /**
+     * The group of `pid`, minting it on first sight, and counting the pid
+     * against it once per tick. `-1` when the process is already gone,
+     * which happens routinely: the connection table and the process list
+     * are two snapshots taken microseconds apart.
+     */
+    pub(crate) fn forPid(mut self, pool : Pool, procs : Procs, pid : i64) : i32 {
+        let s : i32 = procs.find(pid);
+        if (s < 0) {
+            return -1;
+        }
+        let known : bool = procs.resolvePath(pool, s) == PathState::Known;
+        let off : i64 = procs.nameOff[s];
+        let len : i32 = procs.nameLen[s];
+        if (known) {
+            off = procs.pathOff[s];
+            len = procs.pathLen[s];
+        }
+        if (off < 0) {
+            return -1;
+        }
+
+        let salt : i64 = 0;
+        if (known) {
+            salt = 1;
+        }
+        let k : i64 = hashStep(pool.hash(off, len), salt);
+        let g : i32 = self.index.get(k);
+        if (g < 0) {
+            g = self.mint(pool, k, off, len, known);
+            if (g < 0) {
+                return -1;
+            }
+        }
+        if (self.seenPids.get(pid) < 0) {
+            self.seenPids.put(pid, g);
+            self.pids[g] = self.pids[g] + 1;
+        }
+        return g;
+    }
+
+    /**
+     * Mint a group, interning its kept copy of the identifying span. The
+     * copy matters: the span it was handed belongs to a pid's slot, and
+     * that slot is reused the moment the process exits.
+     */
+    fn mint(mut self, pool : Pool, k : i64, off : i64, len : i32, known : bool) : i32 {
+        if (self.count >= MAX_GROUPS) {
+            return -1;
+        }
+        let kept : i64 = pool.put(pool.base() + off, len);
+        if (kept < 0) {
+            return -1;
+        }
+        let g : i32 = self.count;
+        self.count = g + 1;
+        self.key[g] = k;
+        self.hasPath[g] = 0;
+        if (known) {
+            self.hasPath[g] = 1;
+        }
+        self.pathOff[g] = kept;
+        self.pathLen[g] = len;
+
+        // The name shown on the row is the tail of the path; when there is
+        // no path it is the whole span, which is already just a name.
+        let cut : i32 = pool.lastSeparator(kept, len);
+        self.nameOff[g] = kept + ((cut + 1) as i64);
+        self.nameLen[g] = len - cut - 1;
+
+        self.pids[g] = 0;
+        self.endpoints[g] = 0;
+        self.live[g] = 0;
+        self.flagged[g] = 0;
+        self.worst[g] = -1;
+        self.rateIn[g] = 0;
+        self.rateOut[g] = 0;
+        self.bytesIn[g] = 0;
+        self.bytesOut[g] = 0;
+        self.lastMs[g] = 0;
+        // A program arrives open. A tree of forty folded rows answers "which
+        // programs use the network", which is the easy half of the question;
+        // the endpoints are the half worth opening the window for, and making
+        // the reader click forty times to see them is making them work for it.
+        self.expanded[g] = 1;
+        self.index.put(k, g);
+        return g;
+    }
+
+    /** Clear the roll-ups so an endpoint sweep can accumulate into them. */
+    pub(crate) fn beginRollup(mut self) : void {
+        for (g of 0..self.count) {
+            self.endpoints[g] = 0;
+            self.live[g] = 0;
+            self.flagged[g] = 0;
+            self.worst[g] = -1;
+            self.rateIn[g] = 0;
+            self.rateOut[g] = 0;
+            self.bytesIn[g] = 0;
+            self.bytesOut[g] = 0;
+        }
+    }
+
+    /** Fold one endpoint's readings into its group's totals. */
+    pub(crate) fn rollup(
+        mut self,
+        g : i32,
+        live : bool,
+        score : i32,
+        rateIn : i64,
+        rateOut : i64,
+        bytesIn : i64,
+        bytesOut : i64,
+        lastMs : i64
+    ) : void {
+        if (g < 0 || g >= self.count) {
+            return;
+        }
+        self.endpoints[g] = self.endpoints[g] + 1;
+        if (live) {
+            self.live[g] = self.live[g] + 1;
+        }
+        // `worst` ignores an unscored endpoint: a program whose lookups have
+        // not come back yet must not read as safe, and must not read as
+        // dangerous either. The row shows `—` until something is known.
+        if (score >= 0 && (self.worst[g] < 0 || score < self.worst[g])) {
+            self.worst[g] = score;
+        }
+        if (score >= 0 && score <= 2) {
+            self.flagged[g] = self.flagged[g] + 1;
+        }
+        self.rateIn[g] = self.rateIn[g] + rateIn;
+        self.rateOut[g] = self.rateOut[g] + rateOut;
+        self.bytesIn[g] = self.bytesIn[g] + bytesIn;
+        self.bytesOut[g] = self.bytesOut[g] + bytesOut;
+        if (lastMs > self.lastMs[g]) {
+            self.lastMs[g] = lastMs;
+        }
+    }
+
+    /** Whether group `g` is currently showing its endpoints. */
+    pub(crate) fn isOpen(self, g : i32) : bool {
+        return g >= 0 && g < self.count && self.expanded[g] != 0;
+    }
+
+    /** Whether group `g` was identified by its image path. */
+    pub(crate) fn identified(self, g : i32) : bool {
+        return g >= 0 && g < self.count && self.hasPath[g] != 0;
+    }
+
+    /** Flip a group open or closed. */
+    pub(crate) fn toggle(mut self, g : i32) : void {
+        if (g >= 0 && g < self.count) {
+            if (self.expanded[g] == 0) {
+                self.expanded[g] = 1;
+            } else {
+                self.expanded[g] = 0;
+            }
+        }
+    }
+
+    /** Open or close every group at once — the `*` key. */
+    pub(crate) fn setAll(mut self, open : bool) : void {
+        let v : i32 = 0;
+        if (open) {
+            v = 1;
+        }
+        for (g of 0..self.count) {
+            self.expanded[g] = v;
+        }
+    }
+
+    /** The group carrying `key`, or `-1`. */
+    pub(crate) fn byKey(self, key : i64) : i32 {
+        return self.index.get(key);
+    }
+
+    /** Combined traffic of a group, which is what its row is ranked on. */
+    pub(crate) fn rate(self, g : i32) : i64 {
+        return self.rateIn[g] + self.rateOut[g];
+    }
+
+    /** Release the two indexes; the column arrays go with the object. */
+    pub(crate) fn dispose(mut self) : void {
+        self.index.close();
+        self.seenPids.close();
+    }
+}
+
+/** The note a row shows when its program could not be identified by path. */
+fn mergeNote(hasPath : bool) : string {
+    if (hasPath) {
+        return "";
+    }
+    return "grouped by name — Windows refused the image path";
+}

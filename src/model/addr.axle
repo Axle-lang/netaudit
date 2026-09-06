@@ -1,0 +1,205 @@
+// model/addr — what kind of address this is, and how it is keyed.
+//
+// Two jobs, both small and both load-bearing.
+//
+// **Reach.** A machine's connection table is dominated by conversations
+// with itself. An IDE, a language server, a game launcher and an antivirus
+// each hold a dozen loopback sockets open, and shown flat they bury the
+// three rows a network audit is actually about. So every address is
+// classified — loopback, private, public — and the tree hides loopback by
+// default. Nothing is dropped: the toggle is one key away and the count is
+// on screen, because an audit tool that silently omits rows is worse than
+// one that shows too many.
+//
+// **Identity.** An endpoint is keyed on the bytes of its address, not on
+// their text form, so `::ffff:1.2.3.4` and `1.2.3.4` cannot become two rows
+// for one host, and a v6 address is one key rather than a string that
+// depends on how it was spelled.
+
+use smalt::Mem;
+use crate::model::key::{hashStep, seed};
+
+/** How far an address goes. */
+enum Reach : i32 {
+    /** `127.0.0.0/8` or `::1` — the machine talking to itself. */
+    Loopback = 0,
+    /** RFC 1918, link-local, CGNAT, or a v6 unique-local: this network. */
+    Private = 1,
+    /** Routable on the internet — the only class the enrichment can speak about. */
+    Public = 2,
+    /** All zeroes: a listening socket, or a UDP handle with no peer. */
+    None = 3,
+    /** Multicast or broadcast — a group, not a host. */
+    Multicast = 4,
+}
+
+
+
+/**
+ * Classify the sixteen address bytes at `src`, of which `family` says how
+ * many are meaningful. An IPv4-mapped v6 address is classified as the IPv4
+ * address it carries: it is the same host, and calling it public because
+ * its first ten bytes are zero would be a lie the score is built on.
+ */
+fn reach(src : i64, family : i32) : Reach {
+    if (family == 6 && !isV4Mapped(src)) {
+        return reach6(src);
+    }
+    let base : i64 = src;
+    if (family == 6) {
+        base = src + 12;
+    }
+    return reach4(base);
+}
+
+/** Classify the four bytes at `src`. */
+fn reach4(src : i64) : Reach {
+    let a : i32 = Mem::byteAt(src, 0);
+    let b : i32 = Mem::byteAt(src, 1);
+    let c : i32 = Mem::byteAt(src, 2);
+    let d : i32 = Mem::byteAt(src, 3);
+    if (a == 0 && b == 0 && c == 0 && d == 0) {
+        return Reach::None;
+    }
+    if (a == 127) {
+        return Reach::Loopback;
+    }
+    if (a >= 224) {
+        return Reach::Multicast;
+    }
+    if (a == 10) {
+        return Reach::Private;
+    }
+    if (a == 192 && b == 168) {
+        return Reach::Private;
+    }
+    if (a == 172 && b >= 16 && b <= 31) {
+        return Reach::Private;
+    }
+    if (a == 169 && b == 254) {
+        return Reach::Private;
+    }
+    // 100.64.0.0/10 — carrier-grade NAT. A peer here is on the ISP's own
+    // network, not on the internet, and no registry will name it.
+    if (a == 100 && b >= 64 && b <= 127) {
+        return Reach::Private;
+    }
+    return Reach::Public;
+}
+
+/** Classify sixteen genuine IPv6 bytes. */
+fn reach6(src : i64) : Reach {
+    let a : i32 = Mem::byteAt(src, 0);
+    if (isZero(src)) {
+        return Reach::None;
+    }
+    if (isLoopback6(src)) {
+        return Reach::Loopback;
+    }
+    if (a == 0xFF) {
+        return Reach::Multicast;
+    }
+    // fe80::/10 link-local, fc00::/7 unique-local.
+    if (a == 0xFE && (Mem::byteAt(src, 1) & 0xC0) == 0x80) {
+        return Reach::Private;
+    }
+    if ((a & 0xFE) == 0xFC) {
+        return Reach::Private;
+    }
+    return Reach::Public;
+}
+
+/** All sixteen bytes zero. */
+fn isZero(src : i64) : bool {
+    for (i of 0..16) {
+        if (Mem::byteAt(src, i) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/** `::1`. */
+fn isLoopback6(src : i64) : bool {
+    for (i of 0..15) {
+        if (Mem::byteAt(src, i) != 0) {
+            return false;
+        }
+    }
+    return Mem::byteAt(src, 15) == 1;
+}
+
+/** `::ffff:a.b.c.d` — a v4 peer reached through a dual-stack socket. */
+fn isV4Mapped(src : i64) : bool {
+    for (i of 0..10) {
+        if (Mem::byteAt(src, i) != 0) {
+            return false;
+        }
+    }
+    return Mem::byteAt(src, 10) == 0xFF && Mem::byteAt(src, 11) == 0xFF;
+}
+
+/**
+ * The family an address should be *shown and keyed* as: a v4-mapped v6
+ * address answers 4, so one host is one row however the socket reached it.
+ */
+fn shownFamily(src : i64, family : i32) : i32 {
+    if (family == 6 && isV4Mapped(src)) {
+        return 4;
+    }
+    return family;
+}
+
+/**
+ * The byte offset within the sixteen at which the shown address starts —
+ * twelve for a v4-mapped address, zero otherwise.
+ */
+fn shownOffset(src : i64, family : i32) : i64 {
+    if (family == 6 && isV4Mapped(src)) {
+        return 12;
+    }
+    return 0;
+}
+
+/** Fold an address into a running hash: the bytes, never their text. */
+fn hashAddr(h : i64, src : i64, family : i32) : i64 {
+    let n : i64 = 4;
+    if (family == 6) {
+        n = 16;
+    }
+    let acc : i64 = hashStep(h, family as i64);
+    for (i of 0..n) {
+        acc = hashStep(acc, Mem::byteAt(src, i) as i64);
+    }
+    return acc;
+}
+
+/** Whether two addresses of the same family hold the same bytes. */
+fn sameAddr(a : i64, b : i64, family : i32) : bool {
+    let n : i64 = 4;
+    if (family == 6) {
+        n = 16;
+    }
+    for (i of 0..n) {
+        if (Mem::byteAt(a, i) != Mem::byteAt(b, i)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/** The key of a host, for the address → attribution index. */
+fn hostKey(src : i64, family : i32) : i64 {
+    return hashAddr(seed(), src, family);
+}
+
+/** The word the detail card uses for a reach. */
+fn reachWord(r : Reach) : string {
+    return match r {
+        Reach::Loopback => "this machine",
+        Reach::Private => "this network",
+        Reach::Multicast => "multicast group",
+        Reach::None => "no peer",
+        _ => "internet",
+    };
+}

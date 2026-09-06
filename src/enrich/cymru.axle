@@ -1,0 +1,173 @@
+// enrich/cymru — whois, asked over DNS, for the addresses the batch service
+// could not name.
+//
+// Team Cymru publish the routing table as a DNS zone, which is the oldest
+// trick in network operations and still the right one here:
+//
+//   10.104.79.160.origin.asn.cymru.com  TXT
+//       "399358 | 160.79.104.0/23 | US | arin | 2023-09-14"
+//   AS399358.asn.cymru.com              TXT
+//       "399358 | US | arin | 2023-09-20 | ANTHROPIC - Anthropic, PBC, US"
+//
+// Two lookups, no key, no registration, no rate limit worth the name, and —
+// the reason this exists rather than a web API — **no TLS**. `std::net`'s
+// HTTP client speaks HTTP/1.1 only, so an `https://` request from this
+// program cannot succeed. A fallback
+// that reached a registry over HTTPS would have been a fallback that never
+// once answered, and would have looked exactly like an address nobody could
+// name.
+//
+// It rides `sys/rdns`'s resolver on the same worker thread as the reverse
+// lookups, so a slow registry costs a frame of nothing rather than a frozen
+// window.
+
+use smalt::Mem;
+use crate::model::hosts::{Hosts, ORG_MAX};
+use crate::model::pool;
+use std::text::StringBuilder;
+
+/** ASCII `|`, the field separator every answer in this zone uses. */
+const BAR : i32 = 124;
+/** Longest AS name kept. */
+const CYMRU_NAME_MAX : i32 = 48;
+
+/**
+ * The zone name that answers "which network announces this address".
+ *
+ * IPv4 is the reversed quad; IPv6 is the thirty-two nibbles, reversed, in
+ * `origin6`. Both come back with the AS number in the first field.
+ */
+fn originName(hosts : Hosts, h : i32) : string {
+    let sb : StringBuilder = new StringBuilder();
+    let base : i64 = hosts.addrAt(h);
+    if (hosts.family[h] == 6) {
+        let i : i32 = 15;
+        while (i >= 0) {
+            let b : i32 = Mem::byteAt(base, i as i64);
+            sb.appendChar(nibbleChar(b & 0xF));
+            sb.append(".");
+            sb.appendChar(nibbleChar((b >> 4) & 0xF));
+            sb.append(".");
+            i = i - 1;
+        }
+        sb.append("origin6.asn.cymru.com");
+        return sb.toString();
+    }
+    let i : i32 = 3;
+    while (i >= 0) {
+        sb.appendI32(Mem::byteAt(base, i as i64));
+        sb.append(".");
+        i = i - 1;
+    }
+    sb.append("origin.asn.cymru.com");
+    return sb.toString();
+}
+
+/** The zone name that answers "what is this network called". */
+fn asName(asn : i32) : string {
+    let sb : StringBuilder = new StringBuilder();
+    sb.append("AS");
+    sb.appendI32(asn);
+    sb.append(".asn.cymru.com");
+    return sb.toString();
+}
+
+/** One lowercase hex digit. */
+fn nibbleChar(v : i32) : i32 {
+    if (v < 10) {
+        return 48 + v;
+    }
+    return 97 + v - 10;
+}
+
+/**
+ * The AS number in an `origin` answer's first field, or `0`.
+ *
+ * A prefix announced by several networks answers with them space-separated
+ * — `"7018 3356 | 4.0.0.0/9 | US | arin | …"`. The first is taken: they are
+ * all correct, and a row that named three networks for one address would be
+ * telling a reader something they cannot act on.
+ */
+fn originAsn(answer : string) : i32 {
+    let n : i64 = answer.byteLength;
+    let v : i32 = 0;
+    let seen : bool = false;
+    let i : i64 = 0;
+    while (i < n) {
+        let c : i32 = answer.byteAt(i);
+        if (c >= 48 && c <= 57) {
+            v = v * 10 + (c - 48);
+            seen = true;
+            i = i + 1;
+        } else if (seen) {
+            i = n;
+        } else {
+            i = i + 1;
+        }
+    }
+    return v;
+}
+
+/**
+ * Intern the network's label from an `AS…` answer, as `AS15169 GOOGLE - …`.
+ *
+ * The name is the answer's **fifth** field. Everything before it is the
+ * number, the country, the registry and a date, all of which the row either
+ * has already or does not want.
+ */
+fn takeName(hosts : Hosts, pool : Pool, h : i32, asn : i32, answer : string) : bool {
+    let from : i64 = fieldStart(answer, 4);
+    if (from < 0) {
+        return false;
+    }
+    let sb : StringBuilder = new StringBuilder();
+    sb.append("AS");
+    sb.appendI32(asn);
+    sb.append(" ");
+    let n : i64 = answer.byteLength;
+    let taken : i32 = 0;
+    let i : i64 = from;
+    while (i < n && taken < CYMRU_NAME_MAX) {
+        let c : i32 = answer.byteAt(i);
+        if (c < 32 || c > 126) {
+            c = 63; // '?'
+        }
+        sb.appendChar(c);
+        taken = taken + 1;
+        i = i + 1;
+    }
+
+    let off : i64 = pool.putString(sb.toString(), ORG_MAX);
+    if (off < 0) {
+        return false;
+    }
+    hosts.netOff[h] = off;
+    hosts.netLen[h] = (pool.used() - off) as i32;
+    hosts.asn[h] = asn;
+    return true;
+}
+
+/**
+ * Where field `want` begins, past its separator and the space after it, or
+ * `-1` when the answer has fewer fields than that.
+ */
+fn fieldStart(answer : string, want : i32) : i64 {
+    let n : i64 = answer.byteLength;
+    let bars : i32 = 0;
+    for (i of 0..n) {
+        if (answer.byteAt(i) == BAR) {
+            bars = bars + 1;
+            if (bars == want) {
+                let at : i64 = i + 1;
+                while (at < n && answer.byteAt(at) == 32) {
+                    at = at + 1;
+                }
+                if (at >= n) {
+                    return -1;
+                }
+                return at;
+            }
+        }
+    }
+    return -1;
+}

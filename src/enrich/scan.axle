@@ -1,0 +1,248 @@
+// enrich/scan — reading values out of a JSON response, byte by byte.
+//
+// The responses this program reads have a shape that is fixed and known: an
+// array of flat objects whose keys are documented and whose values are
+// strings, booleans and numbers. What is needed is "the value of `country`
+// in this object", and the cheapest correct way to get it is to walk the
+// bytes.
+//
+// A general parser would build a document out of the response, which for a
+// hundred objects means a few thousand heap nodes, all of them thrown away
+// in the same call — and the values would come out as `string`s, which is
+// exactly the shape this program keeps out of its tables. Here a value is
+// located as a **byte range in the response**, and `Pool::putRange` copies it
+// straight into the pool.
+//
+// The one thing a hand walk must not get wrong is a quote inside a string:
+// `"org":"Foo \"Bar\" Ltd"` ends at the third quote, not the second. So
+// `stringEnd` honours the backslash escape, and every scan that crosses a
+// value goes through it.
+
+
+/** ASCII `"`. */
+const J_QUOTE : i32 = 34;
+/** ASCII `\`. */
+const J_BACKSLASH : i32 = 92;
+/** ASCII `{`. */
+const J_OPEN_BRACE : i32 = 123;
+/** ASCII `}`. */
+const J_CLOSE_BRACE : i32 = 125;
+/** ASCII `:`. */
+const J_COLON : i32 = 58;
+
+/** No such key, or no such object. */
+const J_NOT_FOUND : i64 = -1;
+
+/**
+ * The index just past the closing quote of the string that starts at `from`
+ * (which must be the opening quote), honouring `\"` escapes.
+ */
+fn stringEnd(s : string, from : i64, len : i64) : i64 {
+    let i : i64 = from + 1;
+    while (i < len) {
+        let c : i32 = s.byteAt(i);
+        if (c == J_BACKSLASH) {
+            i = i + 2;
+        } else if (c == J_QUOTE) {
+            return i + 1;
+        } else {
+            i = i + 1;
+        }
+    }
+    return len;
+}
+
+/**
+ * The index of the next top-level `{` at or after `from`, or `J_NOT_FOUND`.
+ * Strings are skipped whole, so a brace inside a hostname cannot be mistaken
+ * for the start of an object.
+ */
+fn objectStart(s : string, from : i64, len : i64) : i64 {
+    let i : i64 = from;
+    while (i < len) {
+        let c : i32 = s.byteAt(i);
+        if (c == J_QUOTE) {
+            i = stringEnd(s, i, len);
+        } else if (c == J_OPEN_BRACE) {
+            return i;
+        } else {
+            i = i + 1;
+        }
+    }
+    return J_NOT_FOUND;
+}
+
+/** The index just past the `}` closing the object that starts at `from`. */
+fn objectEnd(s : string, from : i64, len : i64) : i64 {
+    let depth : i32 = 0;
+    let i : i64 = from;
+    while (i < len) {
+        let c : i32 = s.byteAt(i);
+        if (c == J_QUOTE) {
+            i = stringEnd(s, i, len);
+        } else {
+            if (c == J_OPEN_BRACE) {
+                depth = depth + 1;
+            } else if (c == J_CLOSE_BRACE) {
+                depth = depth - 1;
+                if (depth == 0) {
+                    return i + 1;
+                }
+            }
+            i = i + 1;
+        }
+    }
+    return len;
+}
+
+/** Whether the bytes of `s` at `at` are the bytes of `lit`. */
+fn matches(s : string, at : i64, len : i64, lit : string) : bool {
+    let n : i64 = lit.byteLength;
+    if (at + n > len) {
+        return false;
+    }
+    for (i of 0..n) {
+        if (s.byteAt(at + i) != lit.byteAt(i)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * The index of the value of `key` inside the object `[from, to)`, or
+ * `J_NOT_FOUND`. The index points at the first byte of the value — the opening
+ * quote of a string, the first digit of a number, the `t` of `true`.
+ *
+ * Only the object's own keys are considered: a nested object is skipped
+ * whole, so a `country` inside a sub-object cannot answer for the one the
+ * caller asked about.
+ */
+fn field(s : string, from : i64, to : i64, key : string) : i64 {
+    let depth : i32 = 0;
+    let i : i64 = from;
+    while (i < to) {
+        let c : i32 = s.byteAt(i);
+        if (c == J_QUOTE) {
+            let end : i64 = stringEnd(s, i, to);
+            let after : i64 = i + 1 + key.byteLength;
+            if (depth == 1 && after < to && matches(s, i + 1, to, key)
+                && s.byteAt(after) == J_QUOTE) {
+                let v : i64 = end;
+                while (v < to && s.byteAt(v) != J_COLON) {
+                    v = v + 1;
+                }
+                v = v + 1;
+                while (v < to && s.byteAt(v) == 32) {
+                    v = v + 1;
+                }
+                return v;
+            }
+            i = end;
+        } else {
+            if (c == J_OPEN_BRACE) {
+                depth = depth + 1;
+            } else if (c == J_CLOSE_BRACE) {
+                depth = depth - 1;
+            }
+            i = i + 1;
+        }
+    }
+    return J_NOT_FOUND;
+}
+
+/**
+ * The value of `key` anywhere inside `[from, to)`, at whatever depth, or
+ * `J_NOT_FOUND`.
+ *
+ * Used for the registry responses, which wrap their answer several objects
+ * deep under keys that carry no information (`data`, then `asns`, then the
+ * array's first element). Searching by depth there would mean hard-coding a
+ * path that the service is free to change, whereas the *names* of the leaf
+ * fields are the part it documents. The keys asked for are specific enough
+ * that a stray match is not a real risk.
+ */
+fn anyField(s : string, from : i64, to : i64, key : string) : i64 {
+    let i : i64 = from;
+    while (i < to) {
+        let c : i32 = s.byteAt(i);
+        if (c == J_QUOTE) {
+            let end : i64 = stringEnd(s, i, to);
+            let after : i64 = i + 1 + key.byteLength;
+            if (after < to && matches(s, i + 1, to, key) && s.byteAt(after) == J_QUOTE) {
+                let v : i64 = end;
+                while (v < to && s.byteAt(v) != J_COLON) {
+                    v = v + 1;
+                }
+                v = v + 1;
+                while (v < to && s.byteAt(v) == 32) {
+                    v = v + 1;
+                }
+                return v;
+            }
+            i = end;
+        } else {
+            i = i + 1;
+        }
+    }
+    return J_NOT_FOUND;
+}
+
+/** One byte of `s` — the reading every scan in this file is built from. */
+fn byteOf(s : string, i : i64) : i32 {
+    return s.byteAt(i);
+}
+
+/**
+ * The byte range of the string value at `at`, excluding its quotes, as the
+ * pair `(start, end)` — `start` is returned and `end` is what `valueEnd`
+ * answers for the same position. A value that is not a string answers an
+ * empty range, which every caller reads as "absent" rather than as "".
+ */
+fn valueStart(s : string, at : i64, len : i64) : i64 {
+    if (at < 0 || at >= len || s.byteAt(at) != J_QUOTE) {
+        return J_NOT_FOUND;
+    }
+    return at + 1;
+}
+
+/** The index just past the last byte of the string value at `at`. */
+fn valueEnd(s : string, at : i64, len : i64) : i64 {
+    if (at < 0 || at >= len || s.byteAt(at) != J_QUOTE) {
+        return J_NOT_FOUND;
+    }
+    return stringEnd(s, at, len) - 1;
+}
+
+/** Whether the value at `at` is the literal `true`. */
+fn isTrue(s : string, at : i64, len : i64) : bool {
+    return at >= 0 && matches(s, at, len, "true");
+}
+
+/**
+ * The unsigned integer the digits at `at` spell, or `-1` when there are
+ * none. Used for the AS number, which arrives as `AS15169 Google LLC` — the
+ * caller points this at the byte after the `AS`.
+ */
+fn digits(s : string, at : i64, len : i64) : i32 {
+    if (at < 0 || at >= len) {
+        return -1;
+    }
+    let v : i64 = 0;
+    let n : i32 = 0;
+    let i : i64 = at;
+    while (i < len && n < 10) {
+        let c : i32 = s.byteAt(i);
+        if (c < 48 || c > 57) {
+            i = len;
+        } else {
+            v = v * 10 + ((c - 48) as i64);
+            n = n + 1;
+            i = i + 1;
+        }
+    }
+    if (n == 0) {
+        return -1;
+    }
+    return v as i32;
+}

@@ -1,0 +1,95 @@
+// sys/shell — show a program's binary in Explorer.
+//
+// One entry point, one Win32 call. `explorer.exe /select,"<path>"` opens the
+// containing folder with the file already highlighted, which is the answer
+// to "where is this thing?" — as opposed to opening the folder and leaving
+// the reader to find one binary among two hundred.
+//
+// The path is quoted because program directories contain spaces, and
+// Explorer's argument parser takes the first space as the end of the path.
+// Everything is built as UTF-16 in a scratch block: the path came out of
+// Windows as UTF-16, and handing it back through a narrow entry point would
+// lose exactly the characters that make a path unusual.
+
+use smalt::Mem;
+use crate::sys::raw::{addrOf, asPtr, nullPtr};
+use crate::model::pool;
+
+extern "C" from "shell32" {
+    /**
+     * `HINSTANCE ShellExecuteW(HWND, LPCWSTR, LPCWSTR, LPCWSTR, LPCWSTR, INT)`.
+     * The result is a legacy `HINSTANCE`: anything above 32 means it worked.
+     */
+    fn ShellExecuteW(
+        hwnd : ptr,
+        verb : ptr,
+        file : ptr,
+        params : ptr,
+        dir : ptr,
+        show : i32
+    ) : ptr;
+}
+
+/** `SW_SHOWNORMAL`. */
+const SW_SHOWNORMAL : i32 = 1;
+/** Below this, `ShellExecuteW`'s result is an error code rather than a handle. */
+const SHELL_OK_FLOOR : i64 = 32;
+/** Characters the argument scratch holds. */
+const ARG_CHARS : i32 = 1024;
+
+/** ASCII `"`. */
+const QUOTE : i32 = 34;
+
+/**
+ * Open the folder holding the program at pool span `(off, len)`, with the
+ * binary selected. `false` when there is no path to open or Windows refused
+ * — the caller says which in the status bar rather than doing nothing
+ * visible, because a click that produces no window and no message reads as
+ * a broken program.
+ */
+fn revealBinary(pool : Pool, off : i64, len : i32) : bool {
+    if (off < 0 || len <= 0) {
+        return false;
+    }
+    let verb : i64 = Mem::take(32);
+    let file : i64 = Mem::take(64);
+    let args : i64 = Mem::take((ARG_CHARS as i64) * 2);
+    if (verb == 0 || file == 0 || args == 0) {
+        freeShellArgs(verb, file, args);
+        return false;
+    }
+
+    Mem::wideFrom(verb, "open", 8);
+    Mem::wideFrom(file, "explorer.exe", 24);
+
+    let n : i64 = Mem::wideFrom(args, "/select,", 16) / 2 - 1;
+    Mem::putWord(args, n * 2, QUOTE);
+    n = n + 1;
+    let i : i32 = 0;
+    while (i < len && n < (ARG_CHARS as i64) - 3) {
+        Mem::putWord(args, n * 2, pool.at(off + (i as i64)));
+        n = n + 1;
+        i = i + 1;
+    }
+    Mem::putWord(args, n * 2, QUOTE);
+    Mem::putWord(args, (n + 1) * 2, 0);
+
+    let r : ptr = ShellExecuteW(
+        nullPtr(), asPtr(verb), asPtr(file), asPtr(args), nullPtr(), SW_SHOWNORMAL
+    );
+    freeShellArgs(verb, file, args);
+    return addrOf(r) > SHELL_OK_FLOOR;
+}
+
+/** Give back the three scratch blocks, whichever of them were taken. */
+fn freeShellArgs(verb : i64, file : i64, args : i64) : void {
+    if (verb != 0) {
+        Mem::release(verb);
+    }
+    if (file != 0) {
+        Mem::release(file);
+    }
+    if (args != 0) {
+        Mem::release(args);
+    }
+}

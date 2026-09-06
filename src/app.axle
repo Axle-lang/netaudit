@@ -1,0 +1,354 @@
+// app — the interaction state: what is selected, sorted, filtered, folded,
+// scrolled, and what the window is currently saying.
+//
+// Deliberately separate from the model: `model/*` is what the machine
+// reports, this is what the reader is doing to it.
+//
+// Two fields carry the whole stability contract, and both are the same idea.
+// The selection is held as a **key**, never as a row index or a slot — the
+// tree is rebuilt from scratch every tick, and an index would quietly come
+// to mean a different endpoint. `freezeUntilMs` is the other: while the
+// pointer is in the tree, and for a moment after it leaves, no reordering
+// happens at all, so nothing moves under a reader's hand between seeing a
+// row and clicking it.
+
+use smalt::{Scratch, Mem};
+use crate::model::view::{Sort, SORT_COUNT, sortAt, RowKind};
+
+/** Bytes of the filter field. */
+const FILTER_CAP : i32 = 64;
+/** Bytes of the formatting scratch — one figure at a time. */
+const SCRATCH_CAP : i64 = 512;
+
+/** How long a status message stays up, in refresh ticks. */
+const SAY_TICKS : i32 = 4;
+
+/** Which dialog, if any, is over the tree. */
+enum Modal : i32 {
+    /** No dialog is up. */
+    None = 0,
+    /** The endpoint detail card. */
+    Detail = 1,
+    /** The keyboard reference. */
+    Help = 2,
+}
+
+/**
+ * What the status bar is saying.
+ *
+ * A message rather than a string, because two of them read differently
+ * depending on what they toggled — `sayText` is the one place that decides,
+ * and it is a `match`, so a message added here cannot ship without its
+ * sentence.
+ */
+enum Say : i32 {
+    /** Nothing is being said. */
+    None = 0,
+    /** The folder holding the selected program was opened. */
+    Opened = 1,
+    /** Windows would not open the folder — usually a path it refused to give. */
+    NoPath = 2,
+    /** Refreshing is paused. */
+    Paused = 3,
+    /** Refreshing has resumed. */
+    Resumed = 4,
+    /** Loopback rows were revealed or hidden. */
+    Local = 5,
+    /** Listening and UDP sockets were revealed or hidden. */
+    Bound = 6,
+    /** The journal was cleared back to what is live now. */
+    Cleared = 7,
+    /** The window was written to a file. */
+    Snapped = 8,
+    /** It could not be. */
+    NoSnap = 9,
+}
+
+/**
+ * How long the pointer must rest before a tooltip appears. Short enough to
+ * feel like an answer, long enough that sweeping across the tree does not
+ * strobe cards at the reader.
+ */
+const TIP_DELAY_MS : i64 = 450;
+/**
+ * How long reordering stays frozen after the pointer leaves the tree. The
+ * reader may be reaching for the scrollbar or the toolbar and still be
+ * reading the rows.
+ */
+const FREEZE_TAIL_MS : i64 = 2000;
+
+class App {
+    pub(crate) sortKey : Sort,
+
+    pub(crate) filter : i64,
+    pub(crate) filterLen : i32,
+    pub(crate) typing : bool,
+    pub(crate) swallow : bool,
+
+    pub(crate) showLocal : bool,
+    pub(crate) showBound : bool,
+
+    pub(crate) selected : bool,
+    pub(crate) selKind : RowKind,
+    pub(crate) selKey : i64,
+
+    pub(crate) scroll : i32,
+    pub(crate) dragging : bool,
+    pub(crate) dragGrip : i32,
+    pub(crate) picked : bool,
+    pub(crate) hoverRow : i32,
+    pub(crate) mouseX : i32,
+    pub(crate) mouseY : i32,
+    hoverSinceMs : i64,
+    pub(crate) inTree : bool,
+    freezeUntilMs : i64,
+
+    pub(crate) modal : Modal,
+    pub(crate) quitting : bool,
+    pub(crate) refreshDue : bool,
+    pub(crate) paused : bool,
+    pub(crate) dirty : bool,
+
+    pub(crate) scratch : Scratch,
+    pub(crate) say : Say,
+    sayLeft : i32,
+
+    constructor() {
+        self.sortKey = Sort::Salience;
+        self.filter = Mem::take(FILTER_CAP as i64);
+        self.filterLen = 0;
+        self.typing = false;
+        self.swallow = false;
+        self.showLocal = false;
+        self.showBound = false;
+        self.selected = false;
+        self.selKind = RowKind::Group;
+        self.selKey = 0;
+        self.scroll = 0;
+        self.dragging = false;
+        self.dragGrip = 0;
+        self.picked = false;
+        self.hoverRow = -1;
+        self.mouseX = -1;
+        self.mouseY = -1;
+        self.hoverSinceMs = 0;
+        self.inTree = false;
+        self.freezeUntilMs = 0;
+        self.modal = Modal::None;
+        self.quitting = false;
+        self.refreshDue = false;
+        self.paused = false;
+        self.dirty = true;
+        self.scratch = new Scratch(SCRATCH_CAP);
+        self.say = Say::None;
+        self.sayLeft = 0;
+    }
+
+    /** Whether reordering is currently suspended. */
+    pub(crate) fn frozen(self, nowMs : i64) : bool {
+        return nowMs < self.freezeUntilMs;
+    }
+
+    /** Hold the order still, because the pointer is over the rows. */
+    pub(crate) fn holdOrder(mut self, nowMs : i64) : void {
+        self.freezeUntilMs = nowMs + FREEZE_TAIL_MS;
+    }
+
+    /** Whether the tooltip has waited long enough to be wanted. */
+    pub(crate) fn tipReady(self, nowMs : i64) : bool {
+        return self.hoverRow >= 0
+            && self.modal == Modal::None
+            && nowMs - self.hoverSinceMs >= TIP_DELAY_MS;
+    }
+
+    /** Note that the pointer moved, which restarts the tooltip's wait. */
+    pub(crate) fn pointerMoved(mut self, nowMs : i64, x : i32, y : i32) : void {
+        if (x != self.mouseX || y != self.mouseY) {
+            self.mouseX = x;
+            self.mouseY = y;
+            self.hoverSinceMs = nowMs;
+        }
+    }
+
+    /** Select the group carrying `key`. */
+    pub(crate) fn selectGroup(mut self, key : i64) : void {
+        self.selected = true;
+        self.selKind = RowKind::Group;
+        self.selKey = key;
+        self.dirty = true;
+    }
+
+    /** Select the endpoint carrying `key`. */
+    pub(crate) fn selectEndpoint(mut self, key : i64) : void {
+        self.selected = true;
+        self.selKind = RowKind::Endpoint;
+        self.selKey = key;
+        self.dirty = true;
+    }
+
+    /** Whether the row of `kind` carrying `key` is the selected one. */
+    pub(crate) fn isSelected(self, kind : RowKind, key : i64) : bool {
+        return self.selected && self.selKind == kind && self.selKey == key;
+    }
+
+    /** Append one typed byte to the filter, ignoring what will not fit. */
+    pub(crate) fn typeByte(mut self, c : i32) : void {
+        if (self.filterLen >= FILTER_CAP || c < 32 || c > 126) {
+            return;
+        }
+        Mem::putByte(self.filter, self.filterLen as i64, c);
+        self.filterLen = self.filterLen + 1;
+        self.dirty = true;
+    }
+
+    /** Drop the last filter byte. */
+    pub(crate) fn backspace(mut self) : void {
+        if (self.filterLen > 0) {
+            self.filterLen = self.filterLen - 1;
+            self.dirty = true;
+        }
+    }
+
+    /** Empty the filter and leave the field. */
+    pub(crate) fn clearFilter(mut self) : void {
+        self.filterLen = 0;
+        self.typing = false;
+        self.dirty = true;
+    }
+
+    /** Move to the next sort key, wrapping. */
+    pub(crate) fn nextSort(mut self) : void {
+        self.sortKey = sortAt(((self.sortKey as i32) + 1) % SORT_COUNT);
+        self.dirty = true;
+    }
+
+    /**
+     * Rank by `key`, or by `alt` when `key` is already the active one.
+     *
+     * The tree's columns each hold two readings — a column headed
+     * `REPETITION / RHYTHM` really does show both — so clicking it once ranks
+     * by the first and again by the second. A header that cycled through
+     * every ranking in the program instead would make the two words in its
+     * own title a lie.
+     */
+    pub(crate) fn sortByColumn(mut self, key : Sort, alt : Sort) : void {
+        if (self.sortKey == key) {
+            self.sortKey = alt;
+        } else {
+            self.sortKey = key;
+        }
+        self.dirty = true;
+    }
+
+    /** Put a message in the status bar for the next few refresh ticks. */
+    pub(crate) fn saying(mut self, what : Say) : void {
+        self.say = what;
+        self.sayLeft = SAY_TICKS;
+        self.dirty = true;
+    }
+
+    /** The reader asked to close the window. */
+    pub(crate) fn quit(mut self) : void {
+        self.quitting = true;
+    }
+
+    /**
+     * Re-read the machine at the next turn of the loop rather than at the
+     * next tick.
+     *
+     * A flag and not a deadline: the loop owns the clock, and a caller that
+     * could write the deadline could also write one in the past by accident
+     * and spin the machine.
+     */
+    pub(crate) fn refreshNow(mut self) : void {
+        self.refreshDue = true;
+    }
+
+    /**
+     * Ask for a repaint and answer that nothing else is owed.
+     *
+     * The shape the loop's routing table wants: every arm of it answers an
+     * `Action`, so a resize is not an exception to the rule that an event
+     * is handled by a call whose value the loop reads.
+     */
+    pub(crate) fn repaint(mut self) : Action {
+        self.dirty = true;
+        return Action::None;
+    }
+
+    /** Age the status message; called once per refresh tick. */
+    pub(crate) fn tick(mut self) : void {
+        if (self.sayLeft > 0) {
+            self.sayLeft = self.sayLeft - 1;
+            if (self.sayLeft == 0) {
+                self.say = Say::None;
+                self.dirty = true;
+            }
+        }
+    }
+
+    /** Release the two raw buffers. */
+    pub(crate) fn dispose(mut self) : void {
+        if (self.filter != 0) {
+            Mem::release(self.filter);
+            self.filter = 0;
+        }
+        self.scratch.close();
+    }
+}
+
+/** The status-bar line for `say`, empty when there is nothing to report. */
+fn sayText(say : Say, showLocal : bool, showBound : bool) : string {
+    return match say {
+        Say::None => "",
+        Say::Opened => "Opened the folder holding that program.",
+        Say::NoPath =>
+            "Windows would not give that program's path, so there is no folder to open.",
+        Say::Paused => "Paused — the journal is frozen.",
+        Say::Resumed => "Live again.",
+        Say::Cleared => "History cleared back to what is live now.",
+        Say::Snapped => "Window written to netaudit.bmp, beside the binary.",
+        Say::NoSnap => "Could not write netaudit.bmp — the folder may be read-only.",
+        // The two toggles say which way they went, so each carries both
+        // sentences: a message that only said "local traffic" would leave a
+        // reader to check the row count to find out what just happened.
+        Say::Local => match showLocal {
+            true => "Showing traffic that stays on this machine and this network.",
+            false => "Hiding traffic that stays on this machine and this network.",
+        },
+        Say::Bound => match showBound {
+            true => "Showing listening sockets and UDP handles — Windows names no peer for either.",
+            false => "Hiding listening sockets and UDP handles.",
+        },
+    };
+}
+
+/** The name of a ranking, as the toolbar shows it. */
+fn sortName(key : Sort) : string {
+    return match key {
+        Sort::Salience => "salience",
+        Sort::Traffic => "traffic",
+        Sort::Risk => "risk",
+        Sort::Rhythm => "rhythm",
+        Sort::Hits => "repeats",
+        Sort::Name => "name",
+        Sort::Recent => "last seen",
+    };
+}
+
+/**
+ * What the active sort is actually ranking by, in one line under the
+ * toolbar. A reader who does not know what "salience" weighs cannot trust
+ * the order, and an order nobody trusts gets ignored.
+ */
+fn sortNote(key : Sort) : string {
+    return match key {
+        Sort::Salience => "repeats, rhythm, risk, traffic and recency, weighted",
+        Sort::Traffic => "most bytes moving first",
+        Sort::Risk => "worst trust score first; unknown addresses last",
+        Sort::Rhythm => "steadiest repeat interval first — the shape a timer makes",
+        Sort::Hits => "most repeat visits first",
+        Sort::Name => "by host name, A to Z",
+        Sort::Recent => "most recently seen first",
+    };
+}

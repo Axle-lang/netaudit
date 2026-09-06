@@ -1,0 +1,197 @@
+// enrich/ripestat — the registry's own answer, for the addresses the batch
+// service could not name.
+//
+// The batch lookup answers for almost everything, and when it does not, the
+// gap is exactly the case a reader most wants filled: an address with no
+// name, in a network nobody recognises. Leaving that as a bare number is the
+// difference between "this program is talking to something" and "this
+// program is talking to Hetzner".
+//
+// So a second, slower source is asked, one address at a time: RIPE's public
+// statistics service, which is the registry data itself — the same holder
+// field a `whois` would print — over HTTPS, with no key and no registration.
+// Two endpoints are used:
+//
+//   prefix-overview  the announcing AS number and its holder
+//   blocklist        whether the address or its prefix is listed anywhere
+//
+// Only addresses that need it are asked about, at most one at a time, which
+// keeps the load on a public good proportional to the question being asked.
+
+use smalt::{Scratch, Mem};
+use crate::enrich::scan;
+use crate::model::hosts::{Hosts, Look, FLAG_BLOCKED, FLAG_BLOCK_CHECKED, ORG_MAX};
+use crate::model::pool;
+use crate::model::score;
+use crate::model::addr;
+use crate::fmt;
+use std::text::StringBuilder;
+
+/** Longest an interned holder name is kept. */
+const HOLDER_MAX : i32 = 48;
+
+/**
+ * The address whose network still has no name, or `-1`. A row is only worth
+ * asking about once its batch lookup has come back: until then the batch may
+ * still answer, and asking both would be asking twice for one fact.
+ */
+fn missingNetwork(hosts : Hosts) : i32 {
+    for (h of 0..hosts.count) {
+        if (hosts.look[h] == Look::Done
+            && hosts.reach[h] == Reach::Public
+            && hosts.netOff[h] < 0) {
+            return h;
+        }
+    }
+    return -1;
+}
+
+/**
+ * The address worth checking against the blocklists, or `-1`.
+ *
+ * Not every address: the check is one request each, and a public blocklist
+ * has nothing to say about Google. It is asked only where the other signals
+ * already suggest something — an unrecognised network, or one that answers
+ * as a proxy — which is where a listing would change the reading.
+ */
+fn worthChecking(hosts : Hosts) : i32 {
+    for (h of 0..hosts.count) {
+        if (hosts.look[h] == Look::Done
+            && hosts.reach[h] == Reach::Public
+            && !hosts.has(h, FLAG_BLOCK_CHECKED)
+            && !isMajor(hosts.asn[h])) {
+            return h;
+        }
+    }
+    return -1;
+}
+
+/** The prefix-overview URL for host `h`. */
+fn overviewUrl(hosts : Hosts, h : i32, s : Scratch) : string {
+    return url(hosts, h, s, "https://stat.ripe.net/data/prefix-overview/data.json?resource=");
+}
+
+/** The blocklist URL for host `h`. */
+fn blocklistUrl(hosts : Hosts, h : i32, s : Scratch) : string {
+    return url(hosts, h, s, "https://stat.ripe.net/data/blocklist/data.json?resource=");
+}
+
+/** `base` with host `h`'s address appended. */
+fn url(hosts : Hosts, h : i32, s : Scratch, base : string) : string {
+    let sb : StringBuilder = new StringBuilder();
+    sb.append(base);
+    s.reset();
+    fmt::address(s, hosts.addrAt(h), hosts.family[h]);
+    appendFigure(sb, s);
+    return sb.toString();
+}
+
+/**
+ * Copy what stands in `s` onto `sb`, byte by byte.
+ *
+ * A request carries the same text the row draws, formatted by the same code,
+ * so the address in the query and the address on screen cannot disagree
+ * about which host this is.
+ */
+fn appendFigure(sb : StringBuilder, s : Scratch) : void {
+    for (i of 0..s.length()) {
+        sb.appendChar(Mem::byteAt(s.at(), i as i64));
+    }
+}
+
+/**
+ * Fold a prefix-overview response into row `h`: the announcing AS number and
+ * the holder the registry records for it.
+ *
+ * The label is built as `AS<number> <holder>`, which is the shape the batch
+ * service uses for the same fact — so a row filled from here and a row
+ * filled from there read identically, and a reader never has to know which
+ * source answered.
+ */
+fn absorbOverview(hosts : Hosts, pool : Pool, h : i32, body : string) : bool {
+    let len : i64 = body.byteLength;
+    let at : i64 = scan::anyField(body, 0, len, "asn");
+    let asn : i32 = scan::digits(body, at, len);
+    if (asn <= 0) {
+        return false;
+    }
+    hosts.asn[h] = asn;
+
+    let hs : i64 = scan::anyField(body, 0, len, "holder");
+    let vs : i64 = scan::valueStart(body, hs, len);
+    let ve : i64 = scan::valueEnd(body, hs, len);
+
+    let off : i64 = pool.putString(label(asn, body, vs, ve), ORG_MAX);
+    if (off < 0) {
+        return false;
+    }
+    hosts.netOff[h] = off;
+    hosts.netLen[h] = (pool.used() - off) as i32;
+    return true;
+}
+
+/** `AS15169 GOOGLE`, or `AS15169` when the registry names no holder. */
+fn label(asn : i32, body : string, vs : i64, ve : i64) : string {
+    let sb : StringBuilder = new StringBuilder();
+    sb.append("AS");
+    sb.appendI32(asn);
+    if (vs >= 0 && ve > vs) {
+        sb.append(" ");
+        let i : i64 = vs;
+        while (i < ve && i - vs < (HOLDER_MAX as i64)) {
+            sb.appendChar(byteAt(body, i));
+            i = i + 1;
+        }
+    }
+    return sb.toString();
+}
+
+/** One byte of `s`, kept inside the printable range the pool holds. */
+fn byteAt(s : string, i : i64) : i32 {
+    let c : i32 = scan::byteOf(s, i);
+    if (c < 32 || c > 126) {
+        return 63; // '?'
+    }
+    return c;
+}
+
+/**
+ * Fold a blocklist response into row `h`. The service answers with a
+ * `blocklist` map that is empty when nothing lists the address; anything
+ * else is a listing, and the row is flagged.
+ *
+ * The row is marked checked either way. That distinction matters to the
+ * score: "checked and clean" is evidence, "not checked" is not, and the two
+ * must not be the same absence of a flag.
+ */
+fn absorbBlocklist(hosts : Hosts, h : i32, body : string) : void {
+    hosts.raise(h, FLAG_BLOCK_CHECKED);
+    let len : i64 = body.byteLength;
+    let at : i64 = scan::anyField(body, 0, len, "blocklist");
+    if (at < 0) {
+        return;
+    }
+    if (hasEntry(body, at, len)) {
+        hosts.raise(h, FLAG_BLOCKED);
+    }
+}
+
+/**
+ * Whether the object starting at `at` holds anything at all. An empty
+ * `{}` — possibly with whitespace in it — is the clean answer; a key inside
+ * it is a listing.
+ */
+fn hasEntry(body : string, at : i64, len : i64) : bool {
+    let i : i64 = at;
+    while (i < len) {
+        let c : i32 = scan::byteOf(body, i);
+        if (c == 34) { // '"'
+            return true;
+        }
+        if (c == 125) { // '}'
+            return false;
+        }
+        i = i + 1;
+    }
+    return false;
+}
