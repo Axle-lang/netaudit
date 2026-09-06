@@ -14,36 +14,58 @@
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-555555?style=flat-square&labelColor=1b1b2b">
 </p>
 
-<sub><a href="#what-it-can-and-cannot-see">What it sees</a> · <a href="#what-it-is-actually-for">What it is for</a> · <a href="#keys">Keys</a> · <a href="#building">Building</a> · <a href="#layout">Layout</a> · <a href="#how-it-is-written">How it is written</a> · <a href="https://github.com/Axle-lang/smalt">smalt ↗</a> · <a href="https://axle-lang.dev">Axle ↗</a></sub>
+<img src="doc/netaudit.png" alt="netaudit: a tree of programs, each folded open onto the addresses it is talking to" width="100%">
+
+<sub>Written by the program itself — <code>--snap</code> draws one frame and puts it in a file.</sub>
+
+<br>
+
+<sub><a href="#the-idea">The idea</a> · <a href="#what-it-can-and-cannot-see">What it sees</a> · <a href="#it-refreshes-every-second-and-still-sits-still">Why it sits still</a> · <a href="#keys">Keys</a> · <a href="#building">Building</a> · <a href="#reading-the-source">Reading the source</a> · <a href="https://github.com/Axle-lang/smalt">smalt ↗</a> · <a href="https://axle-lang.dev">Axle ↗</a></sub>
 
 </div>
 
 ---
 
-A network audit tool written entirely in Axle. One window, one tree: a row per
-**program**, folding open onto the addresses it has been talking to, each one
-carrying who owns it, where it is, how often it has come back, how regularly,
-and what that adds up to.
+## The idea
 
-<div align="center">
-  <img src="doc/netaudit.png" alt="netaudit: a tree of programs, each folded open onto the addresses it is talking to" width="100%">
-  <sub>Written by the program itself — <code>--snap</code> draws one frame and writes it to a file.</sub>
-</div>
+A connection list tells you a machine is talking to two hundred addresses.
+That is not an audit; it is a haystack.
 
-Built on [**smalt**](https://github.com/Axle-lang/smalt) — the window, the
-surface, the event queue, the clipped 2-D primitives, the two anti-aliased
-faces and the BMP writer are Axle calling Win32 directly, so there is nothing
-to ship beside the binary and nothing on the link line the source does not
-already name.
+What separates one address from another is not volume but **shape**:
+
+- a browser tab opens a burst of connections and stops;
+- an update service reconnects every few hours, raggedly, because its timer drifts;
+- **a beacon reconnects every thirty seconds, to the millisecond, forever.**
+
+So netaudit is a tree, one row per **program**, folding open onto the addresses
+it has been talking to. Every endpoint carries a ring of the instants it came
+back, and three readings taken from that ring — the median gap, the wander
+around it, and the steadiness that falls out.
+
+The row says its reading in words:
+
+```
+×214 visits · every 30 s · clockwork
+```
+
+A window just opened has no rhythm to report and says `seen once`. The readings
+fill in as the session runs — which is the whole point of a journal that
+outlives what is live.
+
+**The trust score is out of five and always explainable.** `Enter` opens a card
+listing every signal that applied, with the points it cost or earned. A score
+nobody can interrogate will be believed blindly or ignored entirely, and both
+are worse than no score.
 
 ---
 
 ## What it can and cannot see
 
-There is **no URL**. Windows does not record the path of an HTTP request
+**There is no URL.** Windows does not record the path of an HTTP request
 anywhere a tool can read, and HTTPS would encrypt it even if it did. Getting
-one needs a proxy in the middle or a packet capture, and this program is
-neither. What it answers instead:
+one needs a proxy in the middle or a packet capture, and this is neither.
+
+What it answers instead:
 
 | Question | Where the answer comes from | Reading |
 |---|---|---|
@@ -53,58 +75,35 @@ neither. What it answers instead:
 | how many **bytes** moved | a kernel ETW trace | `ETW` |
 | the short connections polling misses | the same trace | `ETW` |
 
-Three readings, three badges in the title bar, each lit when it is running and
-each explaining itself when hovered. **`ETW` is declared and not implemented**,
-so its badge stays dark and the traffic column stays blank — and the badge is
-the reason that is readable rather than misleading. A blank byte column with
-nothing to explain it says "these programs sent nothing", which is the one
-thing it must never say.
+Three readings, three badges in the title bar. Each is lit when it is running,
+and each explains itself when hovered.
 
----
+> **`ETW` is declared and not implemented.** Its badge stays dark and the
+> traffic column stays blank — and the badge is exactly why that is readable
+> rather than misleading. A blank byte column with nothing to explain it says
+> *these programs sent nothing*, which is the one thing it must never say.
 
-## What it is actually for
-
-A connection list tells you a machine is talking to two hundred addresses. That
-is not an audit; it is a haystack. What separates one address from another is
-not volume but **shape**:
-
-- a browser tab opens a burst of connections and stops;
-- an update service reconnects every few hours, raggedly, because its timer drifts;
-- a beacon reconnects every thirty seconds, to the millisecond, forever.
-
-So every endpoint carries a ring of the instants it came back, and three
-readings taken from it — the median gap, the wander around it, and the
-steadiness that falls out. The default ranking weighs repetition, that
-steadiness, the address's own reputation, traffic and recency together, and the
-row says its reading in words: `×214 visits · every 30 s · clockwork`. A window
-just opened has nothing to say about rhythm and says `seen once`; the readings
-fill in as the session runs, which is the point of a journal that outlives what
-is live.
-
-The trust score is out of five and **always explainable**. Enter opens a card
-that lists every signal that applied with the points it cost or earned. A score
-nobody can interrogate is one that will be believed blindly or ignored
-entirely, and both are worse than no score.
+**Two things are hidden by default**, each with its count on the toggle that
+reveals it: traffic that never leaves the building (`L`), and sockets with no
+peer — listening and UDP (`B`). Between them they are three quarters of the
+rows on a working machine, and not one of them answers the question the window
+is asking.
 
 ---
 
 ## It refreshes every second and still sits still
 
-The machine underneath changes constantly; the window does not move under your
+The machine underneath changes constantly. The window does not move under your
 hand. Six rules, applied everywhere:
 
-1. **An endpoint is a journal entry, not a snapshot.** A closed connection goes
-   grey and stays for five minutes with its counts intact. A table showing only
-   what is `ESTABLISHED` right now would flicker continuously and would answer
-   the wrong question.
-2. **Identity is never an index.** The selection is an endpoint key, the folds
-   are group keys, the scroll is pixels. A rebuild cannot move either.
-3. **The sort is damped, and freezes on hover.** A row only overtakes its
-   neighbour by a margin, and while the pointer is over the tree nothing
-   reorders at all.
-4. **Figures are smoothed.** Rates carry three quarters of the previous reading.
-5. **It repaints on change, not on a clock.** Idle, it sleeps.
-6. **Enrichment lands quietly.** A row completes in place; it does not jump.
+| | |
+|---|---|
+| **An endpoint is a journal entry, not a snapshot.** | A closed connection goes grey and stays five minutes with its counts intact. A table of what is `ESTABLISHED` *right now* would flicker continuously, and would answer the wrong question. |
+| **Identity is never an index.** | The selection is an endpoint key, the folds are group keys, the scroll is pixels. A rebuild cannot move any of them. |
+| **The sort is damped, and freezes on hover.** | A row only overtakes its neighbour by a margin — and while the pointer is over the tree, nothing reorders at all. |
+| **Figures are smoothed.** | A rate carries three quarters of the previous reading. |
+| **It repaints on change, not on a clock.** | Idle, it sleeps in the OS. |
+| **Enrichment lands quietly.** | A row completes in place; it does not jump. |
 
 ---
 
@@ -122,40 +121,50 @@ hand. Six rules, applied everywhere:
 | `F12` | write the window to `netaudit.bmp`, beside the binary |
 | `F1` | the key list · `Esc` close a card, clear the filter, or quit · `Q` quit |
 
-The column headers rank by what they name, and the one the rows are ordered by
-is underlined. A header covering two readings takes both: `REPETITION / RHYTHM`
-ranks by repeat count, and again by steadiness. The scrollbar is draggable and
-clicking its track jumps there. A program's triangle folds it; the rest of its
-row selects it, so you can read a program's totals without closing what you
-were looking at.
+**The column headers rank by what they name**, and the one the rows are ordered
+by is underlined. A header covering two readings takes both: `REPETITION /
+RHYTHM` ranks by repeat count, then by steadiness.
 
-Hovering a program shows its full image path; hovering an endpoint shows
-everything the two lines had to elide; hovering a badge in the title bar says
-what that reading is doing and why.
+**A program's triangle folds it; the rest of its row selects it** — so a
+program's totals are readable without closing what you were looking at. The
+scrollbar drags, and clicking its track jumps there.
+
+**Hovering explains.** A program shows its full image path; an endpoint shows
+everything the two lines had to elide; a badge says what that reading is doing,
+and why.
 
 ---
 
 ## Where the names and the networks come from
 
-Two sources, neither of which needs a key or an account.
+Two sources. Neither needs a key or an account.
 
 **`ip-api.com/batch`** — up to a hundred addresses per request: AS number and
-name, country, city, operator, and the `proxy` / `hosting` / `mobile` flags the
-score reads. One batch in flight, three seconds apart, exponential back-off on
-failure, and every address asked about exactly once per session.
+name, country, city, operator, and the `proxy` / `hosting` / `mobile` flags.
+One batch in flight, three seconds apart, exponential back-off on failure, and
+every address asked about exactly once per session.
 
 **Team Cymru's DNS whois** — `x.y.z.w.origin.asn.cymru.com` and
 `AS<n>.asn.cymru.com`, both `TXT`, for the addresses the batch could not name.
 
-The second one is over DNS rather than HTTP on purpose. `std::net`'s HTTP
-client speaks HTTP/1.1 and **not TLS**, so an `https://` request from an Axle
-program cannot succeed — a registry fallback over HTTPS would have been one
-that never once answered, and would have looked exactly like an address nobody
-could name. DNS needs no TLS, no key, and no rate limit worth the name.
+<details>
+<summary><b>Why the second one is DNS and not HTTP</b></summary>
+
+<br>
+
+`std::net`'s HTTP client speaks HTTP/1.1 and **not TLS**, so an `https://`
+request from an Axle program cannot succeed. A registry fallback over HTTPS
+would have been one that never once answered — and it would have looked
+exactly like an address nobody could name. DNS needs no TLS, no key, and no
+rate limit worth the name.
 
 For the same reason there is **no blocklist signal** in the score. Every
-keyless blocklist service is HTTPS-only, and a trust signal that can never
-fire is worse than an absent one: it reads as evidence of innocence.
+keyless blocklist service is HTTPS-only, and a trust signal that can never fire
+is worse than an absent one: it reads as evidence of innocence.
+
+</details>
+
+---
 
 ## Building
 
@@ -168,34 +177,35 @@ axle build
 ./target/netaudit.exe
 ```
 
-An existing clone that predates it: `git submodule update --init`.
+> An existing clone that predates the submodule: `git submodule update --init`.
 
-The only prerequisite is the Axle compiler, **v0.12.1 or newer**. There is no
-SDK to install, no DLL to copy beside the binary and no `[link]` section to
-fill in: every OS library this program uses — `iphlpapi`, `dnsapi`,
-`kernel32`, `shell32`, and `gdi32` through smalt — is named by the
-`extern "C" from "…"` block that imports from it, so the link line learns of
-each from the declaration that needed it.
+**The only prerequisite is the Axle compiler, v0.12.1 or newer.** No SDK to
+install, no DLL to copy beside the binary, no `[link]` section to fill in:
+every OS library — `iphlpapi`, `dnsapi`, `kernel32`, `shell32`, and `gdi32`
+through smalt — is named by the `extern "C" from "…"` block that imports from
+it, so the link line learns of each from the declaration that needed it.
 
-Nothing needs elevation, and nothing is gated behind it: the connection
-tables, the resolver cache and the reverse lookups are all readable by any
-process. The one reading that would need it — the kernel trace behind the
-`ETW` badge — is not implemented, so running as administrator changes
-nothing today.
+**Nothing needs elevation**, and nothing is gated behind it: the connection
+tables, the resolver cache and the reverse lookups are readable by any process.
+The one reading that would need it is the kernel trace behind the `ETW` badge,
+and that is not implemented — so running as administrator changes nothing
+today.
 
-`--snap <ms>` waits that long, writes `netaudit.bmp`, and quits — a capture
-for a report, or for a script, without anyone standing over the machine at
-the right moment. `F12` does the same thing on demand.
-
-**Two things this program hides by default**, both with their count on the
-toggle that reveals them: traffic that never leaves the building (this
-machine and this network), and sockets with no peer (listening and UDP).
-Between them they are three quarters of the rows on a working machine, and
-none of them is what "what is this machine sending" means.
+**`--snap <ms>`** waits that long, writes `netaudit.bmp`, and quits: a capture
+for a report or for a script, with nobody standing over the machine at the
+right moment. `F12` does the same on demand.
 
 ---
 
-## Layout
+<div align="center">
+
+## Reading the source
+
+<sub>Everything below is for someone opening the files, not running the binary.</sub>
+
+</div>
+
+### Layout
 
 ```
 src/
@@ -239,69 +249,70 @@ vendor/smalt         the library, as a submodule
 **One directory names an operating system, and `axle.toml` says which.**
 `[port.win32]` binds `when = { os = "windows" }` to `dirs = ["win32"]`, so
 `use crate::sys::conn::Conns` resolves to `sys/win32/conn.axle` on Windows and
-would resolve to a sibling directory's file on another target. Everything
-above `sys/` — the model, the enrichment, the whole UI — names no OS at all,
-which is what makes a second port five files and no edit anywhere else.
+would resolve to a sibling directory's file on another target.
+
+Everything above `sys/` — the model, the enrichment, the whole UI — names no OS
+at all. That is what makes a second port five files and no edit anywhere else.
 `axle ports` prints the table with a tick per seam.
 
----
-
-## What it stands on
+### What it stands on
 
 Everything below the audit is [smalt](https://github.com/Axle-lang/smalt): the
 window, the surface, the event queue, the clipped 2-D primitives with their
 rounded corners and anti-aliased text, the two baked faces, the byte pool, the
-slot index, the formatter and the BMP writer. This program carries none of
-them, and the four that matter most are worth naming:
+slot index, the formatter and the BMP writer. Four of them are worth naming.
 
-- **The frame is a view, not an owner.** `Surface::frame()` hands back an
-  address and a clip, never the colour buffer as an array — so the shape that
-  double-frees is not writable. An `i32[]` field over a borrowed plane gives
-  one allocation two owners, and the second release is a fault on exit, after
-  everything has been drawn and flushed.
-- **The loop sleeps in the OS.** `Events::wait` blocks until an event arrives
-  or the next reading is due. Idle and paused, this program uses no measurable
-  CPU at all — which a poll-and-sleep loop cannot say, whatever the sleep, and
-  which a tool that measures the machine owes it.
-- **Text is drawn from bytes.** `Scratch` writes a figure into a block and
-  `BitmapFont::drawBytes` renders straight from it, so a repaint that draws a
-  few hundred numbers allocates nothing at all.
-- **Wide names go through a real UTF-8 decode.** `Mem::wideFrom` emits
-  surrogate pairs and degrades a malformed sequence to U+FFFD, so a path with
-  an em dash in it survives the round trip back to `ShellExecuteW`.
+**The frame is a view, not an owner.** `Surface::frame()` hands back an address
+and a clip, never the colour buffer as an array — so the shape that double-frees
+is not writable. An `i32[]` field over a borrowed plane gives one allocation two
+owners, and the second release is a fault on exit, after everything has been
+drawn and flushed.
 
-What stays here is what a library cannot know: an address in its canonical
-text form, a rate whose empty case means "nothing measured bytes" rather than
-"nothing was sent", the fold the identity indexes are keyed on, and the band a
+**The loop sleeps in the OS.** `Events::wait` blocks until an event arrives or
+the next reading is due. Idle and paused, this program uses no measurable CPU at
+all — which a poll-and-sleep loop cannot say, whatever the sleep, and which a
+tool that measures the machine owes it.
+
+**Text is drawn from bytes.** `Scratch` writes a figure into a block and
+`BitmapFont::drawBytes` renders straight from it, so a repaint drawing a few
+hundred numbers allocates nothing at all.
+
+**Wide names go through a real UTF-8 decode.** `Mem::wideFrom` emits surrogate
+pairs and degrades a malformed sequence to U+FFFD, so a path with an em dash in
+it survives the round trip back to `ShellExecuteW`.
+
+What stays here is what a library cannot know: an address in its canonical text
+form, a rate whose empty case means *nothing measured bytes* rather than
+*nothing was sent*, the fold the identity indexes are keyed on, and the band a
 reading's trace is drawn against.
 
----
+### How it is written
 
-## How it is written
+Three habits, each turning a class of silent mistake into a compile error.
 
-Three habits, each of which turns a class of silent mistake into a compile
-error.
+**Every state is an enum, read by a `match` with no wildcard** — `Tier`,
+`TierState`, `Sort`, `RowKind`, `Modal`, `Say`, `Action`, `Proto`,
+`SocketKind`, `Reach`, `Look`, `NameSource`, `PathState`, `WhoisKind`,
+`Reason`. The columns included: they are `Reach[]` and `Look[]`, not `i32[]`.
 
-**Every state is an enum, and every reading of one is a `match` with no
-wildcard.** `Tier`, `TierState`, `Sort`, `RowKind`, `Modal`, `Say`, `Action`,
-`Proto`, `SocketKind`, `Reach`, `Look`, `NameSource`, `PathState`,
-`WhoisKind`, `Reason` — including the columns, which are `Reach[]` and
-`Look[]` rather than `i32[]`. The event loop is two of those matches, one
-routing an `EventKind` to a handler and one applying the `Action` it
-answered, so an event kind or an action added later is an error and not a
-silent no-op. The trust score reads the same nine-arm table the detail card
-lists, so a signal cannot be scored without being explained.
+The event loop is two of those matches — one routes an `EventKind` to a
+handler, one applies the `Action` it answered — so an event kind or an action
+added later is an error, not a silent no-op. The trust score reads the same
+nine-arm table the detail card lists, so a signal cannot be scored without
+being explained.
 
 **A lookup that can fail answers two values, never a sentinel.** `tierAt` and
 `headerAt` return `(bool, T)`. An integer that is sometimes a `Sort` and
-sometimes `-1` is a type nobody can read twice the same way.
+sometimes `-1` is a type nobody reads the same way twice.
 
 **All the `unsafe` is in one file.** `src/sys/raw.axle` holds the four views
-between an address and a `ptr` that the Windows imports need; smalt owns the
-raw reads and writes. `unsafe` is per-function in Axle (E0707 — it does not
+between an address and a `ptr` that the Windows imports need; smalt owns the raw
+reads and writes. `unsafe` is per-function in Axle (E0707 — it does not
 propagate across a call), so that confinement is enforceable rather than
 aspirational: `grep unsafe src/` returns one file.
 
-## License
+---
 
-MIT — see [LICENSE](LICENSE).
+<div align="center">
+<sub>MIT — see <a href="LICENSE">LICENSE</a>.</sub>
+</div>
