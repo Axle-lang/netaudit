@@ -19,7 +19,7 @@ use smalt::Mem;
 use crate::sys::raw::{asPtr, isNull, nullPtr};
 use crate::model::pool;
 
-@link_name("NtQuerySystemInformation")
+@link(symbol = "NtQuerySystemInformation")
 extern "C" fn NtQuerySystemInformation(cls : i32, buf : ptr, len : i32, ret : ptr) : i32;
 
 extern "C" from "kernel32" {

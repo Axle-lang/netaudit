@@ -5,7 +5,7 @@
 ### What every program on this machine is talking to — one window, in real time
 
 <p align="center">
-  <a href="https://axle-lang.dev"><img alt="Powered by Axle" src="https://img.shields.io/badge/powered%20by-Axle-5B4BE1?style=for-the-badge&labelColor=1b1b2b"></a>
+  <a href="https://axle-lang.dev"><img alt="Powered by Axle 0.14" src="https://img.shields.io/badge/powered%20by-Axle%200.14-5B4BE1?style=for-the-badge&labelColor=1b1b2b"></a>
   <a href="https://github.com/Axle-lang/smalt"><img alt="Built on smalt" src="https://img.shields.io/badge/built%20on-smalt-1D6FB8?style=for-the-badge&labelColor=1b1b2b"></a>
 </p>
 <p align="center">
@@ -179,7 +179,7 @@ axle build
 
 > An existing clone that predates the submodule: `git submodule update --init`.
 
-**The only prerequisite is the Axle compiler, v0.12.1 or newer.** No SDK to
+**The only prerequisite is the Axle compiler, v0.14 or newer.** No SDK to
 install, no DLL to copy beside the binary, no `[link]` section to fill in:
 every OS library — `iphlpapi`, `dnsapi`, `kernel32`, `shell32`, and `gdi32`
 through smalt — is named by the `extern "C" from "…"` block that imports from

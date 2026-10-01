@@ -30,7 +30,7 @@ use std::lang::IOException;
 fn post(url : string, body : string) : string {
     try {
         let client : HttpClient = new HttpClient();
-        return client.post(url, body);
+        return client.post(url, body).body();
     } catch e : IOException {
         return "";
     }
@@ -54,7 +54,7 @@ fn idle() : string {
 fn get(url : string) : string {
     try {
         let client : HttpClient = new HttpClient();
-        return client.get(url);
+        return client.get(url).body();
     } catch e : IOException {
         return "";
     }
