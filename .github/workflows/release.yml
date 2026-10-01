@@ -1,0 +1,128 @@
+name: Release
+
+# Runs only when a version tag (v1.2.3) is pushed, never on every push to
+# main — that is build.yml's job. `workflow_dispatch` builds and uploads the
+# artifact from the Actions tab but does NOT publish a GitHub Release (only a
+# real tag does).
+#
+# One job, and it runs on Windows: `axle.toml` promises a single target
+# (`x86_64-pc-windows-msvc`), so there is no second platform to release.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed to create the GitHub Release
+
+env:
+  # The compiler version these sources need. The MSI serves whatever is
+  # current, so the build checks instead of assuming: an older `axle` then
+  # fails with one clear line rather than a hundred confusing errors further
+  # down.
+  AXLE_MIN: '0.14.0'
+
+jobs:
+  windows:
+    name: Build & release (Windows x86_64)
+    runs-on: windows-latest
+    steps:
+      # Linking this target needs the COFF `axle_stdlib.lib` /
+      # `axle_runtime.lib` pair plus the MSVC import libraries the link line
+      # asks for. The MSI supplies the first, the runner image the second.
+      - name: Install Axle
+        shell: pwsh
+        run: |
+          $msi = Join-Path $env:RUNNER_TEMP 'axle.msi'
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri 'https://dl.axle-lang.dev/latest/axle-windows-x86_64.msi' -OutFile $msi
+          $p = Start-Process msiexec.exe -Wait -PassThru `
+            -ArgumentList '/i', "`"$msi`"", '/qn', '/norestart'
+          if ($p.ExitCode -ne 0) { throw "msiexec failed with exit code $($p.ExitCode)" }
+          # The installer puts itself on PATH, but a step already running does
+          # not see that, so resolve the directory and export it. The package
+          # is 32-bit, so its breadcrumb lands under WOW6432Node; both keys and
+          # both Program Files are tried rather than hard-coding a layout that
+          # has already moved once.
+          $dir = $null
+          foreach ($k in 'HKLM:\SOFTWARE\WOW6432Node\Axle', 'HKLM:\SOFTWARE\Axle') {
+            if (-not $dir -and (Test-Path $k)) {
+              $dir = (Get-ItemProperty $k -Name InstallDir -ErrorAction SilentlyContinue).InstallDir
+            }
+          }
+          foreach ($c in 'C:\Program Files (x86)\Axle', 'C:\Program Files\Axle') {
+            if (-not $dir -and (Test-Path (Join-Path $c 'axle.exe'))) { $dir = $c }
+          }
+          if (-not $dir) { throw 'the MSI installed, but axle.exe was not found' }
+          $dir = $dir.TrimEnd('\')
+          foreach ($f in 'axle.exe', 'axle_stdlib.lib', 'axle_runtime.lib') {
+            if (-not (Test-Path (Join-Path $dir $f))) { throw "$f missing from $dir" }
+          }
+          Add-Content -Path $env:GITHUB_PATH -Value $dir
+          # `axle` links a Windows binary by running `lld-link.exe`, which it
+          # looks for on PATH and nowhere else. The runner image ships LLVM, so
+          # this asserts rather than installs — and if that ever stops being
+          # true it says so here, instead of surfacing as a linker error three
+          # steps later.
+          $lld = Get-Command lld-link.exe -ErrorAction SilentlyContinue
+          if (-not $lld) { throw 'lld-link.exe is not on PATH; axle cannot link a Windows binary without it (install LLVM)' }
+          "linker: $($lld.Source)"
+          # The MSI is whatever is current, so check it instead of assuming.
+          $got = (((& (Join-Path $dir 'axle.exe') --version) -split ' ')[1] -split '-')[0]
+          if ([version]$got -lt [version]$env:AXLE_MIN) {
+            throw "axle $got is older than the required $env:AXLE_MIN"
+          }
+          "axle $got satisfies >= $env:AXLE_MIN"
+
+      # `submodules: recursive` is not optional: the platform layer is the
+      # `vendor/smalt` submodule and its src/ compiles with ours, so a checkout
+      # without it leaves the directory empty and `axle build` stops on a
+      # missing dependency before it reads any source.
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build
+        run: axle build
+
+      # The package is the binary and nothing else: every library it uses
+      # ships with Windows, so there is no DLL to bundle and nothing to
+      # install.
+      - name: Package
+        shell: pwsh
+        run: |
+          $PKG = 'netaudit-windows-x86_64'
+          New-Item -ItemType Directory -Path "dist\$PKG" -Force | Out-Null
+          Copy-Item 'target\netaudit.exe' "dist\$PKG\"
+          # Which smalt this binary was built against — the submodule pin,
+          # recorded so a release names its own platform layer.
+          $smalt = (git -C vendor/smalt rev-parse --short HEAD)
+          @"
+          netaudit — what every program on this machine is talking to, in one window.
+
+          Run:  netaudit.exe
+
+          There is nothing to install and nothing needs elevation: iphlpapi,
+          dnsapi, kernel32, shell32 and gdi32 ship with Windows, and no DLL is
+          bundled because none is needed.
+
+          Built with $(axle --version) against smalt $smalt.
+          "@ | Set-Content -Encoding utf8 "dist\$PKG\README.txt"
+          Compress-Archive -Path "dist\$PKG\*" -DestinationPath "$PKG.zip"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: netaudit-windows-x86_64
+          path: netaudit-windows-x86_64.zip
+          if-no-files-found: error
+
+      # Publish only for real version tags; manual dispatch stops at the
+      # uploaded artifact above.
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: netaudit-windows-x86_64.zip
+          generate_release_notes: true
