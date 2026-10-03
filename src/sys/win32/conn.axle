@@ -154,37 +154,25 @@ const BUF_MAX : i64 = 16777216;
  * the top of the list it draws.
  */
 class Conns {
-    pub(crate) proto : Proto[],
-    pub(crate) family : i32[],
-    pub(crate) pid : i32[],
-    pub(crate) state : i32[],
-    pub(crate) localPort : i32[],
-    pub(crate) remotePort : i32[],
+    pub(crate) proto : Proto[] = malloc<Proto>(CONN_MAX_ROWS as i64),
+    pub(crate) family : i32[] = malloc<i32>(CONN_MAX_ROWS as i64),
+    pub(crate) pid : i32[] = malloc<i32>(CONN_MAX_ROWS as i64),
+    pub(crate) state : i32[] = malloc<i32>(CONN_MAX_ROWS as i64),
+    pub(crate) localPort : i32[] = malloc<i32>(CONN_MAX_ROWS as i64),
+    pub(crate) remotePort : i32[] = malloc<i32>(CONN_MAX_ROWS as i64),
 
-    pub(crate) count : i32,
-    pub(crate) ok : bool,
+    pub(crate) count : i32 = 0,
+    pub(crate) ok : bool = false,
 
-    addrs : i64,
-    buf : i64,
-    bufCap : i64,
-    sizeCell : i64,
+    addrs : i64 = Mem::take((CONN_MAX_ROWS as i64) * CONN_ADDR_BYTES),
+    buf : i64 = Mem::take(BUF_CAP),
+    bufCap : i64 = BUF_CAP,
+    sizeCell : i64 = Mem::take(8),
 
-    constructor() {
-        self.proto = malloc<Proto>(CONN_MAX_ROWS as i64);
-        self.family = malloc<i32>(CONN_MAX_ROWS as i64);
-        self.pid = malloc<i32>(CONN_MAX_ROWS as i64);
-        self.state = malloc<i32>(CONN_MAX_ROWS as i64);
-        self.localPort = malloc<i32>(CONN_MAX_ROWS as i64);
-        self.remotePort = malloc<i32>(CONN_MAX_ROWS as i64);
-        self.count = 0;
-        self.ok = false;
-        self.addrs = Mem::take((CONN_MAX_ROWS as i64) * CONN_ADDR_BYTES);
-        self.bufCap = BUF_CAP;
-        self.buf = Mem::take(BUF_CAP);
-        self.sizeCell = Mem::take(8);
-    }
-
-    /** Byte address of row `i`'s sixteen remote-address bytes. */
+    /**
+     * Byte address of row `i`'s sixteen address bytes: the remote end for a
+     * connection, the local bind for a listening socket or a UDP handle.
+     */
     pub(crate) fn addrAt(self, i : i32) : i64 {
         return self.addrs + (i as i64) * CONN_ADDR_BYTES;
     }
@@ -199,24 +187,29 @@ class Conns {
             self.ok = false;
             return;
         }
+
         self.count = 0;
         let any : bool = false;
         if (self.take(AF_INET, true)) {
             self.foldTcp4();
             any = true;
         }
+
         if (self.take(AF_INET6, true)) {
             self.foldTcp6();
             any = true;
         }
+
         if (self.take(AF_INET, false)) {
             self.foldUdp4();
             any = true;
         }
+
         if (self.take(AF_INET6, false)) {
             self.foldUdp6();
             any = true;
         }
+
         self.ok = any;
     }
 
@@ -240,20 +233,27 @@ class Conns {
                     family, UDP_TABLE_OWNER_PID, 0
                 );
             }
+
             if (st == 0) {
                 return true;
             }
+
             if (st != ERROR_INSUFFICIENT_BUFFER || self.bufCap >= BUF_MAX) {
                 return false;
             }
-            Mem::release(self.buf);
-            self.bufCap = self.bufCap * 2;
-            self.buf = Mem::take(self.bufCap);
-            if (self.buf == 0) {
-                self.bufCap = 0;
+
+            // Grow into a new block before letting go of the old one: a failed
+            // allocation then costs one refresh, not the rest of the session.
+            let grown : i64 = Mem::take(self.bufCap * 2);
+            if (grown == 0) {
                 return false;
             }
+
+            Mem::release(self.buf);
+            self.buf = grown;
+            self.bufCap = self.bufCap * 2;
         }
+
         return false;
     }
 
@@ -264,13 +264,16 @@ class Conns {
         if (n > fits) {
             n = fits;
         }
+
         let room : i64 = (CONN_MAX_ROWS as i64) - (self.count as i64);
         if (n > room) {
             n = room;
         }
+
         if (n < 0) {
             return 0;
         }
+
         return n as i32;
     }
 
@@ -283,6 +286,7 @@ class Conns {
         if (self.count >= CONN_MAX_ROWS) {
             return -1;
         }
+
         let i : i32 = self.count;
         self.count = i + 1;
         self.proto[i] = proto;
@@ -308,6 +312,7 @@ class Conns {
         if ((Mem::udwordAt(e, stateOff) as i32) == TCP_LISTEN) {
             return localOff;
         }
+
         return remoteOff;
     }
 
@@ -332,6 +337,7 @@ class Conns {
             if (i < 0) {
                 return;
             }
+
             self.localPort[i] = Mem::wordBeAt(e, TCP4_LOCAL_PORT);
             self.remotePort[i] = Mem::wordBeAt(e, TCP4_REMOTE_PORT);
             self.addr(i, e, self.which(e, TCP4_LOCAL_ADDR, TCP4_REMOTE_ADDR, TCP4_STATE), 4);
@@ -351,6 +357,7 @@ class Conns {
             if (i < 0) {
                 return;
             }
+
             self.localPort[i] = Mem::wordBeAt(e, TCP6_LOCAL_PORT);
             self.remotePort[i] = Mem::wordBeAt(e, TCP6_REMOTE_PORT);
             self.addr(i, e, self.which(e, TCP6_LOCAL_ADDR, TCP6_REMOTE_ADDR, TCP6_STATE), 16);
@@ -368,6 +375,7 @@ class Conns {
             if (i < 0) {
                 return;
             }
+
             self.localPort[i] = Mem::wordBeAt(e, UDP4_LOCAL_PORT);
             self.addr(i, e, UDP4_LOCAL_ADDR, 4);
         }
@@ -384,6 +392,7 @@ class Conns {
             if (i < 0) {
                 return;
             }
+
             self.localPort[i] = Mem::wordBeAt(e, UDP6_LOCAL_PORT);
             self.addr(i, e, UDP6_LOCAL_ADDR, 16);
         }
@@ -395,10 +404,12 @@ class Conns {
             Mem::release(self.buf);
             self.buf = 0;
         }
+
         if (self.addrs != 0) {
             Mem::release(self.addrs);
             self.addrs = 0;
         }
+
         if (self.sizeCell != 0) {
             Mem::release(self.sizeCell);
             self.sizeCell = 0;

@@ -80,6 +80,7 @@ fn tierReading(which : Tier, state : TierState) : string {
     if (which != Tier::Dns || state != TierState::On) {
         return "";
     }
+
     return "names in the resolver's cache, matched against the addresses on screen:";
 }
 
@@ -96,7 +97,8 @@ fn tierNote(which : Tier, state : TierState) : string {
 fn pollNote(state : TierState) : string {
     return match state {
         TierState::On => "Reading the per-process TCP and UDP tables once a second.",
-        _ => "Windows refused the connection tables — nothing can be read.",
+        TierState::Lost => "The connection tables stopped answering; the journal waits for them.",
+        TierState::Off => "Windows refused the connection tables, so nothing can be read.",
     };
 }
 
@@ -106,7 +108,7 @@ fn dnsNote(state : TierState) : string {
         TierState::On =>
             "Reading this machine's DNS cache, so addresses carry the name that was resolved.",
         TierState::Lost =>
-            "The DNS cache stopped answering; addresses keep their reverse-DNS names.",
+            "The DNS cache is empty or not answering; it is asked again every few seconds.",
         TierState::Off =>
             "The DNS cache is not readable here; addresses keep their reverse-DNS names.",
     };

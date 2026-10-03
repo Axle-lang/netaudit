@@ -22,7 +22,6 @@ use smalt::Mem;
 use crate::sys::raw::{asPtr, nullPtr};
 use crate::sys::dnscache::{DnsQuery_W, DnsRecordListFree};
 use crate::model::hosts;
-use crate::fmt;
 use std::text::StringBuilder;
 
 /** `DNS_TYPE_PTR`. */
@@ -70,15 +69,18 @@ fn arpaName(hosts : Hosts, h : i32) : string {
             sb.append(".");
             i = i - 1;
         }
+
         sb.append("ip6.arpa");
         return sb.toString();
     }
+
     let i : i32 = 3;
     while (i >= 0) {
         sb.appendI32(Mem::byteAt(base, i as i64));
         sb.append(".");
         i = i - 1;
     }
+
     sb.append("in-addr.arpa");
     return sb.toString();
 }
@@ -121,9 +123,11 @@ fn query(name : string, kind : i32) : string {
     if (n > (PTR_QUERY_CHARS as i64) - 1) {
         n = (PTR_QUERY_CHARS as i64) - 1;
     }
+
     for (i of 0..n) {
         Mem::putWord(wide, i * 2, name.byteAt(i));
     }
+
     Mem::putWord(wide, n * 2, 0);
 
     Mem::putQword(slot, 0, 0);
@@ -137,6 +141,7 @@ fn query(name : string, kind : i32) : string {
     if (records != 0) {
         DnsRecordListFree(asPtr(records), PTR_FREE_LIST);
     }
+
     freePtrScratch(wide, slot);
     return answer;
 }
@@ -157,19 +162,23 @@ fn firstText(records : i64, kind : i32) : string {
             if (kind == DNS_TYPE_TXT) {
                 at = TXT_REC_FIRST;
             }
+
             let name : i64 = Mem::qwordAt(rec, at);
             if (name != 0) {
                 return wideToString(name);
             }
         }
+
         let next : i64 = Mem::qwordAt(rec, PTR_REC_NEXT);
         if (next == rec) {
             rec = 0;
         } else {
             rec = next;
         }
+
         walked = walked + 1;
     }
+
     return "";
 }
 
@@ -185,10 +194,12 @@ fn wideToString(p : i64) : string {
             if (c < 32 || c > 126) {
                 c = 63; // '?'
             }
+
             sb.appendChar(c);
             i = i + 1;
         }
     }
+
     return sb.toString();
 }
 
@@ -197,6 +208,7 @@ fn freePtrScratch(wide : i64, slot : i64) : void {
     if (wide != 0) {
         Mem::release(wide);
     }
+
     if (slot != 0) {
         Mem::release(slot);
     }

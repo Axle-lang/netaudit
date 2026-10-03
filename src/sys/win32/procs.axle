@@ -3,17 +3,16 @@
 // The name comes from ONE call. `NtQuerySystemInformation` (class 5,
 // `SystemProcessInformation`) returns a linked run of variable-length
 // records covering every process on the machine with no per-process handle
-// to open. The documented alternative — Toolhelp32 plus one `OpenProcess`
-// each — is denied on anything running at a higher integrity level, which
-// is exactly the half of the list a network audit must not go blank on:
-// `svchost`, `System`, and the drivers are where the surprising traffic is.
+// to open, and with the creation time that tells a reused pid from the
+// process that held it before.
 //
 // The **path** is a different matter, and it is resolved lazily. Only a pid
 // that actually appears in the connection table is worth a handle, that is
 // a few dozen out of four hundred, and the answer is cached for the pid's
-// life. A protected process refuses the handle: the name survives, the path
-// stays empty, and the tooltip says which of the two happened rather than
-// showing a blank the reader has to interpret.
+// life. A process this user may not query — another account's service, or a
+// protected process — refuses the handle: the name survives, the path stays
+// empty, and the tooltip says which of the two happened rather than showing
+// a blank the reader has to interpret. Run elevated, those paths read too.
 
 use smalt::Mem;
 use crate::sys::raw::{asPtr, isNull, nullPtr};
@@ -33,7 +32,12 @@ extern "C" from "kernel32" {
      * the length written coming out.
      */
     fn QueryFullProcessImageNameW(h : ptr, flags : i32, buf : ptr, size : ptr) : i32;
+    /** `DWORD GetLastError(void)`. */
+    fn GetLastError() : i32;
 }
+
+/** `ERROR_INVALID_PARAMETER` — what `OpenProcess` says for a pid that is gone. */
+const ERROR_INVALID_PARAMETER : i32 = 87;
 
 /** `SystemProcessInformation` — the process-list class. */
 const SYSTEM_PROCESS_INFORMATION : i32 = 5;
@@ -42,8 +46,8 @@ const STATUS_INFO_LENGTH_MISMATCH : i32 = -1073741820; // 0xC0000004
 /**
  * `PROCESS_QUERY_LIMITED_INFORMATION` — the weakest right that still answers
  * "where is your image". `PROCESS_QUERY_INFORMATION` would be refused for
- * most of the list; this one is granted for anything at or below our own
- * integrity level.
+ * most of the list; this one is granted for every process the user owns, and
+ * refused by the DACL of services running under another account.
  */
 const PROCESS_QUERY_LIMITED_INFORMATION : i32 = 0x1000;
 
@@ -55,6 +59,8 @@ const SPI_NEXT : i64 = 0;
 const SPI_NAME_LEN : i64 = 56;    // 0x38
 /** `PWSTR ImageName.Buffer` — the UTF-16 name, not NUL-terminated. */
 const SPI_NAME_BUF : i64 = 64;    // 0x40
+/** `LARGE_INTEGER CreateTime` — what tells a reused pid from its predecessor. */
+const SPI_CREATED : i64 = 32;     // 0x20
 /** `HANDLE UniqueProcessId` — the pid, pointer-width. */
 const SPI_PID : i64 = 80;         // 0x50
 
@@ -77,7 +83,7 @@ enum PathState : i32 {
     Untried = 0,
     /** The path is interned and `pathOff` / `pathLen` name it. */
     Known = 1,
-    /** Windows refused the handle — a protected or higher-integrity process. */
+    /** Windows refused the handle — another account's service, or a protected process. */
     Denied = 2,
     /** The process was gone by the time the path was asked for. */
     Gone = 3,
@@ -89,37 +95,30 @@ enum PathState : i32 {
  * ones that turned out to matter.
  */
 class Procs {
-    pid : i64[],
-    pub(crate) nameOff : i64[],
-    pub(crate) nameLen : i32[],
-    pub(crate) pathOff : i64[],
-    pub(crate) pathLen : i32[],
-    pathState : PathState[],
-    seen : i32[],
+    pid : i64[] = malloc<i64>(MAX_PROCS as i64),
+    created : i64[] = malloc<i64>(MAX_PROCS as i64),
+    pub(crate) nameOff : i64[] = malloc<i64>(MAX_PROCS as i64),
+    pub(crate) nameLen : i32[] = malloc<i32>(MAX_PROCS as i64),
+    pub(crate) pathOff : i64[] = malloc<i64>(MAX_PROCS as i64),
+    pub(crate) pathLen : i32[] = malloc<i32>(MAX_PROCS as i64),
+    /**
+     * The same path as Windows gave it, UTF-16 and unabridged. The drawable
+     * span above folds what the glyph tables cannot draw and stops at
+     * `PATH_MAX`; handing *that* back to Explorer would open the wrong folder
+     * for any path with an accent in it, so the shell is given this one.
+     */
+    pub(crate) wideOff : i64[] = malloc<i64>(MAX_PROCS as i64),
+    pub(crate) wideChars : i32[] = malloc<i32>(MAX_PROCS as i64),
+    pathState : PathState[] = malloc<PathState>(MAX_PROCS as i64),
+    seen : i32[] = malloc<i32>(MAX_PROCS as i64),
 
-    count : i32,
-    gen : i32,
+    count : i32 = 0,
+    gen : i32 = 0,
 
-    snap : i64,
-    snapCap : i64,
-    wide : i64,
-    sizeCell : i64,
-
-    constructor() {
-        self.pid = malloc<i64>(MAX_PROCS as i64);
-        self.nameOff = malloc<i64>(MAX_PROCS as i64);
-        self.nameLen = malloc<i32>(MAX_PROCS as i64);
-        self.pathOff = malloc<i64>(MAX_PROCS as i64);
-        self.pathLen = malloc<i32>(MAX_PROCS as i64);
-        self.pathState = malloc<PathState>(MAX_PROCS as i64);
-        self.seen = malloc<i32>(MAX_PROCS as i64);
-        self.count = 0;
-        self.gen = 0;
-        self.snapCap = SNAP_CAP;
-        self.snap = Mem::take(SNAP_CAP);
-        self.wide = Mem::take((PATH_CHARS as i64) * 2);
-        self.sizeCell = Mem::take(8);
-    }
+    snap : i64 = Mem::take(SNAP_CAP),
+    snapCap : i64 = SNAP_CAP,
+    wide : i64 = Mem::take((PATH_CHARS as i64) * 2),
+    sizeCell : i64 = Mem::take(8),
 
     /** The slot holding `pid`, or `-1`. */
     pub(crate) fn find(self, pid : i64) : i32 {
@@ -128,6 +127,7 @@ class Procs {
                 return i;
             }
         }
+
         return -1;
     }
 
@@ -140,6 +140,7 @@ class Procs {
         if (self.snap == 0) {
             return;
         }
+
         let st : i32 = self.take();
         if (st != 0) {
             return;
@@ -158,6 +159,7 @@ class Procs {
                 off = off + next;
             }
         }
+
         self.sweep();
     }
 
@@ -167,46 +169,73 @@ class Procs {
             SYSTEM_PROCESS_INFORMATION, asPtr(self.snap), self.snapCap as i32, nullPtr()
         );
         while (st == STATUS_INFO_LENGTH_MISMATCH && self.snapCap < SNAP_MAX) {
-            Mem::release(self.snap);
-            self.snapCap = self.snapCap * 2;
-            self.snap = Mem::take(self.snapCap);
-            if (self.snap == 0) {
-                self.snapCap = 0;
+            // The larger block is taken before the old one is let go, so a
+            // failed allocation costs this refresh and not every later one.
+            let grown : i64 = Mem::take(self.snapCap * 2);
+            if (grown == 0) {
                 return -1;
             }
+
+            Mem::release(self.snap);
+            self.snap = grown;
+            self.snapCap = self.snapCap * 2;
             st = NtQuerySystemInformation(
                 SYSTEM_PROCESS_INFORMATION, asPtr(self.snap), self.snapCap as i32, nullPtr()
             );
         }
+
         return st;
     }
 
-    /** Fold one record into its slot, minting the slot if the pid is new. */
+    /**
+     * Fold one record into its slot, minting the slot if the pid is new.
+     *
+     * A pid is not an identity: Windows hands a freed one to the next process
+     * within seconds. A slot whose creation time no longer matches belongs to
+     * a different program, so it is re-read from scratch — otherwise the new
+     * process's sockets would be attributed to the old one's name and path.
+     */
     fn fold(mut self, pool : Pool, e : i64, pid : i64) : void {
+        let created : i64 = Mem::qwordAt(e, SPI_CREATED);
         let s : i32 = self.find(pid);
+        if (s >= 0 && self.created[s] != created) {
+            self.reset(pool, s, e, created);
+        }
+
         if (s < 0) {
             if (self.count >= MAX_PROCS) {
                 return;
             }
+
             s = self.count;
             self.count = s + 1;
             self.pid[s] = pid;
-            self.pathState[s] = PathState::Untried;
-            self.pathOff[s] = -1;
-            self.pathLen[s] = 0;
-            self.nameOff[s] = pool.putWide(
-                Mem::qwordAt(e, SPI_NAME_BUF), Mem::wordAt(e, SPI_NAME_LEN) / 2, NAME_MAX
-            );
-            self.nameLen[s] = 0;
-            if (self.nameOff[s] >= 0) {
-                let chars : i32 = Mem::wordAt(e, SPI_NAME_LEN) / 2;
-                if (chars > NAME_MAX) {
-                    chars = NAME_MAX;
-                }
-                self.nameLen[s] = chars;
-            }
+            self.reset(pool, s, e, created);
         }
+
         self.seen[s] = self.gen;
+    }
+
+    /** Start slot `s` over for the process record `e`. */
+    fn reset(mut self, pool : Pool, s : i32, e : i64, created : i64) : void {
+        self.created[s] = created;
+        self.pathState[s] = PathState::Untried;
+        self.pathOff[s] = -1;
+        self.pathLen[s] = 0;
+        self.wideOff[s] = -1;
+        self.wideChars[s] = 0;
+        self.nameOff[s] = pool.putWide(
+            Mem::qwordAt(e, SPI_NAME_BUF), Mem::wordAt(e, SPI_NAME_LEN) / 2, NAME_MAX
+        );
+        self.nameLen[s] = 0;
+        if (self.nameOff[s] >= 0) {
+            let chars : i32 = Mem::wordAt(e, SPI_NAME_LEN) / 2;
+            if (chars > NAME_MAX) {
+                chars = NAME_MAX;
+            }
+
+            self.nameLen[s] = chars;
+        }
     }
 
     /**
@@ -222,13 +251,17 @@ class Procs {
                 let last : i32 = self.count - 1;
                 if (i != last) {
                     self.pid[i] = self.pid[last];
+                    self.created[i] = self.created[last];
                     self.nameOff[i] = self.nameOff[last];
                     self.nameLen[i] = self.nameLen[last];
                     self.pathOff[i] = self.pathOff[last];
                     self.pathLen[i] = self.pathLen[last];
+                    self.wideOff[i] = self.wideOff[last];
+                    self.wideChars[i] = self.wideChars[last];
                     self.pathState[i] = self.pathState[last];
                     self.seen[i] = self.seen[last];
                 }
+
                 self.count = last;
             } else {
                 i = i + 1;
@@ -254,9 +287,11 @@ class Procs {
         if (s < 0 || s >= self.count) {
             return PathState::Gone;
         }
+
         if (self.pathState[s] != PathState::Untried) {
             return self.pathState[s];
         }
+
         if (self.wide == 0 || self.sizeCell == 0) {
             self.pathState[s] = PathState::Denied;
             return PathState::Denied;
@@ -266,9 +301,15 @@ class Procs {
             PROCESS_QUERY_LIMITED_INFORMATION, 0, self.pid[s] as i32
         );
         if (isNull(h)) {
-            self.pathState[s] = PathState::Denied;
-            return PathState::Denied;
+            let why : PathState = PathState::Denied;
+            if (GetLastError() == ERROR_INVALID_PARAMETER) {
+                why = PathState::Gone;
+            }
+
+            self.pathState[s] = why;
+            return why;
         }
+
         Mem::putDword(self.sizeCell, 0, PATH_CHARS);
         let ok : i32 = QueryFullProcessImageNameW(
             h, 0, asPtr(self.wide), asPtr(self.sizeCell)
@@ -280,14 +321,21 @@ class Procs {
         }
 
         let chars : i32 = Mem::udwordAt(self.sizeCell, 0) as i32;
+        self.wideOff[s] = pool.put(self.wide, chars * 2);
+        if (self.wideOff[s] >= 0) {
+            self.wideChars[s] = chars;
+        }
+
         self.pathOff[s] = pool.putWide(self.wide, chars, PATH_MAX);
         if (self.pathOff[s] < 0) {
             self.pathState[s] = PathState::Denied;
             return PathState::Denied;
         }
+
         if (chars > PATH_MAX) {
             chars = PATH_MAX;
         }
+
         self.pathLen[s] = chars;
         self.pathState[s] = PathState::Known;
         return PathState::Known;
@@ -299,10 +347,12 @@ class Procs {
             Mem::release(self.snap);
             self.snap = 0;
         }
+
         if (self.wide != 0) {
             Mem::release(self.wide);
             self.wide = 0;
         }
+
         if (self.sizeCell != 0) {
             Mem::release(self.sizeCell);
             self.sizeCell = 0;
@@ -313,9 +363,9 @@ class Procs {
 /** Why a program row shows no path, in the words the tooltip uses. */
 fn pathNote(state : PathState) : string {
     return match state {
-        PathState::Denied => "path refused by Windows (protected process)",
+        PathState::Denied => "path refused: another account's service, or a protected process",
         PathState::Gone => "the process exited before its path could be read",
         PathState::Untried => "path not read yet",
-        _ => "",
+        PathState::Known => "",
     };
 }
