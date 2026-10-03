@@ -13,16 +13,18 @@ targets = ["x86_64-pc-windows-msvc"]
 # for the resolver cache and the reverse lookups, `kernel32` for the process
 # handles, `shell32` to reveal a binary, and `gdi32` through smalt — so the
 # link line learns of each from the declaration that needed it, and a
-# consumer links what it uses without being told twice.
+# consumer links what it uses without being told twice. The one exception is
+# `NtQuerySystemInformation`, bound by symbol from `ntdll`.
 [dependencies]
 smalt = { path = "vendor/smalt" }
 
 # The port: one condition, and the directory that carries it.
 #
-# Everything that reads the machine is behind a seam — `Conns`, `Procs`,
-# `DnsCache`, the reverse lookup, revealing a binary in a file manager — and
-# `src/sys/win32/` is the Windows answer to all five. Nothing above `sys/`
-# names an operating system, so a second port is those five files and no
+# Everything that touches the machine is behind a seam — `Conns`, `Procs`,
+# `DnsCache`, the reverse lookup, revealing a binary in a file manager, the
+# pointer's shape — and `src/sys/win32/` is the Windows answer to all six.
+# Nothing above `sys/` names an operating system, so a second port is those
+# six files and no
 # edit anywhere else: the module path stays `crate::sys::conn`, and the
 # build's `--target` picks which file it resolves to.
 [port.win32]

@@ -98,7 +98,7 @@ hand. Six rules, applied everywhere:
 
 | | |
 |---|---|
-| **An endpoint is a journal entry, not a snapshot.** | A closed connection goes grey and stays five minutes with its counts intact. A table of what is `ESTABLISHED` *right now* would flicker continuously, and would answer the wrong question. |
+| **An endpoint is a journal entry, not a snapshot.** | A closed connection goes grey and stays five minutes after its last socket is gone, counts intact. A table of what is `ESTABLISHED` *right now* would flicker continuously, and would answer the wrong question. |
 | **Identity is never an index.** | The selection is an endpoint key, the folds are group keys, the scroll is pixels. A rebuild cannot move any of them. |
 | **The sort is damped, and freezes on hover.** | A row only overtakes its neighbour by a margin — and while the pointer is over the tree, nothing reorders at all. |
 | **Figures are smoothed.** | A rate carries three quarters of the previous reading. |
@@ -115,15 +115,26 @@ hand. Six rules, applied everywhere:
 | `→` `←` | open and fold a program · `8` fold everything |
 | `Enter` | the full card for the selected endpoint |
 | `O` | open the folder holding the program, binary selected |
-| `S` | next ranking · `/` filter |
+| `S` | next ranking · `/` filter · clicking **Sort** opens the list of rankings, each with what it weighs |
 | `L` | also show local traffic · `B` also show listening and UDP sockets |
 | `Space` | pause · `R` re-read now · `C` clear the journal |
-| `F12` | write the window to `netaudit.bmp`, beside the binary |
-| `F1` | the key list · `Esc` close a card, clear the filter, or quit · `Q` quit |
+| `F12` | write the window to `netaudit.bmp`, in the folder it was started from |
+| `F1` | the key list · `Esc` close a card or clear the filter · `Q` quit |
+
+`Esc` never closes the window: a key pressed to dismiss something must not be
+able to end the session you were in the middle of.
+
+**The window resizes, and the layout follows.** The cards share the width,
+the tree grows to the bottom, and the right-hand column and the badges stay
+anchored to the right edge; below 1280 × 640 the frame is cut at the window's
+edge rather than every column overlapping. The pointer is a beam over the
+filter and a hand over anything that answers a click.
 
 **The column headers rank by what they name**, and the one the rows are ordered
-by is underlined. A header covering two readings takes both: `REPETITION /
-RHYTHM` ranks by repeat count, then by steadiness.
+by is underlined. A header covering two readings takes both: `Repetition /
+rhythm` ranks by repeat count, then by steadiness. A program ranks by its best
+endpoint under the same reading, so the program holding the steadiest timer is
+the one at the top of a rhythm-sorted tree.
 
 **A program's triangle folds it; the rest of its row selects it** — so a
 program's totals are readable without closing what you were looking at. The
@@ -141,11 +152,16 @@ Two sources. Neither needs a key or an account.
 
 **`ip-api.com/batch`** — up to a hundred addresses per request: AS number and
 name, country, city, operator, and the `proxy` / `hosting` / `mobile` flags.
-One batch in flight, three seconds apart, exponential back-off on failure, and
-every address asked about exactly once per session.
+One batch in flight, four and a half seconds apart (the service allows fifteen
+batches a minute), exponential back-off on failure, and every address answered
+exactly once per session. A batch that never arrived — the network was down, the
+service said 429 — puts its addresses back in line; it is not read as "every
+one of them came back empty".
 
 **Team Cymru's DNS whois** — `x.y.z.w.origin.asn.cymru.com` and
 `AS<n>.asn.cymru.com`, both `TXT`, for the addresses the batch could not name.
+Each question is asked once per address, answered or not, so one address the
+registry cannot place never holds up the rest.
 
 <details>
 <summary><b>Why the second one is DNS and not HTTP</b></summary>
@@ -183,13 +199,19 @@ axle build
 install, no DLL to copy beside the binary, no `[link]` section to fill in:
 every OS library — `iphlpapi`, `dnsapi`, `kernel32`, `shell32`, and `gdi32`
 through smalt — is named by the `extern "C" from "…"` block that imports from
-it, so the link line learns of each from the declaration that needed it.
+it, so the link line learns of each from the declaration that needed it. The
+one exception is `NtQuerySystemInformation`, bound by symbol from `ntdll`.
 
-**Nothing needs elevation**, and nothing is gated behind it: the connection
-tables, the resolver cache and the reverse lookups are readable by any process.
-The one reading that would need it is the kernel trace behind the `ETW` badge,
-and that is not implemented — so running as administrator changes nothing
-today.
+**Nothing needs elevation.** The connection tables, the resolver cache and
+the reverse lookups are readable by any process. Run elevated, one thing
+improves: the image paths of services running under another account become
+readable, so `svchost` and friends are grouped by path rather than by name.
+The kernel trace behind the `ETW` badge would need elevation too, and it is
+not implemented.
+
+**The resolver cache is read, never queried.** Each cached name is resolved
+with `DNS_QUERY_NO_WIRE_QUERY`, so nothing about what this machine looked up
+leaves it.
 
 **`--snap <ms>`** waits that long, writes `netaudit.bmp`, and quits: a capture
 for a report or for a script, with nobody standing over the machine at the
@@ -211,23 +233,28 @@ right moment. `F12` does the same on demand.
 netaudit
 ├── axle.toml                  the package, the smalt path dependency, the win32 port
 ├── src/
-│   ├── main.axle              the window, the loop, the tiers, the two lookups in flight
+│   ├── main.axle              the window, the loop, the two lookups in flight
+│   ├── session.axle           what the loop owns: the world, the machine, the queue, the app
 │   ├── app.axle               the interaction state: selected, sorted, filtered, folded
 │   ├── input.axle             keys, clicks and the wheel, turned into changes on `app`
 │   ├── theme.axle             the palette and the layout grid
 │   ├── fmt.axle               the figures a library cannot format: an address, a rate
 │   │
 │   ├── sys/                   the machine, as this program reads it
+│   │   ├── machine.axle       the four readers, as one value
 │   │   ├── raw.axle           the four pointer views the imports need — all the `unsafe`
 │   │   ├── tiers.axle         which readings are running, and why the others are not
+│   │   ├── shape.axle         the pointer shapes the window asks for
 │   │   └── win32/             ← the one directory that names an operating system
 │   │       ├── conn.axle      GetExtendedTcp/UdpTable, v4 and v6, one row shape
 │   │       ├── procs.axle     process names, and where each binary lives
 │   │       ├── dnscache.axle  the resolver's cache, inverted to address → name
 │   │       ├── rdns.axle      the PTR record, for what nothing else could name
-│   │       └── shell.axle     explorer.exe /select,"…"
+│   │       ├── shell.axle     explorer.exe /select,"…"
+│   │       └── pointer.axle   the beam over a field, the hand over a control
 │   │
 │   ├── model/                 the journal, and every reading taken off it
+│   │   ├── world.axle         the six tables below, as one value
 │   │   ├── pool.axle          interned text — nothing here is ever a `string`
 │   │   ├── key.axle           the one hash every identity is folded with
 │   │   ├── addr.axle          loopback / private / public, and how an address is keyed
@@ -247,6 +274,7 @@ netaudit
 │   │   └── cymru.axle         the registry over DNS, for what the batch could not name
 │   │
 │   └── ui/                    nothing below here reads the machine
+│       ├── paint.axle         the frame, the two faces, the figure cursor
 │       ├── parts.axle         the pieces every surface is assembled from
 │       ├── card.axle          the cursor a card's content is emitted against, twice
 │       ├── chrome.axle        the title bar, the four cards, the toolbar, the status
@@ -264,7 +292,7 @@ netaudit
 would resolve to a sibling directory's file on another target.
 
 Everything above `sys/` — the model, the enrichment, the whole UI — names no OS
-at all. That is what makes a second port five files and no edit anywhere else.
+at all. That is what makes a second port six files and no edit anywhere else.
 `axle ports` prints the table with a tick per seam.
 
 ### What it stands on
@@ -289,9 +317,13 @@ tool that measures the machine owes it.
 `BitmapFont::drawBytes` renders straight from it, so a repaint drawing a few
 hundred numbers allocates nothing at all.
 
-**Wide names go through a real UTF-8 decode.** `Mem::wideFrom` emits surrogate
-pairs and degrades a malformed sequence to U+FFFD, so a path with an em dash in
-it survives the round trip back to `ShellExecuteW`.
+**Text on screen is ASCII, text handed back to Windows is not.** The baked
+face carries codes 32 to 126 and draws anything else as nothing, so a name is
+folded on its way into the pool — `Zürich` lands as `Zurich`, not `Z??rich` —
+and every literal the program draws is ASCII (a minus sign typed as U+2212
+would turn a penalty on the score card into a bonus). The path `O` hands to
+`ShellExecuteW` is the UTF-16 Windows gave, kept beside the drawable copy, so a
+folder with an accent in its name still opens.
 
 What stays here is what a library cannot know: an address in its canonical text
 form, a rate whose empty case means *nothing measured bytes* rather than
@@ -300,12 +332,28 @@ reading's trace is drawn against.
 
 ### How it is written
 
-Three habits, each turning a class of silent mistake into a compile error.
+Four habits, each turning a class of silent mistake into a compile error or a
+signature that says what it touches.
+
+**No function takes more than five parameters.** What travels together is one
+value: `Session` is what the loop owns, `World` the six model tables,
+`Machine` the four OS readers, `Paint` how the window draws, `Layout` where
+everything sits for the window's size, `Lens` what the reader asked the tree
+to show, and `Sighting`, `Obj`, `Bytes`, `Lane`, `Toggle` and `Band` are the
+small values a socket, a JSON object, a span of text, a column, a toolbar
+switch and a trace's scale are.
+Axle's borrows are second-class (E0513 — a reference lent for a call cannot be
+kept in a field), so a surface takes the paint *and* the session, side by side,
+rather than a context that pretends to hold both. The four Win32 imports keep
+their six arguments: those signatures are Windows's, not ours.
 
 **Every state is an enum, read by a `match` with no wildcard** — `Tier`,
 `TierState`, `Sort`, `RowKind`, `Modal`, `Say`, `Action`, `Proto`,
 `SocketKind`, `Reach`, `Look`, `NameSource`, `PathState`, `WhoisKind`,
 `Reason`. The columns included: they are `Reach[]` and `Look[]`, not `i32[]`.
+The wildcards left are on integers (a TCP state number, an index into a cycle),
+on smalt's `EventKind`, whose other kinds this window does not answer, and on
+`Hot` where the tooltip picks out the three tier badges from fifteen targets.
 
 The event loop is two of those matches — one routes an `EventKind` to a
 handler, one applies the `Action` it answered — so an event kind or an action
@@ -321,7 +369,7 @@ sometimes `-1` is a type nobody reads the same way twice.
 between an address and a `ptr` that the Windows imports need; smalt owns the raw
 reads and writes. `unsafe` is per-function in Axle (E0707 — it does not
 propagate across a call), so that confinement is enforceable rather than
-aspirational: `grep unsafe src/` returns one file.
+aspirational: `grep -rlE "unsafe (fn|\{)" src/` returns one file.
 
 ---
 
