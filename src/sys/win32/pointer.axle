@@ -1,0 +1,144 @@
+// sys/pointer — the shape of the pointer over this window.
+//
+// THE SEAM: `Pointer::show(shape)` makes the pointer over this program's
+// window take `shape`, from now until another shape is asked for.
+//
+// Windows: the cursor of the window's *class*. Setting the cursor once with
+// `SetCursor` is not enough here — smalt's window class carries the arrow,
+// and Windows puts the class cursor back on every `WM_SETCURSOR`, which is
+// every move of the mouse; the pointer would flicker between the arrow and
+// the shape asked for. Replacing the class cursor (`SetClassLongPtrW`) makes
+// Windows itself restore the right shape on each move, and `SetCursor`
+// applies it at once rather than at the next one.
+//
+// The window is found rather than handed over: smalt does not expose its
+// handle. It is the top-level window titled as this program's that belongs
+// to this process — the title alone is not enough, since an Explorer window
+// open on a folder named `netaudit` carries the same caption.
+
+use smalt::Mem;
+use crate::sys::raw::{asPtr, addrOf, nullPtr};
+use crate::sys::shape::Shape;
+
+extern "C" from "user32" {
+    /** `HCURSOR LoadCursorW(HINSTANCE, LPCWSTR)` — NULL instance for the system's `IDC_*`. */
+    fn LoadCursorW(instance : ptr, name : ptr) : ptr;
+    /** `HCURSOR SetCursor(HCURSOR)`. */
+    fn SetCursor(cursor : ptr) : ptr;
+    /** `ULONG_PTR SetClassLongPtrW(HWND, int, LONG_PTR)`. */
+    fn SetClassLongPtrW(window : ptr, index : i32, value : i64) : i64;
+    /** `HWND FindWindowExW(HWND, HWND, LPCWSTR, LPCWSTR)` — top-level windows for a NULL parent. */
+    fn FindWindowExW(parent : ptr, after : ptr, className : ptr, title : ptr) : ptr;
+    /** `DWORD GetWindowThreadProcessId(HWND, LPDWORD)`. */
+    fn GetWindowThreadProcessId(window : ptr, pid : ptr) : i32;
+}
+
+extern "C" from "kernel32" {
+    /** `DWORD GetCurrentProcessId(void)`. */
+    fn GetCurrentProcessId() : i32;
+}
+
+/** `IDC_ARROW`. */
+const IDC_ARROW : i64 = 32512;
+/** `IDC_IBEAM`. */
+const IDC_IBEAM : i64 = 32513;
+/** `IDC_HAND`. */
+const IDC_HAND : i64 = 32649;
+/** `GCLP_HCURSOR` — the class's cursor slot. */
+const GCLP_HCURSOR : i32 = -12;
+/** Bytes of the wide title buffer. */
+const TITLE_BYTES : i64 = 128;
+/** Top-level windows looked through before giving up. */
+const FIND_LIMIT : i32 = 64;
+
+/** The pointer over this program's window. */
+class Pointer {
+    /** The window, once found; `0` until then. */
+    window : i64 = 0,
+    /** The shape last applied. */
+    shown : Shape = Shape::Arrow,
+    /** The three system cursors, loaded once — shared, never released. */
+    arrow : i64 = addrOf(LoadCursorW(nullPtr(), asPtr(IDC_ARROW))),
+    beam : i64 = addrOf(LoadCursorW(nullPtr(), asPtr(IDC_IBEAM))),
+    hand : i64 = addrOf(LoadCursorW(nullPtr(), asPtr(IDC_HAND))),
+    /** The window's title, as UTF-16, for the search. */
+    title : i64 = Mem::take(TITLE_BYTES),
+    /** Where `GetWindowThreadProcessId` writes the owning process. */
+    owner : i64 = Mem::take(8),
+
+    constructor(title : string) {
+        if (self.title != 0) {
+            Mem::wideFrom(self.title, title, TITLE_BYTES);
+        }
+    }
+
+    /** Make the pointer over the window take `shape`. */
+    pub(crate) fn show(mut self, shape : Shape) : void {
+        if (shape == self.shown) {
+            return;
+        }
+
+        if (self.window == 0) {
+            self.window = self.find();
+        }
+
+        if (self.window == 0) {
+            return;
+        }
+
+        let cursor : i64 = self.cursorFor(shape);
+        SetClassLongPtrW(asPtr(self.window), GCLP_HCURSOR, cursor);
+        SetCursor(asPtr(cursor));
+        self.shown = shape;
+    }
+
+    /** The system cursor drawn for `shape`. */
+    fn cursorFor(self, shape : Shape) : i64 {
+        return match shape {
+            Shape::Arrow => self.arrow,
+            Shape::Text => self.beam,
+            Shape::Hand => self.hand,
+        };
+    }
+
+    /** This process's top-level window carrying the title, or `0`. */
+    fn find(self) : i64 {
+        if (self.title == 0 || self.owner == 0) {
+            return 0;
+        }
+
+        let at : ptr = nullPtr();
+        for (i of 0..FIND_LIMIT) {
+            at = FindWindowExW(nullPtr(), at, nullPtr(), asPtr(self.title));
+            if (addrOf(at) == 0) {
+                return 0;
+            }
+
+            if (self.ownedByThisProcess(at)) {
+                return addrOf(at);
+            }
+        }
+
+        return 0;
+    }
+
+    /** Whether `window` belongs to this process rather than to another of the same title. */
+    fn ownedByThisProcess(self, window : ptr) : bool {
+        Mem::putDword(self.owner, 0, 0);
+        GetWindowThreadProcessId(window, asPtr(self.owner));
+        return (Mem::udwordAt(self.owner, 0) as i32) == GetCurrentProcessId();
+    }
+
+    /** Release the two scratch blocks; the cursors are the system's. */
+    pub(crate) fn dispose(mut self) : void {
+        if (self.title != 0) {
+            Mem::release(self.title);
+            self.title = 0;
+        }
+
+        if (self.owner != 0) {
+            Mem::release(self.owner);
+            self.owner = 0;
+        }
+    }
+}

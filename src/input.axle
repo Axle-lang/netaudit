@@ -20,6 +20,7 @@ use crate::theme::Layout;
 use crate::model::view::{View, RowKind, Sort, rowOfEndpoint, rowOfGroup};
 use crate::model::groups::Groups;
 use crate::sys::tiers::Tier;
+use crate::sys::shape::Shape;
 
 /**
  * What the loop must do that this file cannot do itself.
@@ -575,6 +576,37 @@ fn onRelease(a : App, ev : Event) : Action {
     }
 
     return Action::None;
+}
+
+/**
+ * The pointer's shape for what it is over: a beam over the field that takes
+ * typing, a hand over anything that answers a click, the arrow elsewhere.
+ * The rows answer clicks too, but a hand over every row of a list is noise;
+ * a list is read under the arrow, the way every file manager does it.
+ */
+fn shapeFor(a : App) : Shape {
+    if (a.dragging) {
+        return Shape::Arrow;
+    }
+
+    return match a.hot {
+        Hot::Filter => Shape::Text,
+        Hot::Clear => Shape::Hand,
+        Hot::Sort => Shape::Hand,
+        Hot::Local => Shape::Hand,
+        Hot::Bound => Shape::Hand,
+        Hot::HeadProgram => Shape::Hand,
+        Hot::HeadTrust => Shape::Hand,
+        Hot::HeadRhythm => Shape::Hand,
+        Hot::HeadTraffic => Shape::Hand,
+        Hot::Menu => Shape::Hand,
+        Hot::TierPoll => Shape::Arrow,
+        Hot::TierDns => Shape::Arrow,
+        Hot::TierEtw => Shape::Arrow,
+        Hot::Bar => Shape::Arrow,
+        Hot::Rows => Shape::Arrow,
+        Hot::None => Shape::Arrow,
+    };
 }
 
 /** The control under `(x, y)`, with nothing open over the window. */

@@ -48,6 +48,7 @@ use crate::model::hosts::{Hosts, NameSource, HOST_MAX, Look, ASKED_ORIGIN, ASKED
 use crate::model::addr::Reach;
 use crate::sys::machine::Machine;
 use crate::sys::shell;
+use crate::sys::pointer::Pointer;
 use crate::sys::tiers::TierState;
 use crate::sys::dnscache;
 use crate::sys::rdns;
@@ -72,7 +73,7 @@ const REFRESH_MS : i64 = 1000;
  * that measures the machine owes it.
  */
 const IDLE_MS : i32 = 250;
-/** The window's caption. */
+/** The window's caption — and how `sys::pointer` finds the window again. */
 const TITLE : string = "netaudit";
 /** Where a snapshot lands: the folder the program was started from. */
 const SNAP_PATH : string = "netaudit.bmp";
@@ -111,6 +112,7 @@ fn run() : void ! PlatformError {
     let pt : Paint = new Paint(screen.frame());
     let ss : Session = new Session();
     let a : App = ss.a;
+    let pointer : Pointer = new Pointer(TITLE);
 
     // The two lookups in flight. They live here rather than on `Session`
     // because a `Task` is a handle minted on this thread and consumable only
@@ -166,6 +168,8 @@ fn run() : void ! PlatformError {
             }
         }
 
+        pointer.show(input::shapeFor(a));
+
         // Each step runs every turn; only then is it asked whether any of
         // them changed what is on screen.
         let landed : bool = collect(ss, nowMs, jobs);
@@ -200,6 +204,7 @@ fn run() : void ! PlatformError {
     }
 
     drain(ss.q, jobs);
+    pointer.dispose();
     pt.dispose();
     ss.dispose();
 }

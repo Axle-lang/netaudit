@@ -1,0 +1,16 @@
+// sys/shape — the pointer shapes this window asks for.
+//
+// Three, because the window has three kinds of place: somewhere to type, a
+// control that answers a click, and everything else. Declared here rather
+// than in the port that draws them, so every port answers to the same list
+// and the code choosing a shape (`input::shapeFor`) names no platform.
+
+/** What the pointer looks like over a part of the window. */
+enum Shape : i32 {
+    /** The ordinary pointer. */
+    Arrow = 0,
+    /** The text beam, over a field that takes typing. */
+    Text = 1,
+    /** The hand, over a control that answers a click. */
+    Hand = 2,
+}
