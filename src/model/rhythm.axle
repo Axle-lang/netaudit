@@ -45,7 +45,7 @@ class Rhythm {
     pub(crate) periodMs : i64[],
     pub(crate) jitterMs : i64[],
     pub(crate) regular : i32[],
-    gaps : i64,
+    gaps : i64 = Mem::take((RING as i64) * 8),
 
     constructor(slots : i32) {
         self.stamps = Mem::take((slots as i64) * (RING as i64) * 8);
@@ -54,7 +54,6 @@ class Rhythm {
         self.periodMs = malloc<i64>(slots as i64);
         self.jitterMs = malloc<i64>(slots as i64);
         self.regular = malloc<i32>(slots as i64);
-        self.gaps = Mem::take((RING as i64) * 8);
     }
 
     /** Byte address of ring position `k` of slot `s`. */
@@ -81,11 +80,13 @@ class Rhythm {
         if (self.stamps == 0 || self.gaps == 0) {
             return;
         }
+
         Mem::putQword(self.at(s, self.head[s]), 0, atMs);
         self.head[s] = (self.head[s] + 1) % RING;
         if (self.count[s] < RING) {
             self.count[s] = self.count[s] + 1;
         }
+
         self.derive(s);
     }
 
@@ -113,9 +114,11 @@ class Rhythm {
             self.regular[s] = 0;
             return;
         }
+
         for (g of 0..n - 1) {
             Mem::putQword(self.gaps, (g as i64) * 8, self.oldest(s, g + 1) - self.oldest(s, g));
         }
+
         let count : i32 = n - 1;
         sortGaps(self.gaps, count);
 
@@ -133,8 +136,10 @@ class Rhythm {
             if (d < 0) {
                 d = 0 - d;
             }
+
             sum = sum + d;
         }
+
         let jitter : i64 = sum / (count as i64);
         self.jitterMs[s] = jitter;
 
@@ -142,6 +147,7 @@ class Rhythm {
         if (spread > 1000) {
             spread = 1000;
         }
+
         self.regular[s] = (1000 - spread) as i32;
     }
 
@@ -150,6 +156,7 @@ class Rhythm {
         for (k of 0..RING) {
             Mem::putQword(self.at(to, k), 0, Mem::qwordAt(self.at(from, k), 0));
         }
+
         self.head[to] = self.head[from];
         self.count[to] = self.count[from];
         self.periodMs[to] = self.periodMs[from];
@@ -163,6 +170,7 @@ class Rhythm {
             Mem::release(self.stamps);
             self.stamps = 0;
         }
+
         if (self.gaps != 0) {
             Mem::release(self.gaps);
             self.gaps = 0;
@@ -179,6 +187,7 @@ fn sortGaps(base : i64, n : i32) : void {
             Mem::putQword(base, ((b + 1) as i64) * 8, Mem::qwordAt(base, (b as i64) * 8));
             b = b - 1;
         }
+
         Mem::putQword(base, ((b + 1) as i64) * 8, v);
     }
 }
@@ -197,14 +206,18 @@ fn regularityWord(regular : i32) : string {
     if (regular >= 900) {
         return "clockwork";
     }
+
     if (regular >= 750) {
         return "very regular";
     }
+
     if (regular >= 500) {
         return "regular";
     }
+
     if (regular >= 250) {
         return "loose";
     }
+
     return "irregular";
 }

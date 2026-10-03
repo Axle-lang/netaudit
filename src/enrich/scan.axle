@@ -49,6 +49,7 @@ fn stringEnd(s : string, from : i64, len : i64) : i64 {
             i = i + 1;
         }
     }
+
     return len;
 }
 
@@ -69,6 +70,7 @@ fn objectStart(s : string, from : i64, len : i64) : i64 {
             i = i + 1;
         }
     }
+
     return J_NOT_FOUND;
 }
 
@@ -89,9 +91,11 @@ fn objectEnd(s : string, from : i64, len : i64) : i64 {
                     return i + 1;
                 }
             }
+
             i = i + 1;
         }
     }
+
     return len;
 }
 
@@ -101,11 +105,13 @@ fn matches(s : string, at : i64, len : i64, lit : string) : bool {
     if (at + n > len) {
         return false;
     }
+
     for (i of 0..n) {
         if (s.byteAt(at + i) != lit.byteAt(i)) {
             return false;
         }
     }
+
     return true;
 }
 
@@ -126,18 +132,24 @@ fn field(s : string, from : i64, to : i64, key : string) : i64 {
         if (c == J_QUOTE) {
             let end : i64 = stringEnd(s, i, to);
             let after : i64 = i + 1 + key.byteLength;
+            // A string is a key only when a colon follows it. Without that
+            // test a *value* that happens to spell the key — a PTR record
+            // reading `query` — would answer for it.
+            let v : i64 = end;
+            while (v < to && s.byteAt(v) == 32) {
+                v = v + 1;
+            }
+
             if (depth == 1 && after < to && matches(s, i + 1, to, key)
-                && s.byteAt(after) == J_QUOTE) {
-                let v : i64 = end;
-                while (v < to && s.byteAt(v) != J_COLON) {
-                    v = v + 1;
-                }
+                && s.byteAt(after) == J_QUOTE && v < to && s.byteAt(v) == J_COLON) {
                 v = v + 1;
                 while (v < to && s.byteAt(v) == 32) {
                     v = v + 1;
                 }
+
                 return v;
             }
+
             i = end;
         } else {
             if (c == J_OPEN_BRACE) {
@@ -145,52 +157,12 @@ fn field(s : string, from : i64, to : i64, key : string) : i64 {
             } else if (c == J_CLOSE_BRACE) {
                 depth = depth - 1;
             }
+
             i = i + 1;
         }
     }
-    return J_NOT_FOUND;
-}
 
-/**
- * The value of `key` anywhere inside `[from, to)`, at whatever depth, or
- * `J_NOT_FOUND`.
- *
- * Used for the registry responses, which wrap their answer several objects
- * deep under keys that carry no information (`data`, then `asns`, then the
- * array's first element). Searching by depth there would mean hard-coding a
- * path that the service is free to change, whereas the *names* of the leaf
- * fields are the part it documents. The keys asked for are specific enough
- * that a stray match is not a real risk.
- */
-fn anyField(s : string, from : i64, to : i64, key : string) : i64 {
-    let i : i64 = from;
-    while (i < to) {
-        let c : i32 = s.byteAt(i);
-        if (c == J_QUOTE) {
-            let end : i64 = stringEnd(s, i, to);
-            let after : i64 = i + 1 + key.byteLength;
-            if (after < to && matches(s, i + 1, to, key) && s.byteAt(after) == J_QUOTE) {
-                let v : i64 = end;
-                while (v < to && s.byteAt(v) != J_COLON) {
-                    v = v + 1;
-                }
-                v = v + 1;
-                while (v < to && s.byteAt(v) == 32) {
-                    v = v + 1;
-                }
-                return v;
-            }
-            i = end;
-        } else {
-            i = i + 1;
-        }
-    }
     return J_NOT_FOUND;
-}
-
-/** One byte of `s` — the reading every scan in this file is built from. */
-fn byteOf(s : string, i : i64) : i32 {
-    return s.byteAt(i);
 }
 
 /**
@@ -203,6 +175,7 @@ fn valueStart(s : string, at : i64, len : i64) : i64 {
     if (at < 0 || at >= len || s.byteAt(at) != J_QUOTE) {
         return J_NOT_FOUND;
     }
+
     return at + 1;
 }
 
@@ -211,6 +184,7 @@ fn valueEnd(s : string, at : i64, len : i64) : i64 {
     if (at < 0 || at >= len || s.byteAt(at) != J_QUOTE) {
         return J_NOT_FOUND;
     }
+
     return stringEnd(s, at, len) - 1;
 }
 
@@ -228,6 +202,7 @@ fn digits(s : string, at : i64, len : i64) : i32 {
     if (at < 0 || at >= len) {
         return -1;
     }
+
     let v : i64 = 0;
     let n : i32 = 0;
     let i : i64 = at;
@@ -241,8 +216,12 @@ fn digits(s : string, at : i64, len : i64) : i32 {
             i = i + 1;
         }
     }
-    if (n == 0) {
+
+    // An AS number past `i32` is in the reserved range; refuse it rather
+    // than let the cast wrap it into somebody else's network.
+    if (n == 0 || v > 2147483647) {
         return -1;
     }
+
     return v as i32;
 }

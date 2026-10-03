@@ -67,15 +67,11 @@ const FLAG_HOSTING : i32 = 2;
 /** The address belongs to a mobile carrier. */
 const FLAG_MOBILE : i32 = 4;
 
-/**
- * One row per distinct address seen.
- *
- * There is no score here. A reputation is a property of an address, but what
- * a reader is shown is a property of a **conversation** — the same address
- * reached on a standard port and on an odd one is not the same finding — so
- * the score lives on the endpoint (`model/score`) and this row carries only
- * the evidence it is built from.
- */
+/** The registry has been asked which network announces the address. */
+const ASKED_ORIGIN : i32 = 1;
+/** The registry has been asked what that network is called. */
+const ASKED_AS_NAME : i32 = 2;
+
 /**
  * How strong a claim a source has on a row's name.
  *
@@ -90,57 +86,49 @@ fn nameRank(from : NameSource) : i32 {
     return from as i32;
 }
 
+/**
+ * One row per distinct address seen.
+ *
+ * There is no score here. A reputation is a property of an address, but what
+ * a reader is shown is a property of a **conversation** — the same address
+ * reached on a standard port and on an odd one is not the same finding — so
+ * the score lives on the endpoint (`model/score`) and this row carries only
+ * the evidence it is built from.
+ */
 class Hosts {
-    addrs : i64,
-    pub(crate) family : i32[],
-    pub(crate) reach : Reach[],
-    pub(crate) look : Look[],
+    addrs : i64 = Mem::take((MAX_HOSTS as i64) * HOST_ADDR_BYTES),
+    pub(crate) family : i32[] = malloc<i32>(MAX_HOSTS as i64),
+    pub(crate) reach : Reach[] = malloc<Reach>(MAX_HOSTS as i64),
+    pub(crate) look : Look[] = malloc<Look>(MAX_HOSTS as i64),
 
-    pub(crate) nameOff : i64[],
-    pub(crate) nameLen : i32[],
-    pub(crate) nameFrom : NameSource[],
+    pub(crate) nameOff : i64[] = malloc<i64>(MAX_HOSTS as i64),
+    pub(crate) nameLen : i32[] = malloc<i32>(MAX_HOSTS as i64),
+    pub(crate) nameFrom : NameSource[] = malloc<NameSource>(MAX_HOSTS as i64),
 
-    pub(crate) asn : i32[],
-    pub(crate) netOff : i64[],
-    pub(crate) netLen : i32[],
-    pub(crate) orgOff : i64[],
-    pub(crate) orgLen : i32[],
+    pub(crate) asn : i32[] = malloc<i32>(MAX_HOSTS as i64),
+    pub(crate) netOff : i64[] = malloc<i64>(MAX_HOSTS as i64),
+    pub(crate) netLen : i32[] = malloc<i32>(MAX_HOSTS as i64),
+    pub(crate) orgOff : i64[] = malloc<i64>(MAX_HOSTS as i64),
+    pub(crate) orgLen : i32[] = malloc<i32>(MAX_HOSTS as i64),
 
-    pub(crate) ccOff : i64[],
-    pub(crate) ccLen : i32[],
-    pub(crate) countryOff : i64[],
-    pub(crate) countryLen : i32[],
-    pub(crate) cityOff : i64[],
-    pub(crate) cityLen : i32[],
+    pub(crate) ccOff : i64[] = malloc<i64>(MAX_HOSTS as i64),
+    pub(crate) ccLen : i32[] = malloc<i32>(MAX_HOSTS as i64),
+    pub(crate) countryOff : i64[] = malloc<i64>(MAX_HOSTS as i64),
+    pub(crate) countryLen : i32[] = malloc<i32>(MAX_HOSTS as i64),
+    pub(crate) cityOff : i64[] = malloc<i64>(MAX_HOSTS as i64),
+    pub(crate) cityLen : i32[] = malloc<i32>(MAX_HOSTS as i64),
 
-    flags : i32[],
+    flags : i32[] = malloc<i32>(MAX_HOSTS as i64),
+    /**
+     * Which registry questions have been asked about this row. Each is asked
+     * once: an address the registry cannot answer for would otherwise be
+     * asked again every second and a half, forever, and - since the loop
+     * takes the first row that qualifies - would starve every row behind it.
+     */
+    asked : i32[] = malloc<i32>(MAX_HOSTS as i64),
 
-    pub(crate) count : i32,
-    index : SlotIndex,
-
-    constructor() {
-        self.addrs = Mem::take((MAX_HOSTS as i64) * HOST_ADDR_BYTES);
-        self.family = malloc<i32>(MAX_HOSTS as i64);
-        self.reach = malloc<Reach>(MAX_HOSTS as i64);
-        self.look = malloc<Look>(MAX_HOSTS as i64);
-        self.nameOff = malloc<i64>(MAX_HOSTS as i64);
-        self.nameLen = malloc<i32>(MAX_HOSTS as i64);
-        self.nameFrom = malloc<NameSource>(MAX_HOSTS as i64);
-        self.asn = malloc<i32>(MAX_HOSTS as i64);
-        self.netOff = malloc<i64>(MAX_HOSTS as i64);
-        self.netLen = malloc<i32>(MAX_HOSTS as i64);
-        self.orgOff = malloc<i64>(MAX_HOSTS as i64);
-        self.orgLen = malloc<i32>(MAX_HOSTS as i64);
-        self.ccOff = malloc<i64>(MAX_HOSTS as i64);
-        self.ccLen = malloc<i32>(MAX_HOSTS as i64);
-        self.countryOff = malloc<i64>(MAX_HOSTS as i64);
-        self.countryLen = malloc<i32>(MAX_HOSTS as i64);
-        self.cityOff = malloc<i64>(MAX_HOSTS as i64);
-        self.cityLen = malloc<i32>(MAX_HOSTS as i64);
-        self.flags = malloc<i32>(MAX_HOSTS as i64);
-        self.count = 0;
-        self.index = new SlotIndex(MAX_HOSTS * 2);
-    }
+    pub(crate) count : i32 = 0,
+    index : SlotIndex = new SlotIndex(MAX_HOSTS * 2),
 
     /** Byte address of row `s`'s sixteen address bytes. */
     pub(crate) fn addrAt(self, s : i32) : i64 {
@@ -160,9 +148,11 @@ class Hosts {
         if (s >= 0) {
             return s;
         }
+
         if (self.count >= MAX_HOSTS || self.addrs == 0) {
             return -1;
         }
+
         s = self.count;
         self.count = s + 1;
 
@@ -171,6 +161,7 @@ class Hosts {
         if (fam == 6) {
             n = 16;
         }
+
         for (i of 0..n) {
             Mem::putByte(self.addrAt(s), i, Mem::byteAt(at, i));
         }
@@ -181,6 +172,7 @@ class Hosts {
         if (self.reach[s] != Reach::Public) {
             self.look[s] = Look::Local;
         }
+
         self.nameOff[s] = -1;
         self.nameLen[s] = 0;
         self.nameFrom[s] = NameSource::None;
@@ -196,6 +188,7 @@ class Hosts {
         self.cityOff[s] = -1;
         self.cityLen[s] = 0;
         self.flags[s] = 0;
+        self.asked[s] = 0;
 
         self.index.put(key, s);
         return s;
@@ -219,9 +212,11 @@ class Hosts {
         if (s < 0 || off < 0) {
             return;
         }
+
         if (self.nameOff[s] >= 0 && nameRank(self.nameFrom[s]) >= nameRank(from)) {
             return;
         }
+
         self.nameOff[s] = off;
         self.nameLen[s] = len;
         self.nameFrom[s] = from;
@@ -239,18 +234,32 @@ class Hosts {
         }
     }
 
+    /** Whether the registry has been asked question `q` about row `s`. */
+    pub(crate) fn wasAsked(self, s : i32, q : i32) : bool {
+        return s >= 0 && (self.asked[s] & q) != 0;
+    }
+
+    /** Record that the registry has been asked question `q` about row `s`. */
+    pub(crate) fn ask(mut self, s : i32, q : i32) : void {
+        if (s >= 0) {
+            self.asked[s] = self.asked[s] | q;
+        }
+    }
+
     /**
-     * Whether row `s` is routable, answered for, and still has no name — the
-     * one case a reverse lookup is worth making.
+     * Whether row `s` is routable, its batch lookup is over, and it still has
+     * no name — the one case a reverse lookup is worth making. A batch that
+     * failed for the row counts as over: the reverse lookup is a different
+     * service, and the row needs a name more, not less.
      */
     pub(crate) fn unnamed(self, s : i32) : bool {
         return s >= 0 && self.nameOff[s] < 0 && self.reach[s] == Reach::Public
-            && self.look[s] == Look::Done;
+            && self.settled(s);
     }
 
-    /** Whether row `s` still needs an enrichment lookup. */
-    fn wants(self, s : i32) : bool {
-        return s >= 0 && self.look[s] == Look::New;
+    /** Whether row `s`'s batch lookup has come back, answered or not. */
+    pub(crate) fn settled(self, s : i32) : bool {
+        return self.look[s] == Look::Done || self.look[s] == Look::Failed;
     }
 
     /** Release the address block and the index. */
@@ -259,6 +268,7 @@ class Hosts {
             Mem::release(self.addrs);
             self.addrs = 0;
         }
+
         self.index.close();
     }
 }
@@ -268,8 +278,8 @@ fn nameSource(from : NameSource) : string {
     return match from {
         NameSource::Etw => "the name this program asked Windows to resolve",
         NameSource::Cache => "found in this machine's DNS cache",
-        NameSource::Ptr => "reverse DNS — what the address owner publishes",
-        _ => "",
+        NameSource::Ptr => "reverse DNS: what the address owner publishes",
+        NameSource::None => "",
     };
 }
 
@@ -277,9 +287,9 @@ fn nameSource(from : NameSource) : string {
 fn lookNote(look : Look) : string {
     return match look {
         Look::New => "waiting for lookup",
-        Look::Sent => "looking up…",
+        Look::Sent => "looking up...",
         Look::Failed => "the lookup service did not answer for this address",
-        Look::Local => "not routable — no registry answers for it",
-        _ => "",
+        Look::Local => "not routable, so no registry answers for it",
+        Look::Done => "",
     };
 }

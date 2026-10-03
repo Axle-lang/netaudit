@@ -9,8 +9,9 @@
 // The score is per **endpoint**, not per address, because two of the signals
 // are about behaviour rather than reputation: a rhythm belongs to a
 // conversation, and a listening socket bound to a public interface is a
-// property of that socket. The address's own reputation (`Hosts::rep`) is an
-// input, shared by every endpoint pointing at it.
+// property of that socket. The address's own reputation (the flags and the
+// network `model/hosts` carries) is an input, shared by every endpoint
+// pointing at it.
 //
 // Scoring runs in tenths and lands on a fifth, so a half-point signal is
 // expressible without the score itself pretending to a precision it has not
@@ -18,7 +19,7 @@
 // evidence, not on the address.
 
 use crate::model::endpoints::{Endpoints, SocketKind};
-use crate::model::hosts::{Hosts, FLAG_PROXY, FLAG_HOSTING, Look};
+use crate::model::hosts::{Hosts, NameSource, FLAG_PROXY, FLAG_HOSTING, Look, ASKED_ORIGIN};
 use crate::model::rhythm;
 use crate::model::addr::{Reach};
 
@@ -123,7 +124,7 @@ fn reasonText(r : Reason) : string {
         Reason::UnknownAs => "the owning network is not one of the majors",
         Reason::Hosting => "the address is in a datacenter, not on an access network",
         Reason::MajorAs => "a major network, whose behaviour is a matter of public record",
-        Reason::AskedFor => "this machine resolved the name itself — the traffic was asked for",
+        Reason::AskedFor => "this machine resolved the name itself: the traffic was asked for",
     };
 }
 
@@ -153,6 +154,18 @@ fn assess(e : Endpoints, hosts : Hosts, s : i32) : void {
         return;
     }
 
+    // A listening socket bound to every interface, or to a public one, is a
+    // door the outside can knock on. Its "address" is the bind, not a peer,
+    // so nothing else about it can be scored — but the door itself can.
+    if (e.kind[s] == SocketKind::Listen) {
+        if (hosts.reach[h] == Reach::None || hosts.reach[h] == Reach::Public) {
+            e.reasons[s] = reasonBit(Reason::OpenDoor);
+            e.score[s] = fromReasons(e.reasons[s]);
+        }
+
+        return;
+    }
+
     // A peer on this machine or this network is outside the scoring: no
     // registry answers for it, and a score derived from nothing would be a
     // number that looks like evidence.
@@ -160,9 +173,17 @@ fn assess(e : Endpoints, hosts : Hosts, s : i32) : void {
         return;
     }
 
-    let known : bool = hosts.look[h] == Look::Done;
+    // Known once the batch lookup is over, answered or not: an address the
+    // batch failed for still gets its network from the registry and its
+    // name from reverse DNS, and those are evidence like any other.
+    let known : bool = hosts.settled(h);
     let behavioural : i32 = behaviour(e, hosts, s, h);
-    if (!known && behavioural == 0) {
+
+    // A score needs something against the address or a lookup behind it.
+    // "This machine asked for the name" alone is good news about nothing
+    // yet checked, and would paint an unlooked-up row a full green.
+    let goodNewsOnly : bool = behavioural == 0 || behavioural == reasonBit(Reason::AskedFor);
+    if (!known && goodNewsOnly) {
         return;
     }
 
@@ -170,6 +191,7 @@ fn assess(e : Endpoints, hosts : Hosts, s : i32) : void {
     if (known) {
         reasons = reasons | reputation(hosts, h);
     }
+
     e.reasons[s] = reasons;
     e.score[s] = fromReasons(reasons);
 }
@@ -180,36 +202,58 @@ fn reputation(hosts : Hosts, h : i32) : i32 {
     if (hosts.has(h, FLAG_PROXY)) {
         r = r | reasonBit(Reason::Proxy);
     }
+
     if (hosts.has(h, FLAG_HOSTING)) {
         r = r | reasonBit(Reason::Hosting);
     }
-    if (hosts.nameOff[h] < 0) {
+
+    // Only once the reverse lookup has actually answered empty. Before that
+    // the name is merely not known *yet*, and charging for it would make the
+    // score drop and then climb back the moment the PTR record lands.
+    if (hosts.nameOff[h] < 0 && hosts.nameFrom[h] == NameSource::Ptr) {
         r = r | reasonBit(Reason::NoPtr);
     }
+
+    // "Not a major network" needs a network to judge: an AS number, or a
+    // registry that was asked and could not give one.
     if (isMajor(hosts.asn[h])) {
         r = r | reasonBit(Reason::MajorAs);
-    } else {
+    } else if (hosts.asn[h] != 0 || hosts.wasAsked(h, ASKED_ORIGIN)) {
         r = r | reasonBit(Reason::UnknownAs);
     }
+
     return r;
 }
 
 /** The reasons that come from what the conversation is doing. */
 fn behaviour(e : Endpoints, hosts : Hosts, s : i32, h : i32) : i32 {
     let r : i32 = 0;
-    if (e.kind[s] == SocketKind::Listen) {
-        r = r | reasonBit(Reason::OpenDoor);
-    }
     if (e.kind[s] == SocketKind::Peer && oddPort(e.port[s]) && !hosts.has(h, FLAG_HOSTING)) {
         r = r | reasonBit(Reason::OddPort);
     }
+
     if (beaconing(e, hosts, s, h)) {
         r = r | reasonBit(Reason::Beacon);
     }
-    if (hosts.nameFrom[h] != NameSource::None && hosts.nameOff[h] >= 0) {
+
+    // Asked for means a program on this machine resolved the name: the cache
+    // or the kernel trace. A PTR record is what the address's owner chose to
+    // publish, which says nothing about whether anyone here asked for it.
+    if (hosts.nameOff[h] >= 0 && askedFor(hosts.nameFrom[h])) {
         r = r | reasonBit(Reason::AskedFor);
     }
+
     return r;
+}
+
+/** Whether a name from `from` was resolved by this machine itself. */
+fn askedFor(from : NameSource) : bool {
+    return match from {
+        NameSource::Cache => true,
+        NameSource::Etw => true,
+        NameSource::Ptr => false,
+        NameSource::None => false,
+    };
 }
 
 /**
@@ -226,28 +270,40 @@ fn beaconing(e : Endpoints, hosts : Hosts, s : i32, h : i32) : bool {
     if (!hasRhythm(e.rhythm, s) || e.hits[s] < BEACON_VISITS) {
         return false;
     }
+
+    // "Nothing will name it" is a finding only once something has tried:
+    // the batch has come back and the reverse lookup has answered empty.
+    // Before that, a heartbeat to Google reads exactly like one to nobody.
+    if (!hosts.settled(h) || hosts.nameFrom[h] != NameSource::Ptr) {
+        return false;
+    }
+
     if (e.rhythm.regular[s] < BEACON_REGULARITY) {
         return false;
     }
+
     return hosts.nameOff[h] < 0 && !isMajor(hosts.asn[h]);
 }
 
 /**
  * A port that is neither a standard service nor an ephemeral answer. The
  * ranges are deliberately wide: the signal is "this does not look like the
- * web", not "this port is forbidden", and it is worth half a point on its
- * own and nothing without company.
+ * web", not "this port is forbidden", and it costs one point — enough to
+ * mark the row, not enough to flag it without company.
  */
 fn oddPort(port : i32) : bool {
     if (port == 80 || port == 443 || port == 53 || port == 123) {
         return false;
     }
+
     if (port == 22 || port == 25 || port == 465 || port == 587 || port == 993 || port == 995) {
         return false;
     }
+
     if (port == 8080 || port == 8443 || port == 5228 || port == 3478) {
         return false;
     }
+
     return port > 1024;
 }
 
@@ -267,13 +323,17 @@ fn fromReasons(reasons : i32) : i32 {
             tenths = tenths + reasonWeight(r);
         }
     }
+
     return ((tenths.max(0).min(50)) + 5) / 10;
 }
 
 /**
  * Whether this is one of the networks a machine talks to constantly. The
- * list is deliberately short and deliberately public: it is not a
- * whitelist — a major network still loses points for a missing name or an
+ * list is deliberately short and deliberately public, and it leaves out the
+ * rent-a-server hosts (OVH, Hetzner, DigitalOcean, Linode): a five-euro VPS
+ * is exactly where a beacon phones home to, and calling its owner "a matter
+ * of record" would excuse the one shape this program exists to catch. It is
+ * not a whitelist — a major network still loses points for a missing name or an
  * odd port — it only says that the *owner* of the address is a matter of
  * record, which is the difference between "Google" and "a number".
  */
@@ -295,10 +355,6 @@ fn isMajor(asn : i32) : bool {
         32934 => true,  // Meta
         13414 => true,  // X
         36459 => true,  // GitHub
-        16276 => true,  // OVH
-        24940 => true,  // Hetzner
-        14061 => true,  // DigitalOcean
-        63949 => true,  // Akamai / Linode
         3215 => true,   // Orange
         12322 => true,  // Free
         5410 => true,   // Bouygues

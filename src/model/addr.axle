@@ -45,10 +45,12 @@ fn reach(src : i64, family : i32) : Reach {
     if (family == 6 && !isV4Mapped(src)) {
         return reach6(src);
     }
+
     let base : i64 = src;
     if (family == 6) {
         base = src + 12;
     }
+
     return reach4(base);
 }
 
@@ -61,29 +63,37 @@ fn reach4(src : i64) : Reach {
     if (a == 0 && b == 0 && c == 0 && d == 0) {
         return Reach::None;
     }
+
     if (a == 127) {
         return Reach::Loopback;
     }
+
     if (a >= 224) {
         return Reach::Multicast;
     }
+
     if (a == 10) {
         return Reach::Private;
     }
+
     if (a == 192 && b == 168) {
         return Reach::Private;
     }
+
     if (a == 172 && b >= 16 && b <= 31) {
         return Reach::Private;
     }
+
     if (a == 169 && b == 254) {
         return Reach::Private;
     }
+
     // 100.64.0.0/10 — carrier-grade NAT. A peer here is on the ISP's own
     // network, not on the internet, and no registry will name it.
     if (a == 100 && b >= 64 && b <= 127) {
         return Reach::Private;
     }
+
     return Reach::Public;
 }
 
@@ -93,19 +103,24 @@ fn reach6(src : i64) : Reach {
     if (isZero(src)) {
         return Reach::None;
     }
+
     if (isLoopback6(src)) {
         return Reach::Loopback;
     }
+
     if (a == 0xFF) {
         return Reach::Multicast;
     }
+
     // fe80::/10 link-local, fc00::/7 unique-local.
     if (a == 0xFE && (Mem::byteAt(src, 1) & 0xC0) == 0x80) {
         return Reach::Private;
     }
+
     if ((a & 0xFE) == 0xFC) {
         return Reach::Private;
     }
+
     return Reach::Public;
 }
 
@@ -116,6 +131,7 @@ fn isZero(src : i64) : bool {
             return false;
         }
     }
+
     return true;
 }
 
@@ -126,6 +142,7 @@ fn isLoopback6(src : i64) : bool {
             return false;
         }
     }
+
     return Mem::byteAt(src, 15) == 1;
 }
 
@@ -136,6 +153,7 @@ fn isV4Mapped(src : i64) : bool {
             return false;
         }
     }
+
     return Mem::byteAt(src, 10) == 0xFF && Mem::byteAt(src, 11) == 0xFF;
 }
 
@@ -147,6 +165,7 @@ fn shownFamily(src : i64, family : i32) : i32 {
     if (family == 6 && isV4Mapped(src)) {
         return 4;
     }
+
     return family;
 }
 
@@ -158,6 +177,7 @@ fn shownOffset(src : i64, family : i32) : i64 {
     if (family == 6 && isV4Mapped(src)) {
         return 12;
     }
+
     return 0;
 }
 
@@ -167,25 +187,13 @@ fn hashAddr(h : i64, src : i64, family : i32) : i64 {
     if (family == 6) {
         n = 16;
     }
+
     let acc : i64 = hashStep(h, family as i64);
     for (i of 0..n) {
         acc = hashStep(acc, Mem::byteAt(src, i) as i64);
     }
-    return acc;
-}
 
-/** Whether two addresses of the same family hold the same bytes. */
-fn sameAddr(a : i64, b : i64, family : i32) : bool {
-    let n : i64 = 4;
-    if (family == 6) {
-        n = 16;
-    }
-    for (i of 0..n) {
-        if (Mem::byteAt(a, i) != Mem::byteAt(b, i)) {
-            return false;
-        }
-    }
-    return true;
+    return acc;
 }
 
 /** The key of a host, for the address → attribution index. */
@@ -200,6 +208,6 @@ fn reachWord(r : Reach) : string {
         Reach::Private => "this network",
         Reach::Multicast => "multicast group",
         Reach::None => "no peer",
-        _ => "internet",
+        Reach::Public => "internet",
     };
 }

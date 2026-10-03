@@ -44,6 +44,31 @@ const UNKNOWN_BYTE : i32 = 63; // '?'
 const STAGE_BYTES : i64 = 1024;
 
 /**
+ * A run of drawable bytes somewhere in memory: where it starts and how long
+ * it is. What a surface draws a name from, without knowing whether the name
+ * lives in the pool, a formatting cursor or the filter field.
+ */
+struct Bytes {
+    /** Address of the first byte; meaningless when `len` is zero. */
+    pub(crate) at : i64;
+    /** How many bytes; zero for a span that is absent. */
+    pub(crate) len : i32;
+
+    /** A span over `len` bytes at `at`. */
+    pub(crate) static fn make(at : i64, len : i32) : Bytes {
+        return Bytes {
+            at: at,
+            len: len,
+        };
+    }
+
+    /** Whether there is anything to draw. */
+    pub(crate) fn some(self) : bool {
+        return self.len > 0;
+    }
+}
+
+/**
  * The program's interned text.
  *
  * A thin skin over `BytePool`: it holds the run and forwards the four
@@ -57,6 +82,18 @@ class Pool : Closeable {
     /** The run's address — what `drawBytes` and `Mem` read through. */
     pub(crate) fn base(self) : i64 {
         return self.bytes.base();
+    }
+
+    /**
+     * The interned span `(off, len)` as drawable bytes, or an empty span
+     * when `off` says nothing was interned.
+     */
+    pub(crate) fn span(self, off : i64, len : i32) : Bytes {
+        if (off < 0 || len <= 0) {
+            return Bytes::make(0, 0);
+        }
+
+        return Bytes::make(self.base() + off, len);
     }
 
     /** Bytes interned so far. */
@@ -107,23 +144,41 @@ class Pool : Closeable {
         if (n <= 0) {
             return -1;
         }
+
         if (n > (max as i64)) {
             n = max as i64;
         }
+
         if (!self.room(n)) {
             return -1;
         }
+
         if (n > STAGE_BYTES) {
             n = STAGE_BYTES;
         }
-        for (i of 0..n) {
-            let c : i32 = s.byteAt(from + i);
-            if (c < 32 || c > 126) {
-                c = UNKNOWN_BYTE;
+
+        // UTF-8 in, one drawable byte per character out: `Zürich` lands as
+        // `Zurich`, not as `Z??rich`. A sequence the cap cut short is
+        // dropped rather than misread as a shorter one.
+        let out : i64 = 0;
+        let i : i64 = 0;
+        while (i < n) {
+            let step : i64 = utf8Length(s.byteAt(from + i));
+            if (i + step > n) {
+                break;
             }
-            Mem::putByte(self.stage, i, c);
+
+            let cp : i32 = utf8Decode(s, from + i, step);
+            Mem::putByte(self.stage, out, drawable(cp));
+            out = out + 1;
+            i = i + step;
         }
-        return self.bytes.put(self.stage, n as i32);
+
+        if (out <= 0) {
+            return -1;
+        }
+
+        return self.bytes.put(self.stage, out as i32);
     }
 
     /** Intern `chars` UTF-16 code units from `src` as drawable bytes. */
@@ -132,12 +187,15 @@ class Pool : Closeable {
         if (n > max) {
             n = max;
         }
+
         if (n > (STAGE_BYTES as i32)) {
             n = STAGE_BYTES as i32;
         }
+
         if (n <= 0 || !self.room(n as i64)) {
             return -1;
         }
+
         wideInto(self.stage, src, n);
         return self.bytes.put(self.stage, n);
     }
@@ -152,6 +210,7 @@ class Pool : Closeable {
             h = h & 0x7FFFFFFFFFFF;
             i = i + 1;
         }
+
         return h;
     }
 
@@ -166,6 +225,7 @@ class Pool : Closeable {
         if (off < 0) {
             return needleLen == 0;
         }
+
         return containsAt(self.base() + off, len, needle, needleLen);
     }
 
@@ -176,6 +236,7 @@ class Pool : Closeable {
         if (blen < n) {
             n = blen;
         }
+
         let i : i64 = 0;
         while (i < (n as i64)) {
             let x : i32 = lower(Mem::byteAt(base, a + i));
@@ -184,16 +245,21 @@ class Pool : Closeable {
                 if (x < y) {
                     return -1;
                 }
+
                 return 1;
             }
+
             i = i + 1;
         }
+
         if (alen < blen) {
             return -1;
         }
+
         if (alen > blen) {
             return 1;
         }
+
         return 0;
     }
 
@@ -212,26 +278,30 @@ class Pool : Closeable {
             if (c == 92 || c == 47) { // '\' or '/'
                 return i;
             }
+
             i = i - 1;
         }
+
         return -1;
     }
 
     /** Release the run and the stage. */
-    fn close(self) : void {
+    fn close(mut self) : void {
         self.bytes.close();
         if (self.stage != 0) {
             Mem::release(self.stage);
+            self.stage = 0;
         }
     }
 }
 
 /**
- * Transcode `n` UTF-16 code units at `src` into drawable bytes at `dst`.
+ * Transcode `n` UTF-16 code units at `src` into drawable bytes at `dst`, one
+ * byte per unit so the length a caller already measured stays right.
  *
- * Anything outside the printable ASCII the glyph tables carry becomes
- * `?` — a name shown with an unknown character reads better than a name
- * with a hole in it. Split out of `putWide` because a caller that does
+ * Anything outside the printable ASCII the glyph tables carry is folded
+ * (`drawable`) — a name shown with a plain `e` for its `é` reads better
+ * than one with a hole in it. Split out of `putWide` because a caller that does
  * not yet know whether the name will be wanted transcodes it into a block
  * of its own first, and only appends once a row has taken it.
  */
@@ -239,12 +309,155 @@ fn wideInto(dst : i64, src : i64, n : i32) : void {
     for (i of 0..n) {
         let lo : i32 = Mem::byteAt(src, (i as i64) * 2);
         let hi : i32 = Mem::byteAt(src, (i as i64) * 2 + 1);
-        let c : i32 = lo | (hi << 8);
-        if (c < 32 || c > 126) {
-            c = UNKNOWN_BYTE;
-        }
-        Mem::putByte(dst, i as i64, c);
+        Mem::putByte(dst, i as i64, drawable(lo | (hi << 8)));
     }
+}
+
+/** How many bytes the UTF-8 sequence led by `lead` takes. */
+fn utf8Length(lead : i32) : i64 {
+    if (lead >= 0xF0) {
+        return 4;
+    }
+
+    if (lead >= 0xE0) {
+        return 3;
+    }
+
+    if (lead >= 0xC0) {
+        return 2;
+    }
+
+    return 1;
+}
+
+/**
+ * The code point of the `len`-byte UTF-8 sequence at `at` in `s`, or `-1`
+ * for one this program cannot draw anyway: past the Basic Multilingual
+ * Plane, or a stray continuation byte.
+ */
+fn utf8Decode(s : string, at : i64, len : i64) : i32 {
+    let lead : i32 = s.byteAt(at);
+    if (len == 4 || (lead >= 0x80 && lead < 0xC0)) {
+        return -1;
+    }
+
+    if (len == 3) {
+        let mid : i32 = s.byteAt(at + 1) & 0x3F;
+        let low : i32 = s.byteAt(at + 2) & 0x3F;
+        return ((lead & 0x0F) << 12) | (mid << 6) | low;
+    }
+
+    if (len == 2) {
+        return ((lead & 0x1F) << 6) | (s.byteAt(at + 1) & 0x3F);
+    }
+
+    return lead;
+}
+
+/**
+ * The byte a code point is drawn as: itself when the glyph tables carry it,
+ * the bare letter for an accented Latin one, the ASCII stand-in for the
+ * common punctuation, and `?` for the rest.
+ */
+fn drawable(cp : i32) : i32 {
+    if (cp >= 32 && cp <= 126) {
+        return cp;
+    }
+
+    if (cp == 0xA0) {
+        return 32;
+    }
+
+    if (cp >= 0xC0 && cp <= 0xFF) {
+        return latin(cp);
+    }
+
+    if (cp >= 0x2010 && cp <= 0x2015) {
+        return 45; // '-'
+    }
+
+    if (cp == 0x2018 || cp == 0x2019) {
+        return 39; // '\''
+    }
+
+    if (cp == 0x201C || cp == 0x201D) {
+        return 34; // '"'
+    }
+
+    return UNKNOWN_BYTE;
+}
+
+/** The unaccented letter behind a Latin-1 one, `U+00C0` to `U+00FF`. */
+fn latin(cp : i32) : i32 {
+    if (cp <= 0xC5) {
+        return 65; // A
+    }
+
+    if (cp == 0xC7) {
+        return 67; // C
+    }
+
+    if (cp >= 0xC8 && cp <= 0xCB) {
+        return 69; // E
+    }
+
+    if (cp >= 0xCC && cp <= 0xCF) {
+        return 73; // I
+    }
+
+    if (cp == 0xD1) {
+        return 78; // N
+    }
+
+    if ((cp >= 0xD2 && cp <= 0xD6) || cp == 0xD8) {
+        return 79; // O
+    }
+
+    if (cp >= 0xD9 && cp <= 0xDC) {
+        return 85; // U
+    }
+
+    if (cp == 0xDD) {
+        return 89; // Y
+    }
+
+    if (cp == 0xDF) {
+        return 115; // s
+    }
+
+    if (cp >= 0xE0 && cp <= 0xE5) {
+        return 97; // a
+    }
+
+    if (cp == 0xE7) {
+        return 99; // c
+    }
+
+    if (cp >= 0xE8 && cp <= 0xEB) {
+        return 101; // e
+    }
+
+    if (cp >= 0xEC && cp <= 0xEF) {
+        return 105; // i
+    }
+
+    if (cp == 0xF1) {
+        return 110; // n
+    }
+
+    if ((cp >= 0xF2 && cp <= 0xF6) || cp == 0xF8) {
+        return 111; // o
+    }
+
+    if (cp >= 0xF9 && cp <= 0xFC) {
+        return 117; // u
+    }
+
+    if (cp == 0xFD || cp == 0xFF) {
+        return 121; // y
+    }
+
+    return UNKNOWN_BYTE;
 }
 
 /**
@@ -261,9 +474,11 @@ fn containsAt(hay : i64, len : i32, needle : i64, needleLen : i32) : bool {
     if (needleLen == 0) {
         return true;
     }
+
     if (needleLen > len) {
         return false;
     }
+
     let start : i32 = 0;
     while (start <= len - needleLen) {
         let i : i32 = 0;
@@ -274,13 +489,17 @@ fn containsAt(hay : i64, len : i32, needle : i64, needleLen : i32) : bool {
             if (a != b) {
                 hit = false;
             }
+
             i = i + 1;
         }
+
         if (hit) {
             return true;
         }
+
         start = start + 1;
     }
+
     return false;
 }
 
@@ -289,5 +508,6 @@ fn lower(c : i32) : i32 {
     if (c >= 65 && c <= 90) {
         return c + 32;
     }
+
     return c;
 }

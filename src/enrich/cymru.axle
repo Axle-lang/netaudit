@@ -28,8 +28,6 @@ use std::text::StringBuilder;
 
 /** ASCII `|`, the field separator every answer in this zone uses. */
 const BAR : i32 = 124;
-/** Longest AS name kept. */
-const CYMRU_NAME_MAX : i32 = 48;
 
 /**
  * The zone name that answers "which network announces this address".
@@ -50,15 +48,18 @@ fn originName(hosts : Hosts, h : i32) : string {
             sb.append(".");
             i = i - 1;
         }
+
         sb.append("origin6.asn.cymru.com");
         return sb.toString();
     }
+
     let i : i32 = 3;
     while (i >= 0) {
         sb.appendI32(Mem::byteAt(base, i as i64));
         sb.append(".");
         i = i - 1;
     }
+
     sb.append("origin.asn.cymru.com");
     return sb.toString();
 }
@@ -77,6 +78,7 @@ fn nibbleChar(v : i32) : i32 {
     if (v < 10) {
         return 48 + v;
     }
+
     return 97 + v - 10;
 }
 
@@ -93,9 +95,17 @@ fn originAsn(answer : string) : i32 {
     let v : i32 = 0;
     let seen : bool = false;
     let i : i64 = 0;
+    let digits : i32 = 0;
     while (i < n) {
         let c : i32 = answer.byteAt(i);
+        // Nine digits at most: an AS number is 32 bits unsigned, and the
+        // ones past `i32` are reserved, so a longer run is not one.
+        if (c >= 48 && c <= 57 && digits == 9) {
+            return 0;
+        }
+
         if (c >= 48 && c <= 57) {
+            digits = digits + 1;
             v = v * 10 + (c - 48);
             seen = true;
             i = i + 1;
@@ -105,6 +115,7 @@ fn originAsn(answer : string) : i32 {
             i = i + 1;
         }
     }
+
     return v;
 }
 
@@ -120,6 +131,7 @@ fn takeName(hosts : Hosts, pool : Pool, h : i32, asn : i32, answer : string) : b
     if (from < 0) {
         return false;
     }
+
     let sb : StringBuilder = new StringBuilder();
     sb.append("AS");
     sb.appendI32(asn);
@@ -127,11 +139,12 @@ fn takeName(hosts : Hosts, pool : Pool, h : i32, asn : i32, answer : string) : b
     let n : i64 = answer.byteLength;
     let taken : i32 = 0;
     let i : i64 = from;
-    while (i < n && taken < CYMRU_NAME_MAX) {
+    while (i < n && taken < ORG_MAX) {
         let c : i32 = answer.byteAt(i);
         if (c < 32 || c > 126) {
             c = 63; // '?'
         }
+
         sb.appendChar(c);
         taken = taken + 1;
         i = i + 1;
@@ -141,6 +154,7 @@ fn takeName(hosts : Hosts, pool : Pool, h : i32, asn : i32, answer : string) : b
     if (off < 0) {
         return false;
     }
+
     hosts.netOff[h] = off;
     hosts.netLen[h] = (pool.used() - off) as i32;
     hosts.asn[h] = asn;
@@ -162,12 +176,15 @@ fn fieldStart(answer : string, want : i32) : i64 {
                 while (at < n && answer.byteAt(at) == 32) {
                     at = at + 1;
                 }
+
                 if (at >= n) {
                     return -1;
                 }
+
                 return at;
             }
         }
     }
+
     return -1;
 }

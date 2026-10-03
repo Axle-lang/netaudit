@@ -11,7 +11,7 @@
 //
 // # Why the failure is a value and not an exception
 //
-// Both functions catch. A raise here would have to cross the thunk and be
+// Both lookups catch. A raise here would have to cross the thunk and be
 // re-stashed for the `join` to re-raise, which works — but it also makes the
 // `spawn` itself a throwing call, so every caller has to carry an error set
 // for an exception that cannot happen until the join. The caller's job is to
@@ -48,14 +48,4 @@ fn post(url : string, body : string) : string {
  */
 fn idle() : string {
     return "";
-}
-
-/** GET `url` and answer the response body, or the empty string. */
-fn get(url : string) : string {
-    try {
-        let client : HttpClient = new HttpClient();
-        return client.get(url).body();
-    } catch e : IOException {
-        return "";
-    }
 }
