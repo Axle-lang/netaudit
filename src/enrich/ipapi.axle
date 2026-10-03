@@ -15,16 +15,34 @@
 use smalt::{Scratch, Mem};
 use crate::enrich::scan;
 use crate::enrich::queue;
-use crate::model::hosts::{Hosts, Look, NameSource, FLAG_PROXY, FLAG_HOSTING, FLAG_MOBILE, HOST_MAX, ORG_MAX, PLACE_MAX};
-use crate::model::pool;
+use crate::model::hosts::{Hosts, Look, NameSource, HOST_MAX, ORG_MAX, PLACE_MAX};
+use crate::model::hosts::{FLAG_PROXY, FLAG_HOSTING, FLAG_MOBILE};
+use crate::model::pool::Pool;
+use crate::model::world::World;
 use crate::fmt;
+
+/**
+ * One object of the response: the body it sits in, and where it starts and
+ * ends. Every reader below takes this one value instead of the same four
+ * arguments in the same order.
+ */
+struct Obj {
+    /** The whole response. */
+    pub(crate) body : string;
+    /** The object's opening brace. */
+    pub(crate) from : i64;
+    /** Just past its closing brace. */
+    pub(crate) to : i64;
+    /** The body's length, the bound every scan is held to. */
+    pub(crate) len : i64;
+}
 
 /**
  * Fold a batch response into the rows it answers for. `true` when at least
  * one row learned something — a response that parses but answers for nothing
  * is a failure the caller should back off from, not a success with no effect.
  */
-fn absorb(q : Queue, hosts : Hosts, pool : Pool, body : string, s : Scratch) : bool {
+fn absorb(q : Queue, w : World, body : string, s : Scratch) : bool {
     let len : i64 = body.byteLength;
     let at : i64 = 0;
     let i : i32 = 0;
@@ -35,29 +53,40 @@ fn absorb(q : Queue, hosts : Hosts, pool : Pool, body : string, s : Scratch) : b
         if (from < 0) {
             i = q.sentLen;
         } else {
-            let to : i64 = scan::objectEnd(body, from, len);
+            let o : Obj = Obj {
+                body: body,
+                from: from,
+                to: scan::objectEnd(body, from, len),
+                len: len,
+            };
             let h : i32 = q.sent[i];
-            if (h >= 0 && verifies(body, from, to, len, hosts, h, s)) {
-                one(hosts, pool, body, from, to, len, h);
+            if (h >= 0 && verifies(o, w.hosts, h, s)) {
+                one(o, w, h);
                 landed = landed + 1;
             }
-            at = to;
+
+            at = o.to;
             i = i + 1;
         }
     }
 
-    // Anything the response did not cover stays unanswered rather than
-    // being marked done: a truncated reply must not leave rows claiming a
-    // lookup came back empty when it never came back at all.
-    for (k of 0..q.sentLen) {
-        let h : i32 = q.sent[k];
-        if (h >= 0 && hosts.look[h] == Look::Sent) {
-            hosts.look[h] = Look::Failed;
-        }
-    }
-    q.sentLen = 0;
+    // What the response did not cover is left `Sent`, for the caller to
+    // settle: `Queue::succeeded` marks it failed when the batch as a whole
+    // answered, and `Queue::failed` puts it back in line when it did not. A
+    // body that never arrived must not be read as "every address in it came
+    // back empty" — that is a network that was down, not a verdict.
     q.resolved = q.resolved + landed;
     return landed > 0;
+}
+
+/** Where the value of `key` starts in `o`, or `-1`. */
+fn valueOf(o : Obj, key : string) : i64 {
+    return scan::valueStart(o.body, scan::field(o.body, o.from, o.to, key), o.len);
+}
+
+/** Just past the end of the value of `key` in `o`, or `-1`. */
+fn valueEndOf(o : Obj, key : string) : i64 {
+    return scan::valueEnd(o.body, scan::field(o.body, o.from, o.to, key), o.len);
 }
 
 /**
@@ -65,70 +94,65 @@ fn absorb(q : Queue, hosts : Hosts, pool : Pool, body : string, s : Scratch) : b
  * comparison is against the same formatting the request was built from, so
  * the two sides cannot disagree about how an address is spelled.
  */
-fn verifies(
-    body : string,
-    from : i64,
-    to : i64,
-    len : i64,
-    hosts : Hosts,
-    h : i32,
-    s : Scratch
-) : bool {
-    let at : i64 = scan::field(body, from, to, "query");
-    let vs : i64 = scan::valueStart(body, at, len);
-    let ve : i64 = scan::valueEnd(body, at, len);
+fn verifies(o : Obj, hosts : Hosts, h : i32, s : Scratch) : bool {
+    let vs : i64 = valueOf(o, "query");
+    let ve : i64 = valueEndOf(o, "query");
     if (vs < 0 || ve <= vs) {
         return false;
     }
+
     s.reset();
     fmt::address(s, hosts.addrAt(h), hosts.family[h]);
     if (ve - vs != (s.length() as i64)) {
         return false;
     }
+
     for (i of 0..s.length()) {
-        if (body.byteAt(vs + (i as i64)) != Mem::byteAt(s.at(), i as i64)) {
+        if (o.body.byteAt(vs + (i as i64)) != Mem::byteAt(s.at(), i as i64)) {
             return false;
         }
     }
+
     return true;
 }
 
 /** Fold one object into row `h`. */
-fn one(hosts : Hosts, pool : Pool, body : string, from : i64, to : i64, len : i64, h : i32) : void {
-    if (!succeeded(body, from, to, len)) {
+fn one(o : Obj, w : World, h : i32) : void {
+    let hosts : Hosts = w.hosts;
+    if (!succeeded(o)) {
         hosts.look[h] = Look::Failed;
         return;
     }
 
-    network(hosts, pool, body, from, to, len, h);
+    network(o, w, h);
 
-    hosts.orgOff[h] = intern(pool, body, from, to, len, "isp", ORG_MAX);
-    hosts.orgLen[h] = lenOf(pool, hosts.orgOff[h]);
-    hosts.countryOff[h] = intern(pool, body, from, to, len, "country", PLACE_MAX);
-    hosts.countryLen[h] = lenOf(pool, hosts.countryOff[h]);
-    hosts.ccOff[h] = intern(pool, body, from, to, len, "countryCode", 2);
-    hosts.ccLen[h] = lenOf(pool, hosts.ccOff[h]);
-    hosts.cityOff[h] = intern(pool, body, from, to, len, "city", PLACE_MAX);
-    hosts.cityLen[h] = lenOf(pool, hosts.cityOff[h]);
+    hosts.orgOff[h] = intern(o, w.pool, "isp", ORG_MAX);
+    hosts.orgLen[h] = lenOf(w.pool, hosts.orgOff[h]);
+    hosts.countryOff[h] = intern(o, w.pool, "country", PLACE_MAX);
+    hosts.countryLen[h] = lenOf(w.pool, hosts.countryOff[h]);
+    hosts.ccOff[h] = intern(o, w.pool, "countryCode", 2);
+    hosts.ccLen[h] = lenOf(w.pool, hosts.ccOff[h]);
+    hosts.cityOff[h] = intern(o, w.pool, "city", PLACE_MAX);
+    hosts.cityLen[h] = lenOf(w.pool, hosts.cityOff[h]);
 
-    let name : i64 = intern(pool, body, from, to, len, "reverse", HOST_MAX);
-    hosts.name(h, name, lenOf(pool, name), NameSource::Ptr);
+    let name : i64 = intern(o, w.pool, "reverse", HOST_MAX);
+    hosts.name(h, name, lenOf(w.pool, name), NameSource::Ptr);
 
-    flag(hosts, body, from, to, len, h, "proxy", FLAG_PROXY);
-    flag(hosts, body, from, to, len, h, "hosting", FLAG_HOSTING);
-    flag(hosts, body, from, to, len, h, "mobile", FLAG_MOBILE);
+    flag(o, hosts, h, "proxy", FLAG_PROXY);
+    flag(o, hosts, h, "hosting", FLAG_HOSTING);
+    flag(o, hosts, h, "mobile", FLAG_MOBILE);
 
     hosts.look[h] = Look::Done;
 }
 
 /** Whether the object's `status` is `success`. */
-fn succeeded(body : string, from : i64, to : i64, len : i64) : bool {
-    let at : i64 = scan::field(body, from, to, "status");
-    let vs : i64 = scan::valueStart(body, at, len);
+fn succeeded(o : Obj) : bool {
+    let vs : i64 = valueOf(o, "status");
     if (vs < 0) {
         return false;
     }
-    return scan::matches(body, vs, len, "success");
+
+    return scan::matches(o.body, vs, o.len, "success");
 }
 
 /**
@@ -143,39 +167,40 @@ fn succeeded(body : string, from : i64, to : i64, len : i64) : bool {
  * empty — which it does for addresses inside a registry it cannot see —
  * `asname` is taken instead, and the row says the number it has and no more.
  */
-fn network(hosts : Hosts, pool : Pool, body : string, from : i64, to : i64, len : i64, h : i32) : void {
-    let at : i64 = scan::field(body, from, to, "as");
-    let vs : i64 = scan::valueStart(body, at, len);
-    let ve : i64 = scan::valueEnd(body, at, len);
+fn network(o : Obj, w : World, h : i32) : void {
+    let hosts : Hosts = w.hosts;
+    let vs : i64 = valueOf(o, "as");
+    let ve : i64 = valueEndOf(o, "as");
 
     if (vs >= 0 && ve > vs) {
-        hosts.netOff[h] = pool.putRange(body, vs, ve, ORG_MAX);
-        hosts.netLen[h] = lenOf(pool, hosts.netOff[h]);
-        if (scan::matches(body, vs, len, "AS")) {
-            let n : i32 = scan::digits(body, vs + 2, len);
+        hosts.netOff[h] = w.pool.putRange(o.body, vs, ve, ORG_MAX);
+        hosts.netLen[h] = lenOf(w.pool, hosts.netOff[h]);
+        if (scan::matches(o.body, vs, o.len, "AS")) {
+            let n : i32 = scan::digits(o.body, vs + 2, o.len);
             if (n > 0) {
                 hosts.asn[h] = n;
             }
         }
+
         return;
     }
 
-    let off : i64 = intern(pool, body, from, to, len, "asname", ORG_MAX);
+    let off : i64 = intern(o, w.pool, "asname", ORG_MAX);
     if (off >= 0) {
         hosts.netOff[h] = off;
-        hosts.netLen[h] = lenOf(pool, off);
+        hosts.netLen[h] = lenOf(w.pool, off);
     }
 }
 
 /** Intern the string value of `key`, or `-1` when it is absent or empty. */
-fn intern(pool : Pool, body : string, from : i64, to : i64, len : i64, key : string, max : i32) : i64 {
-    let at : i64 = scan::field(body, from, to, key);
-    let vs : i64 = scan::valueStart(body, at, len);
-    let ve : i64 = scan::valueEnd(body, at, len);
+fn intern(o : Obj, pool : Pool, key : string, max : i32) : i64 {
+    let vs : i64 = valueOf(o, key);
+    let ve : i64 = valueEndOf(o, key);
     if (vs < 0 || ve <= vs) {
         return -1;
     }
-    return pool.putRange(body, vs, ve, max);
+
+    return pool.putRange(o.body, vs, ve, max);
 }
 
 /**
@@ -188,13 +213,13 @@ fn lenOf(pool : Pool, off : i64) : i32 {
     if (off < 0) {
         return 0;
     }
+
     return (pool.used() - off) as i32;
 }
 
 /** Raise `bit` on row `h` when the object's `key` is `true`. */
-fn flag(hosts : Hosts, body : string, from : i64, to : i64, len : i64, h : i32, key : string, bit : i32) : void {
-    let at : i64 = scan::field(body, from, to, key);
-    if (scan::isTrue(body, at, len)) {
+fn flag(o : Obj, hosts : Hosts, h : i32, key : string, bit : i32) : void {
+    if (scan::isTrue(o.body, scan::field(o.body, o.from, o.to, key), o.len)) {
         hosts.raise(h, bit);
     }
 }

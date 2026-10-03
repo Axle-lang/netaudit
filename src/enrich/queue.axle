@@ -4,13 +4,13 @@
 // limited, and a monitoring tool that hammers a public endpoint deserves to
 // be blocked by it. So this file is mostly restraint:
 //
-//   · **one batch in flight**, never two;
-//   · **up to a hundred addresses per batch**, which is the service's own
+//   - **one batch in flight**, never two;
+//   - **up to a hundred addresses per batch**, which is the service's own
 //     limit and turns a hundred round-trips into one;
-//   · **a floor between batches**, well under the published rate;
-//   · **an exponential back-off** on failure, so a network that is down or a
+//   - **a floor between batches**, under the published rate;
+//   - **an exponential back-off** on failure, so a network that is down or a
 //     service that is angry is not asked again immediately;
-//   · **a permanent session cache** — an address is asked about once, ever.
+//   - **a permanent session cache** — an address is answered once, ever.
 //     That is what `Hosts::look` is, and it is why the queue can be this
 //     simple: it never has to remember what it has already asked.
 //
@@ -21,14 +21,17 @@
 
 use smalt::{Scratch, Mem};
 use crate::model::hosts::{Hosts, Look};
-use crate::model::pool;
 use crate::fmt;
 use std::text::StringBuilder;
 
 /** Addresses per batch — the service's own ceiling. */
 const BATCH_MAX : i32 = 100;
-/** Shortest gap between two batches. */
-const BATCH_GAP_MS : i64 = 3000;
+/**
+ * Shortest gap between two batches. The service allows fifteen batch
+ * requests a minute; this is thirteen and a bit, so a long backlog drains
+ * without ever meeting a 429.
+ */
+const BATCH_GAP_MS : i64 = 4500;
 /** How long to wait after the first failure. */
 const BACKOFF_MS : i64 = 15000;
 /** Ceiling on the doubling back-off. */
@@ -57,39 +60,24 @@ enum WhoisKind : i32 {
  * used and nothing else.
  */
 fn batchUrl() : string {
-    return "http://ip-api.com/batch?fields=status,message,country,countryCode,city,isp,org,as,asname,reverse,mobile,proxy,hosting,query";
+    return "http://ip-api.com/batch?fields=status,country,countryCode,city,isp,as,asname,reverse,mobile,proxy,hosting,query";
 }
 
 /** What is outstanding, and when the next batch may go. */
 class Queue {
-    pub(crate) sent : i32[],
-    pub(crate) sentLen : i32,
-    pub(crate) inFlight : bool,
-    nextDueMs : i64,
-    backoffMs : i64,
-    pub(crate) resolved : i32,
-    pub(crate) lastError : bool,
+    pub(crate) sent : i32[] = malloc<i32>(BATCH_MAX as i64),
+    pub(crate) sentLen : i32 = 0,
+    pub(crate) inFlight : bool = false,
+    nextDueMs : i64 = 0,
+    backoffMs : i64 = 0,
+    pub(crate) resolved : i32 = 0,
+    pub(crate) lastError : bool = false,
 
-    pub(crate) whoisHost : i32,
-    pub(crate) whoisKind : WhoisKind,
-    pub(crate) whoisAsn : i32,
-    pub(crate) whoisInFlight : bool,
-    whoisDueMs : i64,
-
-    constructor() {
-        self.sent = malloc<i32>(BATCH_MAX as i64);
-        self.sentLen = 0;
-        self.inFlight = false;
-        self.nextDueMs = 0;
-        self.backoffMs = 0;
-        self.resolved = 0;
-        self.lastError = false;
-        self.whoisHost = -1;
-        self.whoisKind = WhoisKind::Origin;
-        self.whoisAsn = 0;
-        self.whoisInFlight = false;
-        self.whoisDueMs = 0;
-    }
+    pub(crate) whoisHost : i32 = -1,
+    pub(crate) whoisKind : WhoisKind = WhoisKind::Origin,
+    pub(crate) whoisAsn : i32 = 0,
+    pub(crate) whoisInFlight : bool = false,
+    whoisDueMs : i64 = 0,
 
     /** Whether a registry lookup may go out right now. */
     pub(crate) fn whoisReady(self, nowMs : i64) : bool {
@@ -108,12 +96,24 @@ class Queue {
         return !self.inFlight && nowMs >= self.nextDueMs;
     }
 
-    /** Note that a batch came back cleanly. */
-    pub(crate) fn succeeded(mut self, nowMs : i64) : void {
+    /**
+     * Note that a batch came back cleanly. An address it did not answer for
+     * is marked failed: the service did reply, so silence about one address
+     * is an answer about that address, and asking again would get the same.
+     */
+    pub(crate) fn succeeded(mut self, hosts : Hosts, nowMs : i64) : void {
         self.inFlight = false;
         self.backoffMs = 0;
         self.lastError = false;
         self.nextDueMs = nowMs + BATCH_GAP_MS;
+        for (i of 0..self.sentLen) {
+            let h : i32 = self.sent[i];
+            if (h >= 0 && hosts.look[h] == Look::Sent) {
+                hosts.look[h] = Look::Failed;
+            }
+        }
+
+        self.sentLen = 0;
     }
 
     /**
@@ -131,9 +131,11 @@ class Queue {
         } else {
             self.backoffMs = self.backoffMs * 2;
         }
+
         if (self.backoffMs > BACKOFF_MAX_MS) {
             self.backoffMs = BACKOFF_MAX_MS;
         }
+
         self.nextDueMs = nowMs + self.backoffMs;
 
         for (i of 0..self.sentLen) {
@@ -142,6 +144,7 @@ class Queue {
                 hosts.look[h] = Look::New;
             }
         }
+
         self.sentLen = 0;
     }
 }
@@ -165,6 +168,7 @@ fn build(q : Queue, hosts : Hosts, s : Scratch) : string {
             if (q.sentLen > 0) {
                 sb.append(",");
             }
+
             sb.append("\"");
             appendAddress(sb, hosts, h, s);
             sb.append("\"");
@@ -172,6 +176,7 @@ fn build(q : Queue, hosts : Hosts, s : Scratch) : string {
             q.sent[q.sentLen] = h;
             q.sentLen = q.sentLen + 1;
         }
+
         h = h + 1;
     }
 
@@ -186,6 +191,7 @@ fn pending(hosts : Hosts) : bool {
             return true;
         }
     }
+
     return false;
 }
 
@@ -207,5 +213,6 @@ fn troubleNote(q : Queue) : string {
     if (!q.lastError) {
         return "";
     }
-    return "The address lookup service is not answering — names and scores will fill in when it does.";
+
+    return "The lookup service is not answering; names and scores fill in when it does.";
 }

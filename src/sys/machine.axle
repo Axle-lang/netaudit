@@ -1,0 +1,34 @@
+// sys/machine — everything that reads the operating system, as one value.
+//
+// Four readers: the process list, the connection tables, the resolver's
+// cache, and the record of which of the three readings is running. The loop
+// hands them on together because they are consulted together — a refresh
+// reads two of them and sets the third's badge — and the UI only ever wants
+// the last two, to explain itself.
+//
+// Each type here resolves through the port (`axle.toml`'s `[port.win32]`), so
+// this file names no operating system any more than its callers do.
+
+use crate::sys::procs::Procs;
+use crate::sys::conn::Conns;
+use crate::sys::dnscache::DnsCache;
+use crate::sys::tiers::Tiers;
+
+/** The machine, as this program reads it. */
+class Machine {
+    /** Process names, and where each binary lives. */
+    pub(crate) procs : Procs = new Procs(),
+    /** The per-process TCP and UDP tables. */
+    pub(crate) conns : Conns = new Conns(),
+    /** The resolver's cache, inverted to address to name. */
+    pub(crate) dns : DnsCache = new DnsCache(),
+    /** Which of the three readings is running, and why the others are not. */
+    pub(crate) tiers : Tiers = new Tiers(),
+
+    /** Release the readers' buffers. */
+    pub(crate) fn dispose(mut self) : void {
+        self.dns.dispose();
+        self.conns.dispose();
+        self.procs.dispose();
+    }
+}

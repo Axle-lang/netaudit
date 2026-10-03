@@ -3,7 +3,7 @@
 // A browser is thirty processes and one program. A reader auditing what
 // leaves this machine wants "the browser talked to 37 addresses", not
 // thirty rows that each hold a fraction of the answer and none of which can
-// be judged on its kept. So the group key is the **image path**, and every
+// be judged on its own. So the group key is the **image path**, and every
 // pid running that image folds into it.
 //
 // The path, not the name: two different binaries called `updater.exe` are
@@ -40,51 +40,30 @@ const MAX_PIDS : i32 = 4096;
  * few thousand slots.
  */
 class Groups {
-    pub(crate) key : i64[],
-    pub(crate) pathOff : i64[],
-    pub(crate) pathLen : i32[],
-    pub(crate) nameOff : i64[],
-    pub(crate) nameLen : i32[],
-    hasPath : i32[],
+    pub(crate) key : i64[] = malloc<i64>(MAX_GROUPS as i64),
+    pub(crate) pathOff : i64[] = malloc<i64>(MAX_GROUPS as i64),
+    pub(crate) pathLen : i32[] = malloc<i32>(MAX_GROUPS as i64),
+    pub(crate) nameOff : i64[] = malloc<i64>(MAX_GROUPS as i64),
+    pub(crate) nameLen : i32[] = malloc<i32>(MAX_GROUPS as i64),
+    pub(crate) wideOff : i64[] = malloc<i64>(MAX_GROUPS as i64),
+    pub(crate) wideChars : i32[] = malloc<i32>(MAX_GROUPS as i64),
+    hasPath : i32[] = malloc<i32>(MAX_GROUPS as i64),
 
-    pub(crate) pids : i32[],
-    pub(crate) endpoints : i32[],
-    pub(crate) live : i32[],
-    pub(crate) flagged : i32[],
-    pub(crate) worst : i32[],
-    rateIn : i64[],
-    rateOut : i64[],
-    bytesIn : i64[],
-    bytesOut : i64[],
-    pub(crate) lastMs : i64[],
-    expanded : i32[],
+    pub(crate) pids : i32[] = malloc<i32>(MAX_GROUPS as i64),
+    pub(crate) endpoints : i32[] = malloc<i32>(MAX_GROUPS as i64),
+    pub(crate) live : i32[] = malloc<i32>(MAX_GROUPS as i64),
+    pub(crate) flagged : i32[] = malloc<i32>(MAX_GROUPS as i64),
+    pub(crate) worst : i32[] = malloc<i32>(MAX_GROUPS as i64),
+    rateIn : i64[] = malloc<i64>(MAX_GROUPS as i64),
+    rateOut : i64[] = malloc<i64>(MAX_GROUPS as i64),
+    bytesIn : i64[] = malloc<i64>(MAX_GROUPS as i64),
+    bytesOut : i64[] = malloc<i64>(MAX_GROUPS as i64),
+    pub(crate) lastMs : i64[] = malloc<i64>(MAX_GROUPS as i64),
+    expanded : i32[] = malloc<i32>(MAX_GROUPS as i64),
 
-    pub(crate) count : i32,
-    index : SlotIndex,
-    seenPids : SlotIndex,
-
-    constructor() {
-        self.key = malloc<i64>(MAX_GROUPS as i64);
-        self.pathOff = malloc<i64>(MAX_GROUPS as i64);
-        self.pathLen = malloc<i32>(MAX_GROUPS as i64);
-        self.nameOff = malloc<i64>(MAX_GROUPS as i64);
-        self.nameLen = malloc<i32>(MAX_GROUPS as i64);
-        self.hasPath = malloc<i32>(MAX_GROUPS as i64);
-        self.pids = malloc<i32>(MAX_GROUPS as i64);
-        self.endpoints = malloc<i32>(MAX_GROUPS as i64);
-        self.live = malloc<i32>(MAX_GROUPS as i64);
-        self.flagged = malloc<i32>(MAX_GROUPS as i64);
-        self.worst = malloc<i32>(MAX_GROUPS as i64);
-        self.rateIn = malloc<i64>(MAX_GROUPS as i64);
-        self.rateOut = malloc<i64>(MAX_GROUPS as i64);
-        self.bytesIn = malloc<i64>(MAX_GROUPS as i64);
-        self.bytesOut = malloc<i64>(MAX_GROUPS as i64);
-        self.lastMs = malloc<i64>(MAX_GROUPS as i64);
-        self.expanded = malloc<i32>(MAX_GROUPS as i64);
-        self.count = 0;
-        self.index = new SlotIndex(MAX_GROUPS * 2);
-        self.seenPids = new SlotIndex(MAX_PIDS * 2);
-    }
+    pub(crate) count : i32 = 0,
+    index : SlotIndex = new SlotIndex(MAX_GROUPS * 2),
+    seenPids : SlotIndex = new SlotIndex(MAX_PIDS * 2),
 
     /**
      * Start a tick: forget which pids have been counted, and zero the
@@ -111,6 +90,7 @@ class Groups {
         if (s < 0) {
             return -1;
         }
+
         let known : bool = procs.resolvePath(pool, s) == PathState::Known;
         let off : i64 = procs.nameOff[s];
         let len : i32 = procs.nameLen[s];
@@ -118,6 +98,7 @@ class Groups {
             off = procs.pathOff[s];
             len = procs.pathLen[s];
         }
+
         if (off < 0) {
             return -1;
         }
@@ -126,18 +107,27 @@ class Groups {
         if (known) {
             salt = 1;
         }
+
         let k : i64 = hashStep(pool.hash(off, len), salt);
         let g : i32 = self.index.get(k);
         if (g < 0) {
             g = self.mint(pool, k, off, len, known);
+            if (g >= 0 && known) {
+                // The pool is append-only, so the pid's span outlives the pid.
+                self.wideOff[g] = procs.wideOff[s];
+                self.wideChars[g] = procs.wideChars[s];
+            }
+
             if (g < 0) {
                 return -1;
             }
         }
+
         if (self.seenPids.get(pid) < 0) {
             self.seenPids.put(pid, g);
             self.pids[g] = self.pids[g] + 1;
         }
+
         return g;
     }
 
@@ -150,10 +140,12 @@ class Groups {
         if (self.count >= MAX_GROUPS) {
             return -1;
         }
+
         let kept : i64 = pool.put(pool.base() + off, len);
         if (kept < 0) {
             return -1;
         }
+
         let g : i32 = self.count;
         self.count = g + 1;
         self.key[g] = k;
@@ -161,8 +153,11 @@ class Groups {
         if (known) {
             self.hasPath[g] = 1;
         }
+
         self.pathOff[g] = kept;
         self.pathLen[g] = len;
+        self.wideOff[g] = -1;
+        self.wideChars[g] = 0;
 
         // The name shown on the row is the tail of the path; when there is
         // no path it is the whole span, which is already just a name.
@@ -192,6 +187,7 @@ class Groups {
     /** Clear the roll-ups so an endpoint sweep can accumulate into them. */
     pub(crate) fn beginRollup(mut self) : void {
         for (g of 0..self.count) {
+            self.lastMs[g] = 0;
             self.endpoints[g] = 0;
             self.live[g] = 0;
             self.flagged[g] = 0;
@@ -203,40 +199,35 @@ class Groups {
         }
     }
 
-    /** Fold one endpoint's readings into its group's totals. */
-    pub(crate) fn rollup(
-        mut self,
-        g : i32,
-        live : bool,
-        score : i32,
-        rateIn : i64,
-        rateOut : i64,
-        bytesIn : i64,
-        bytesOut : i64,
-        lastMs : i64
-    ) : void {
+    /** Fold endpoint `s`'s readings into group `g`'s totals. */
+    pub(crate) fn rollup(mut self, g : i32, e : Endpoints, s : i32) : void {
         if (g < 0 || g >= self.count) {
             return;
         }
+
         self.endpoints[g] = self.endpoints[g] + 1;
-        if (live) {
+        if (e.liveNow[s] > 0) {
             self.live[g] = self.live[g] + 1;
         }
+
         // `worst` ignores an unscored endpoint: a program whose lookups have
         // not come back yet must not read as safe, and must not read as
-        // dangerous either. The row shows `—` until something is known.
+        // dangerous either. The meter stays hollow until something is known.
+        let score : i32 = e.score[s];
         if (score >= 0 && (self.worst[g] < 0 || score < self.worst[g])) {
             self.worst[g] = score;
         }
+
         if (score >= 0 && score <= 2) {
             self.flagged[g] = self.flagged[g] + 1;
         }
-        self.rateIn[g] = self.rateIn[g] + rateIn;
-        self.rateOut[g] = self.rateOut[g] + rateOut;
-        self.bytesIn[g] = self.bytesIn[g] + bytesIn;
-        self.bytesOut[g] = self.bytesOut[g] + bytesOut;
-        if (lastMs > self.lastMs[g]) {
-            self.lastMs[g] = lastMs;
+
+        self.rateIn[g] = self.rateIn[g] + e.rateIn[s];
+        self.rateOut[g] = self.rateOut[g] + e.rateOut[s];
+        self.bytesIn[g] = self.bytesIn[g] + e.bytesIn[s];
+        self.bytesOut[g] = self.bytesOut[g] + e.bytesOut[s];
+        if (e.lastMs[s] > self.lastMs[g]) {
+            self.lastMs[g] = e.lastMs[s];
         }
     }
 
@@ -261,12 +252,13 @@ class Groups {
         }
     }
 
-    /** Open or close every group at once — the `*` key. */
+    /** Open or close every group at once — the `8` key. */
     pub(crate) fn setAll(mut self, open : bool) : void {
         let v : i32 = 0;
         if (open) {
             v = 1;
         }
+
         for (g of 0..self.count) {
             self.expanded[g] = v;
         }
@@ -294,5 +286,6 @@ fn mergeNote(hasPath : bool) : string {
     if (hasPath) {
         return "";
     }
-    return "grouped by name — Windows refused the image path";
+
+    return "grouped by name: Windows refused the image path";
 }

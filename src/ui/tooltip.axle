@@ -14,40 +14,41 @@
 // Its content is emitted through `ui/card`'s two-pass cursor — see that
 // file for why the lines are described rather than stored.
 
-use smalt::{Scratch, Fmt, Frame, Rect, BitmapFont};
+use smalt::Rect;
+use crate::ui::paint::Paint;
 use crate::ui::parts;
 use crate::ui::card;
-use crate::ui::card;
-use crate::app::App;
-use crate::model::pool;
+use crate::ui::card::Card;
+use crate::app::{App, Hot};
+use crate::session::Session;
+use crate::model::world::World;
 use crate::model::view::{View, RowKind};
-use crate::model::endpoints;
+use crate::model::endpoints::SocketKind;
 use crate::model::groups::{Groups, mergeNote};
 use crate::model::hosts::{Hosts, nameSource, lookNote};
-use crate::model::addr;
-use crate::sys::procs::{pathNote, PathState};
-use crate::sys::tiers::{Tier, TierState, Tiers, tierNote, tierReading};
-use crate::sys::dnscache;
-use crate::fmt;
-use crate::ui::card;
-use crate::theme::{WIN_W, WIN_H, STATUS_H, C_TIP, C_LINE, C_TEXT, C_DIM, C_FAINT};
+use crate::model::addr::{reachWord, Reach};
+use crate::sys::tiers::{Tier, TierState, Tiers, tierName, tierNote, tierReading};
+use crate::theme::{C_TIP, C_LINE, C_TEXT, C_DIM, C_FAINT};
+
+/** How far the card sits from the pointer, and from the window's edges. */
+const TIP_GAP : i32 = 12;
 
 /** A program: its full path, and how it was identified. */
-fn forGroup(c : Card, f : Frame, ui : BitmapFont, pool : Pool, g : Groups, gi : i32) : void {
+fn forGroup(c : Card, p : Paint, ss : Session, gi : i32) : void {
+    let w : World = ss.w;
+    let g : Groups = w.groups;
+    card::strongSpan(c, p, w.groupName(gi), C_TEXT);
+
     if (g.identified(gi)) {
-        card::spanLine(c, f, ui, pool, g.pathOff[gi], g.pathLen[gi], C_DIM);
-        card::line(
-            c,
-            f,
-            ui,
-            "Click to fold. O opens the folder with the binary selected.",
-            C_FAINT
-        );
+        card::spanLine(c, p, w.groupPath(gi), C_DIM);
+        card::line(c, p, "The chevron folds it.", C_FAINT);
+        card::line(c, p, "O opens its folder with the binary selected.", C_FAINT);
         return;
     }
-    card::spanLine(c, f, ui, pool, g.nameOff[gi], g.nameLen[gi], C_TEXT);
-    card::line(c, f, ui, mergeNote(false), C_FAINT);
-    card::line(c, f, ui, pathNote(PathState::Denied), C_FAINT);
+
+    card::line(c, p, mergeNote(false), C_DIM);
+    card::line(c, p, "Usually another account's service.", C_FAINT);
+    card::line(c, p, "Run elevated, its path reads too.", C_FAINT);
 }
 
 /**
@@ -55,128 +56,148 @@ fn forGroup(c : Card, f : Frame, ui : BitmapFont, pool : Pool, g : Groups, gi : 
  * network's full title, the place, where the name came from, and why the
  * lookup has not answered when it has not.
  */
-fn forEndpoint(c : Card, f : Frame, ui : BitmapFont, pool : Pool, e : Endpoints, hosts : Hosts, s : i32) : void {
-    let h : i32 = e.host[s];
+fn forEndpoint(c : Card, p : Paint, ss : Session, s : i32) : void {
+    let w : World = ss.w;
+    let h : i32 = w.eps.host[s];
     if (h < 0) {
         return;
     }
-    card::spanLine(c, f, ui, pool, hosts.nameOff[h], hosts.nameLen[h], C_TEXT);
-    card::spanLine(c, f, ui, pool, hosts.netOff[h], hosts.netLen[h], C_DIM);
-    card::spanLine(c, f, ui, pool, hosts.orgOff[h], hosts.orgLen[h], C_DIM);
-    card::spanLine(c, f, ui, pool, hosts.cityOff[h], hosts.cityLen[h], C_FAINT);
-    card::spanLine(c, f, ui, pool, hosts.countryOff[h], hosts.countryLen[h], C_FAINT);
-    card::line(c, f, ui, nameSource(hosts.nameFrom[h]), C_FAINT);
-    card::line(c, f, ui, lookNote(hosts.look[h]), C_FAINT);
-    if (hosts.nameOff[h] < 0 && hosts.netOff[h] < 0) {
-        card::line(c, f, ui, reachWord(hosts.reach[h]), C_FAINT);
+
+    let hosts : Hosts = w.hosts;
+    card::strongSpan(c, p, w.hostName(h), C_TEXT);
+    card::spanLine(c, p, w.network(h), C_DIM);
+    if (!sameAsNetwork(w, h)) {
+        card::spanLine(c, p, w.operator(h), C_DIM);
     }
-    card::line(c, f, ui, "Enter opens the full card.", C_FAINT);
+
+    card::spanLine(c, p, w.city(h), C_FAINT);
+    card::spanLine(c, p, w.country(h), C_FAINT);
+
+    card::line(c, p, nameSource(hosts.nameFrom[h]), C_FAINT);
+    card::line(c, p, lookNote(hosts.look[h]), C_FAINT);
+
+    if (!w.hostName(h).some() && !w.network(h).some()) {
+        if (w.eps.kind[s] == SocketKind::Listen && hosts.reach[h] == Reach::None) {
+            card::line(c, p, "listening on every interface", C_FAINT);
+        } else {
+            card::line(c, p, reachWord(hosts.reach[h]), C_FAINT);
+        }
+    }
+
+    card::line(c, p, "Enter opens the full card.", C_FAINT);
+}
+
+/**
+ * Whether host `h`'s operator is already part of its network's title. It
+ * usually is, and said twice it is a line the reader has to compare for
+ * nothing.
+ */
+fn sameAsNetwork(w : World, h : i32) : bool {
+    let hosts : Hosts = w.hosts;
+    let org = w.operator(h);
+    return w.pool.contains(hosts.netOff[h], hosts.netLen[h], org.at, org.len);
 }
 
 /** A tier badge: the one card that is not about a row. */
-fn forTier(
-    c : Card,
-    f : Frame,
-    ui : BitmapFont,
-    s : Scratch,
-    t : Tiers,
-    dns : DnsCache,
-    which : Tier
-) : void {
+fn forTier(c : Card, p : Paint, ss : Session, which : Tier) : void {
+    let t : Tiers = ss.mach.tiers;
     let state : TierState = t.stateOf(which);
-    card::line(c, f, ui, tierNote(which, state), C_TEXT);
-    if (which == Tier::Dns && state == TierState::On) {
-        card::line(c, f, ui, tierReading(which, state), C_FAINT);
-        s.reset();
-        s.decimal(dns.names as i64);
-        card::figField(c, f, ui, s, "cached names  ", "", C_DIM);
-        s.reset();
-        s.decimal(dns.matched as i64);
-        card::figField(c, f, ui, s, "matched here  ", "", C_DIM);
+    card::strong(c, p, tierName(which), C_TEXT);
+    card::line(c, p, tierNote(which, state), C_DIM);
+
+    if (which != Tier::Dns || state != TierState::On) {
+        return;
     }
+
+    card::line(c, p, tierReading(which, state), C_FAINT);
+
+    p.count(ss.mach.dns.names as i64);
+    card::figField(c, p, "cached names", "", C_DIM);
+
+    p.count(ss.mach.dns.matched as i64);
+    card::figField(c, p, "matched here", "", C_DIM);
+}
+
+/** The tier whose badge is under the pointer, if any. */
+fn hoveredTier(hot : Hot) : (over: bool, which: Tier) {
+    return match hot {
+        Hot::TierPoll => (true, Tier::Poll),
+        Hot::TierDns => (true, Tier::Dns),
+        Hot::TierEtw => (true, Tier::Etw),
+        _ => (false, Tier::Poll),
+    };
 }
 
 /** Emit the card for whatever is under the pointer, in whichever pass. */
-fn content(
-    c : Card,
-    f : Frame,
-    ui : BitmapFont,
-    pool : Pool,
-    v : View,
-    e : Endpoints,
-    g : Groups,
-    hosts : Hosts,
-    t : Tiers,
-    dns : DnsCache,
-    a : App,
-    overTier : bool,
-    tierHover : Tier
-) : void {
+fn tipContent(c : Card, p : Paint, ss : Session) : void {
+    let (overTier, tier) = hoveredTier(ss.a.hot);
     if (overTier) {
-        forTier(c, f, ui, a.scratch, t, dns, tierHover);
+        forTier(c, p, ss, tier);
         return;
     }
-    if (a.hoverRow < 0 || a.hoverRow >= v.count) {
+
+    let r : i32 = ss.a.hoverRow;
+    let v : View = ss.w.view;
+    if (r < 0 || r >= v.count) {
         return;
     }
-    if (v.rowKind[a.hoverRow] == RowKind::Group) {
-        forGroup(c, f, ui, pool, g, v.rowRef[a.hoverRow]);
+
+    if (v.rowKind[r] == RowKind::Group) {
+        forGroup(c, p, ss, v.rowRef[r]);
     } else {
-        forEndpoint(c, f, ui, pool, e, hosts, v.rowRef[a.hoverRow]);
+        forEndpoint(c, p, ss, v.rowRef[r]);
     }
 }
 
 /**
- * Draw whatever the pointer is resting on. Nothing appears when the row has
- * nothing to add beyond its own line — a tooltip that repeats the row
- * teaches the reader to stop waiting for tooltips.
+ * Draw whatever the pointer is resting on. A badge answers at once; a row
+ * waits for the pointer to settle. Nothing appears when the row has nothing
+ * to add beyond its own line — a tooltip that repeats the row teaches the
+ * reader to stop waiting for tooltips.
  */
-fn drawTip(
-    f : Frame,
-    ui : BitmapFont,
-    v : View,
-    e : Endpoints,
-    g : Groups,
-    hosts : Hosts,
-    pool : Pool,
-    t : Tiers,
-    dns : DnsCache,
-    a : App,
-    nowMs : i64,
-    overTier : bool,
-    tierHover : Tier
-) : void {
-    if (!overTier && !a.tipReady(nowMs)) {
+fn drawTip(p : Paint, ss : Session) : void {
+    let a : App = ss.a;
+    let (overTier, tier) = hoveredTier(a.hot);
+    if (!overTier && !a.tipReady(p.nowMs)) {
         return;
     }
+
+    // Owed or not, the wait is over: a row with nothing to add must not
+    // keep the loop repainting in the hope that it will have something.
+    a.tipDrawn = true;
+
     let c : Card = new Card();
     c.measure();
-    content(c, f, ui, pool, v, e, g, hosts, t, dns, a, overTier, tierHover);
+    tipContent(c, p, ss);
     if (c.lines == 0) {
         return;
     }
 
+    let r : Rect = tipRect(p, a, c);
+    parts::shadow(p.f, r);
+    parts::outline(p.f, r, 10, C_LINE, C_TIP);
+
+    c.paint(r.x + 18, c.firstBase(r.y));
+    tipContent(c, p, ss);
+}
+
+/**
+ * Where the card goes: below and right of the pointer, flipped to the other
+ * side of it when that would leave the window or run under the status bar.
+ */
+fn tipRect(p : Paint, a : App, c : Card) : Rect {
     let w : i32 = c.boxWidth();
     let h : i32 = c.boxHeight();
+
     let x : i32 = a.mouseX + 16;
-    if (x + w > WIN_W - 8) {
-        x = a.mouseX - w - 8;
-    }
-    if (x < 8) {
-        x = 8;
-    }
-    let y : i32 = a.mouseY + 20;
-    if (y + h > WIN_H - STATUS_H - 8) {
-        y = a.mouseY - h - 10;
-    }
-    if (y < 8) {
-        y = 8;
+    if (x + w > p.lay.w - TIP_GAP) {
+        x = a.mouseX - w - TIP_GAP;
     }
 
-    f.shade(Rect::make(x + 3, y + 3, w, h), 0x000000, 1, 3);
-    f.fillRound(Rect::make(x, y, w, h), 7, C_TIP);
-    f.roundBorder(Rect::make(x, y, w, h), 7, C_LINE);
+    let y : i32 = a.mouseY + 22;
+    if (y + h > p.lay.statusY - TIP_GAP) {
+        y = a.mouseY - h - TIP_GAP;
+    }
 
-    c.paint(x + 14, c.firstBase(y));
-    content(c, f, ui, pool, v, e, g, hosts, t, dns, a, overTier, tierHover);
+    return Rect::make(x.max(TIP_GAP), y.max(TIP_GAP), w, h);
 }

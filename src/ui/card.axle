@@ -12,41 +12,37 @@
 // produced. One description of the content, no storage, and the two passes
 // cannot disagree about what is on the card because they are the same code.
 //
-// The cursor carries only its own position and tallies. The frame, the face
-// and the pool are handed to each emitter rather than held here: they are
-// borrowed for the length of a call, and a field would outlive the borrow.
+// The cursor carries only its own position and tallies. The paint is handed
+// to each emitter beside it rather than held here: Axle's borrows are
+// second-class (E0513), and a field would outlive the call that lent it.
 
-use smalt::{Scratch, Frame, BitmapFont};
+use smalt::{Rect, Color};
+use crate::ui::paint::{Paint, Lane};
 use crate::ui::parts;
-use crate::model::pool;
-use crate::theme::{C_DIM, C_FAINT, C_LINE};
+use crate::model::pool::Bytes;
+use crate::theme::{C_DIM, C_FAINT, C_LINE, C_TEXT, C_MODAL};
 
-/** Padding inside a card. */
-const CARD_PAD : i32 = 14;
+/** Padding inside a card, left and right — the detail card's header and footer use it too. */
+const CARD_PAD : i32 = 22;
 /** Pitch of the lines inside it. */
-const CARD_LINE : i32 = 19;
+const CARD_LINE : i32 = 21;
 /** Extra space a section heading takes above itself. */
-const CARD_GAP : i32 = 10;
+const CARD_GAP : i32 = 12;
 /** Widest a card gets before its lines are elided. */
-const CARD_MAX_W : i32 = 700;
+const CARD_MAX_W : i32 = 720;
+/** Where a field's value starts, past its label — so values line up. */
+const LABEL_W : i32 = 112;
+/** Width of the weight column in front of a score reason. */
+const WEIGHT_W : i32 = 48;
 
 /** The measuring / drawing cursor a card's content is emitted against. */
 class Card {
-    pub(crate) x : i32,
-    pub(crate) base : i32,
-    pub(crate) w : i32,
-    h : i32,
-    pub(crate) lines : i32,
-    pub(crate) drawing : bool,
-
-    constructor() {
-        self.x = 0;
-        self.base = 0;
-        self.w = 0;
-        self.h = 0;
-        self.lines = 0;
-        self.drawing = false;
-    }
+    pub(crate) x : i32 = 0,
+    pub(crate) base : i32 = 0,
+    pub(crate) w : i32 = 0,
+    h : i32 = 0,
+    pub(crate) lines : i32 = 0,
+    pub(crate) drawing : bool = false,
 
     /** Start a measuring pass. */
     pub(crate) fn measure(mut self) : void {
@@ -77,119 +73,194 @@ class Card {
             self.base = self.base + CARD_LINE + above;
             return;
         }
+
         if (w > self.w) {
             self.w = w;
         }
+
         self.h = self.h + CARD_LINE + above;
+    }
+
+    /** Widen the measured content to at least `w` — a header that sets the box. */
+    pub(crate) fn atLeast(mut self, w : i32) : void {
+        if (!self.drawing && w > self.w) {
+            self.w = w;
+        }
     }
 
     /** The box this content needs, in pixels. */
     pub(crate) fn boxWidth(self) : i32 {
-        let w : i32 = self.w + CARD_PAD * 2;
-        if (w > CARD_MAX_W) {
-            return CARD_MAX_W;
-        }
-        return w;
+        return (self.w + CARD_PAD * 2).min(CARD_MAX_W);
     }
 
     /** The box's height. */
     pub(crate) fn boxHeight(self) : i32 {
-        return self.h + CARD_PAD * 2 - 4;
+        return self.h + CARD_PAD * 2 - 6;
     }
 
     /** Where the first line's baseline sits inside a box at `y`. */
     pub(crate) fn firstBase(self, y : i32) : i32 {
-        return y + CARD_PAD + 8;
+        return y + CARD_PAD + 10;
     }
 
-    /** How wide a line may be before it is elided. */
-    pub(crate) fn room(self) : i32 {
-        return CARD_MAX_W - CARD_PAD * 2;
+    /** Widest a line may draw: the measured content, clamped as the box is. */
+    pub(crate) fn innerWidth(self) : i32 {
+        return self.w.min(CARD_MAX_W - CARD_PAD * 2);
+    }
+
+    /** The lane a line may use from `dx` past the left edge before it is elided. */
+    pub(crate) fn laneAfter(self, dx : i32) : Lane {
+        return Lane::at(self.x + dx, CARD_MAX_W - CARD_PAD * 2 - dx);
+    }
+
+    /** The lane a whole line may use. */
+    pub(crate) fn lane(self) : Lane {
+        return self.laneAfter(0);
+    }
+
+    /** The lane of a field's value, past its label. */
+    pub(crate) fn valueLane(self) : Lane {
+        return self.laneAfter(LABEL_W);
     }
 }
 
 /** Emit one line of literal text; an empty string emits nothing. */
-fn line(c : Card, f : Frame, ui : BitmapFont, s : string, ink : i32) : void {
+fn line(c : Card, p : Paint, s : string, ink : i32) : void {
     if (s.byteLength == 0) {
         return;
     }
+
     if (c.drawing) {
-        ui.draw(f, c.x, c.base, s, ink);
+        p.textElided(c.lane(), c.base, s, ink);
     }
-    c.took(ui.width(s), 0);
+
+    c.took(p.width(s), 0);
 }
 
-/** Emit one line drawn from a pool span; an absent span emits nothing. */
-fn spanLine(c : Card, f : Frame, ui : BitmapFont, pool : Pool, off : i64, len : i32, ink : i32) : void {
-    if (off < 0 || len <= 0) {
-        return;
-    }
+/** Emit one line of literal text, a step heavier than the lines around it. */
+fn strong(c : Card, p : Paint, s : string, ink : i32) : void {
     if (c.drawing) {
-        ui.drawBytesElided(f, c.x, c.base, pool.base() + off, 0, len, c.room(), ink);
+        p.bold(c.x, c.base, s, ink);
     }
-    c.took(ui.widthBytes(pool.base() + off, 0, len), 0);
+
+    c.took(p.width(s) + 1, 0);
 }
 
-/** Emit `label`, then a pool span on the same line. */
-fn spanField(
-    c : Card,
-    f : Frame,
-    ui : BitmapFont,
-    pool : Pool,
-    label : string,
-    off : i64,
-    len : i32,
-    ink : i32
-) : void {
-    if (off < 0 || len <= 0) {
+/** Emit one line drawn from a span; an absent span emits nothing. */
+fn spanLine(c : Card, p : Paint, b : Bytes, ink : i32) : void {
+    if (!b.some()) {
         return;
     }
-    let lw : i32 = ui.width(label);
+
     if (c.drawing) {
-        ui.draw(f, c.x, c.base, label, C_FAINT);
-        ui.drawBytesElided(f, c.x + lw, c.base, pool.base() + off, 0, len, c.room() - lw, ink);
+        p.bytesElided(c.lane(), c.base, b, ink);
     }
-    c.took(lw + ui.widthBytes(pool.base() + off, 0, len), 0);
+
+    c.took(p.bytesWidth(b), 0);
+}
+
+/** The same, a step heavier — a card's headline name. */
+fn strongSpan(c : Card, p : Paint, b : Bytes, ink : i32) : void {
+    if (!b.some()) {
+        return;
+    }
+
+    if (c.drawing) {
+        p.boldBytes(c.lane(), c.base, b, ink);
+    }
+
+    c.took(p.bytesWidth(b) + 1, 0);
+}
+
+/** Emit `label`, then a span in the value column; absent emits nothing. */
+fn spanField(c : Card, p : Paint, label : string, b : Bytes, ink : i32) : void {
+    if (!b.some()) {
+        return;
+    }
+
+    if (c.drawing) {
+        p.text(c.x, c.base, label, C_FAINT);
+        p.bytesElided(c.valueLane(), c.base, b, ink);
+    }
+
+    c.took(LABEL_W + p.bytesWidth(b), 0);
+}
+
+/** Emit `label`, then a literal in the value column; empty emits nothing. */
+fn textField(c : Card, p : Paint, label : string, s : string, ink : i32) : void {
+    if (s.byteLength == 0) {
+        return;
+    }
+
+    if (c.drawing) {
+        p.text(c.x, c.base, label, C_FAINT);
+        p.textElided(c.valueLane(), c.base, s, ink);
+    }
+
+    c.took(LABEL_W + p.width(s), 0);
 }
 
 /**
- * Emit `label`, then whatever the caller has just written into the card's
- * cursor, then `suffix`.
+ * Emit `label`, then the figure the caller has just written into the
+ * paint's scratch, then `suffix`.
  *
  * The figure is the caller's because the formatting differs per field — a
  * byte count, a span, a count — and the card has no business knowing which.
  */
-fn figField(
-    c : Card,
-    f : Frame,
-    ui : BitmapFont,
-    s : Scratch,
-    label : string,
-    suffix : string,
-    ink : i32
-) : void {
-    let lw : i32 = ui.width(label);
-    let fw : i32 = parts::figureWidth(ui, s);
+fn figField(c : Card, p : Paint, label : string, suffix : string, ink : i32) : void {
+    let fw : i32 = p.figureWidth();
     if (c.drawing) {
-        ui.draw(f, c.x, c.base, label, C_FAINT);
-        let pen : i32 = parts::figure(f, ui, c.x + lw, c.base, s, ink);
-        ui.draw(f, pen, c.base, suffix, C_FAINT);
+        p.text(c.x, c.base, label, C_FAINT);
+        let pen : i32 = p.figure(c.x + LABEL_W, c.base, ink);
+        p.text(pen, c.base, suffix, C_FAINT);
     }
-    c.took(lw + fw + ui.width(suffix), 0);
+
+    c.took(LABEL_W + fw + p.width(suffix), 0);
 }
 
-/** Emit a section heading, with a little air above it. */
-fn head(c : Card, f : Frame, ui : BitmapFont, s : string) : void {
+/**
+ * One reason behind a score: its weight in a tinted plate, then its words.
+ * The plate is the column the eye runs down to add the score up.
+ */
+fn reason(c : Card, p : Paint, weight : string, text : string, ink : i32) : void {
+    if (c.drawing) {
+        let plate : Rect = Rect::make(c.x, c.base - 14, WEIGHT_W - 8, 19);
+        p.f.fillRound(plate, 6, Color::mix(C_MODAL, ink, 1, 5));
+        p.textCentred(plate, weight, ink);
+        p.textElided(c.laneAfter(WEIGHT_W), c.base, text, C_DIM);
+    }
+
+    c.took(WEIGHT_W + p.width(text), 4);
+}
+
+/** One key and what it does, for the keyboard card. */
+fn keyLine(c : Card, p : Paint, key : string, what : string) : void {
+    if (c.drawing) {
+        parts::keycap(p, c.x, c.base, key);
+        p.text(c.x + LABEL_W + 20, c.base, what, C_DIM);
+    }
+
+    c.took(LABEL_W + 20 + p.width(what), 3);
+}
+
+/** Emit a section heading, with a little air above it and a rule after it. */
+fn head(c : Card, p : Paint, s : string) : void {
     let above : i32 = CARD_GAP;
     if (c.lines == 0) {
         above = 0;
     }
-    let tw : i32 = ui.width(s);
+
+    let tw : i32 = p.width(s);
     if (c.drawing) {
-        ui.draw(f, c.x, c.base + above, s, C_DIM);
-        // The rule runs to the edge of the box the measuring pass sized, not
-        // to the widest a card may ever be — otherwise it leaves the card.
-        f.hLine(c.x + tw + 10, c.base + above - 5, c.w - tw - 10, C_LINE);
+        let base : i32 = c.base + above;
+        p.text(c.x, base, s, C_TEXT);
+
+        // The rule runs to the edge of the box the measuring pass sized —
+        // clamped as the box is, or a long path elsewhere on the card would
+        // carry every rule past the card's edge.
+        let gap : i32 = tw + 12;
+        p.f.hLine(c.x + gap, base - 5, c.innerWidth() - gap, C_LINE);
     }
+
     c.took(tw, above);
 }

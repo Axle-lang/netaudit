@@ -1,0 +1,206 @@
+// ui/paint — how this window draws: the frame, the layout, the two faces,
+// the cursor figures are formatted into, and the instant the repaint is for.
+//
+// Every surface draws into the same frame, laid out the same way, with the
+// same two faces, through the same formatting cursor, at the same instant.
+// Carried here, a surface takes the paint, the session it is drawing from,
+// and the one thing it is about.
+//
+// The paint is made once and lives as long as the window: the faces are
+// loaded once and the cursor is allocated once, so a repaint allocates
+// nothing. `begin` points it at this repaint's frame and layout. Both are
+// values, copied in — the frame is a view of the surface's plane, never an
+// owner of it — and `clipTo` narrows the frame for a pass that must not
+// draw outside a box.
+//
+// It holds nothing of the model. Axle's borrows are second-class (E0513): a
+// reference lent for a call cannot be kept in a field, so the session is
+// handed to each surface beside the paint rather than parked inside it.
+
+use smalt::{Frame, Rect, BitmapFont, Face, Scratch};
+use crate::model::pool::Bytes;
+use crate::theme::{Layout, WIN_W, WIN_H};
+
+/** Bytes of the formatting cursor — one figure at a time. */
+const PAINT_SCRATCH : i64 = 512;
+
+/**
+ * A column: where it starts, and how wide its content may run before it is
+ * elided. A tree column and a card's value column are both one of these.
+ */
+struct Lane {
+    pub(crate) x : i32;
+    pub(crate) w : i32;
+
+    /** A lane from its left edge and width. */
+    pub(crate) static fn at(x : i32, w : i32) : Lane {
+        return Lane {
+            x: x,
+            w: w,
+        };
+    }
+}
+
+/** How this window draws. */
+class Paint {
+    /** The frame this repaint draws into, possibly clipped. */
+    pub(crate) f : Frame,
+    /** Where everything sits, for the window's current size. */
+    pub(crate) lay : Layout = Layout::make(WIN_W, WIN_H),
+    /** Segoe UI 14 — every label, column and row. */
+    pub(crate) ui : BitmapFont = BitmapFont::baked(Face::Ui),
+    /** Segoe UI Bold 22 — the headline figures. */
+    pub(crate) big : BitmapFont = BitmapFont::baked(Face::Headline),
+    /** Where a figure is formatted before it is drawn. */
+    pub(crate) scratch : Scratch = new Scratch(PAINT_SCRATCH),
+    /** The instant this repaint shows. */
+    pub(crate) nowMs : i64 = 0,
+
+    constructor(f : Frame) {
+        self.f = f;
+    }
+
+    /** Point the paint at this repaint's frame, layout and instant. */
+    pub(crate) fn begin(mut self, f : Frame, lay : Layout, nowMs : i64) : void {
+        self.f = f;
+        self.lay = lay;
+        self.nowMs = nowMs;
+    }
+
+    /**
+     * Narrow the frame to `r`, answering the frame it replaced so the
+     * caller can put it back. `Frame::clipped` answers a copy, so the
+     * whole frame is still there to return to.
+     */
+    pub(crate) fn clipTo(mut self, r : Rect) : Frame {
+        let whole : Frame = self.f;
+        self.f = whole.clipped(r);
+        return whole;
+    }
+
+    /** Put back a frame `clipTo` answered. */
+    pub(crate) fn unclip(mut self, whole : Frame) : void {
+        self.f = whole;
+    }
+
+    /** Release the cursor; the faces go with the object. */
+    pub(crate) fn dispose(mut self) : void {
+        self.scratch.close();
+    }
+
+    // ─── Literals ────────────────────────────────────────────
+
+    /** `s` from `x`; answers the pen. */
+    pub(crate) fn text(self, x : i32, base : i32, s : string, ink : i32) : i32 {
+        return self.ui.draw(self.f, x, base, s, ink);
+    }
+
+    /** `s`, ending at `right`. */
+    pub(crate) fn textRight(self, right : i32, base : i32, s : string, ink : i32) : i32 {
+        return self.ui.drawRight(self.f, right, base, s, ink);
+    }
+
+    /** `s`, cut to the lane with an ellipsis when it does not fit. */
+    pub(crate) fn textElided(self, lane : Lane, base : i32, s : string, ink : i32) : i32 {
+        return self.ui.drawElided(self.f, lane.x, base, s, lane.w, ink);
+    }
+
+    /** `s` centred in `r`. */
+    pub(crate) fn textCentred(self, r : Rect, s : string, ink : i32) : i32 {
+        return self.ui.drawCentred(self.f, r, s, ink);
+    }
+
+    /** How wide `s` draws. */
+    pub(crate) fn width(self, s : string) : i32 {
+        return self.ui.width(s);
+    }
+
+    /**
+     * Text drawn twice, a pixel apart: the face has no bold cut, and a
+     * program name or a card title wants to stand a step above the text
+     * around it.
+     */
+    pub(crate) fn bold(self, x : i32, base : i32, s : string, ink : i32) : i32 {
+        self.ui.draw(self.f, x + 1, base, s, ink);
+        return self.ui.draw(self.f, x, base, s, ink) + 1;
+    }
+
+    // ─── Spans ───────────────────────────────────────────────
+
+    /** The bytes of `b`, from `x`. */
+    pub(crate) fn bytes(self, x : i32, base : i32, b : Bytes, ink : i32) : i32 {
+        return self.ui.drawBytes(self.f, x, base, b.at, 0, b.len, ink);
+    }
+
+    /** The bytes of `b`, ending at `right`. */
+    pub(crate) fn bytesRight(self, right : i32, base : i32, b : Bytes, ink : i32) : i32 {
+        return self.ui.drawBytesRight(self.f, right, base, b.at, 0, b.len, ink);
+    }
+
+    /** The bytes of `b`, cut to the lane. */
+    pub(crate) fn bytesElided(self, lane : Lane, base : i32, b : Bytes, ink : i32) : i32 {
+        return self.ui.drawBytesElided(self.f, lane.x, base, b.at, 0, b.len, lane.w, ink);
+    }
+
+    /** The bytes of `b`, bold, cut to the lane. */
+    pub(crate) fn boldBytes(self, lane : Lane, base : i32, b : Bytes, ink : i32) : i32 {
+        let shifted : Lane = Lane::at(lane.x + 1, lane.w - 1);
+        self.bytesElided(shifted, base, b, ink);
+        return self.bytesElided(Lane::at(lane.x, lane.w - 1), base, b, ink) + 1;
+    }
+
+    /** How wide the bytes of `b` draw. */
+    pub(crate) fn bytesWidth(self, b : Bytes) : i32 {
+        return self.ui.widthBytes(b.at, 0, b.len);
+    }
+
+    // ─── Figures ─────────────────────────────────────────────
+    //
+    // A *figure* is a number this frame formatted into the scratch and will
+    // throw away, as against a label, which is a literal. The two take
+    // different doors into a face.
+
+    /** Write `n` into the scratch, replacing what was there. */
+    pub(crate) fn count(self, n : i64) : void {
+        self.scratch.reset();
+        self.scratch.decimal(n);
+    }
+
+    /** The figure in the scratch, as a span. */
+    pub(crate) fn figureBytes(self) : Bytes {
+        return Bytes::make(self.scratch.at(), self.scratch.length());
+    }
+
+    /** The figure in the scratch, from `x`. */
+    pub(crate) fn figure(self, x : i32, base : i32, ink : i32) : i32 {
+        return self.bytes(x, base, self.figureBytes(), ink);
+    }
+
+    /** The figure in the scratch, ending at `right`. */
+    pub(crate) fn figureRight(self, right : i32, base : i32, ink : i32) : i32 {
+        return self.bytesRight(right, base, self.figureBytes(), ink);
+    }
+
+    /** How wide the figure in the scratch draws. */
+    pub(crate) fn figureWidth(self) : i32 {
+        return self.bytesWidth(self.figureBytes());
+    }
+
+    /** The figure in the scratch, in the headline face. */
+    pub(crate) fn bigFigure(self, x : i32, base : i32, ink : i32) : i32 {
+        let b : Bytes = self.figureBytes();
+        return self.big.drawBytes(self.f, x, base, b.at, 0, b.len, ink);
+    }
+
+    /** The same, ending at `right`. */
+    pub(crate) fn bigFigureRight(self, right : i32, base : i32, ink : i32) : i32 {
+        let b : Bytes = self.figureBytes();
+        return self.big.drawBytesRight(self.f, right, base, b.at, 0, b.len, ink);
+    }
+
+    /** How wide the figure in the scratch draws in the headline face. */
+    pub(crate) fn bigFigureWidth(self) : i32 {
+        let b : Bytes = self.figureBytes();
+        return self.big.widthBytes(b.at, 0, b.len);
+    }
+}

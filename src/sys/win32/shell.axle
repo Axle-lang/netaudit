@@ -41,16 +41,19 @@ const ARG_CHARS : i32 = 1024;
 const QUOTE : i32 = 34;
 
 /**
- * Open the folder holding the program at pool span `(off, len)`, with the
- * binary selected. `false` when there is no path to open or Windows refused
+ * Open the folder holding the program whose UTF-16 path is the `chars` code
+ * units at pool offset `off`, with the binary selected. `false` when there is no path to open or Windows refused
  * — the caller says which in the status bar rather than doing nothing
  * visible, because a click that produces no window and no message reads as
  * a broken program.
  */
-fn revealBinary(pool : Pool, off : i64, len : i32) : bool {
-    if (off < 0 || len <= 0) {
+fn revealBinary(pool : Pool, off : i64, chars : i32) : bool {
+    // A path that would not fit is refused rather than cut: a truncated path
+    // opens some other folder, and says it worked.
+    if (off < 0 || chars <= 0 || chars > ARG_CHARS - 16) {
         return false;
     }
+
     let verb : i64 = Mem::take(32);
     let file : i64 = Mem::take(64);
     let args : i64 = Mem::take((ARG_CHARS as i64) * 2);
@@ -65,12 +68,12 @@ fn revealBinary(pool : Pool, off : i64, len : i32) : bool {
     let n : i64 = Mem::wideFrom(args, "/select,", 16) / 2 - 1;
     Mem::putWord(args, n * 2, QUOTE);
     n = n + 1;
-    let i : i32 = 0;
-    while (i < len && n < (ARG_CHARS as i64) - 3) {
-        Mem::putWord(args, n * 2, pool.at(off + (i as i64)));
+    let src : i64 = pool.base() + off;
+    for (i of 0..chars) {
+        Mem::putWord(args, n * 2, Mem::wordAt(src, (i as i64) * 2));
         n = n + 1;
-        i = i + 1;
     }
+
     Mem::putWord(args, n * 2, QUOTE);
     Mem::putWord(args, (n + 1) * 2, 0);
 
@@ -86,9 +89,11 @@ fn freeShellArgs(verb : i64, file : i64, args : i64) : void {
     if (verb != 0) {
         Mem::release(verb);
     }
+
     if (file != 0) {
         Mem::release(file);
     }
+
     if (args != 0) {
         Mem::release(args);
     }

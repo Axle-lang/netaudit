@@ -1,25 +1,97 @@
 // ui/parts — the pieces every surface in this window is assembled from.
 //
-// Nothing here knows about endpoints or programs. It draws a chip, a row of
-// score pips, a disclosure triangle and a reading's trace — and it is one
-// file so that a chip in the toolbar and a chip in a tree row cannot drift
-// into two slightly different chips, which is exactly what happens when
-// each surface grows its own.
+// Nothing here knows about endpoints or programs. It draws a chip, a score
+// meter, a switch, a keycap, a program's monogram, a disclosure chevron and
+// a reading's trace — and it is one file so that a chip in the toolbar and a
+// chip in a tree row cannot drift into two slightly different chips, which
+// is exactly what happens when each surface grows its own.
 //
 // The shapes themselves are `Frame`'s: the rounded fill and its outline,
 // the ring, the disc, the trace. What is left here is which of them a
 // reading is drawn with, and the band it is drawn against — a decision
-// about the figure, not about the pixels.
+// about the figure, not about the pixels. A piece that only fills shapes
+// takes the frame; one that also sets type takes the paint, which carries
+// the face.
 
-use smalt::{Scratch, Frame, Rect, Color, BitmapFont};
-use crate::theme::{C_CARD, C_LINE, C_FAINT, C_OK, C_WARN, C_HOT};
+use smalt::{Frame, Rect, Color};
+use crate::ui::paint::Paint;
+use crate::app::Touch;
+use crate::theme::{C_BG, C_CARD, C_HEADER, C_LINE, C_DIM, C_FAINT};
+use crate::theme::{C_OK, C_WARN, C_HOT, C_ACCENT};
+use crate::theme::{C_FIELD_HOVER, C_FIELD_PRESS, C_EDGE_HOVER};
 
-/** Pips a score is drawn as. */
-const PIPS : i32 = 5;
-/** Diameter of one pip. */
-const PIP_D : i32 = 7;
-/** Centre-to-centre spacing of the pips. */
-const PIP_STEP : i32 = 10;
+/** Segments a score is drawn as. */
+const SEGMENTS : i32 = 5;
+/** Width of one segment. */
+const SEG_W : i32 = 10;
+/** Height of one segment. */
+const SEG_H : i32 = 6;
+/** Left-edge spacing of the segments. */
+const SEG_STEP : i32 = 13;
+/** How wide the whole meter draws — for a caller laying out beside it. */
+const METER_W : i32 = 62;
+
+/** Height of a chip, and of a keycap. */
+const CHIP_H : i32 = 18;
+/** Side of a program's monogram tile. */
+const AVATAR : i32 = 22;
+
+/**
+ * A rounded surface with a one-pixel outline, both anti-aliased.
+ *
+ * `Frame::roundBorder` sets one hard pixel per corner row, which at a pill's
+ * radius reads as a dotted, broken edge. Two `fillRound`s — the outline's
+ * colour, then the surface inset by a pixel — inherit `fillRound`'s blended
+ * corners, so the outline is as smooth as the fill. Only for a surface that
+ * is opaque: the inside is painted over, not cut out.
+ */
+fn outline(f : Frame, r : Rect, radius : i32, edge : i32, fill : i32) : void {
+    f.fillRound(r, radius, edge);
+    f.fillRound(Rect::make(r.x + 1, r.y + 1, r.w - 2, r.h - 2), (radius - 1).max(0), fill);
+}
+
+/**
+ * The body of a pill control — a field, a dropdown, a toggle — in the state
+ * it is being touched in. At rest it is a surface and a hairline; under the
+ * pointer both lift a step; held, the surface sinks. `on` tints it with the
+ * accent, for a toggle that is switched on.
+ *
+ * Every pill control in the window is drawn by this one function, so they
+ * cannot disagree about what hovering looks like.
+ */
+fn controlBox(f : Frame, r : Rect, touch : Touch, on : bool) : void {
+    let fill : i32 = C_CARD;
+    let edge : i32 = C_LINE;
+    match touch {
+        Touch::Idle => {}
+        Touch::Hover => {
+            fill = C_FIELD_HOVER;
+            edge = C_EDGE_HOVER;
+        }
+        Touch::Press => {
+            fill = C_FIELD_PRESS;
+            edge = C_EDGE_HOVER;
+        }
+    }
+
+    if (on) {
+        fill = Color::mix(fill, C_ACCENT, 1, 7);
+        edge = Color::mix(edge, C_ACCENT, 1, 2);
+    }
+
+    outline(f, r, r.h / 2, edge, fill);
+}
+
+/**
+ * Keyboard focus: a soft accent ring outside the control and an accent
+ * outline on it. Drawn instead of `controlBox` while a field takes keys, so
+ * where the typing goes is never a guess.
+ */
+fn focusBox(f : Frame, r : Rect) : void {
+    let ring : Rect = Rect::make(r.x - 3, r.y - 3, r.w + 6, r.h + 6);
+    outline(f, ring, ring.h / 2, Color::mix(C_BG, C_ACCENT, 1, 4), C_BG);
+    outline(f, r, r.h / 2, C_ACCENT, C_CARD);
+}
 
 /**
  * A trust score on the green → amber → red ramp. The hinges are where a
@@ -30,129 +102,320 @@ fn scoreColor(score : i32) : i32 {
     if (score < 0) {
         return C_FAINT;
     }
+
     if (score >= 4) {
         return C_OK;
     }
+
     if (score >= 3) {
         return C_WARN;
     }
+
     return C_HOT;
 }
 
 /**
- * Five pips, `score` of them filled. An unknown score draws five hollow
- * pips in the faintest ink — visibly "nothing is known", which must not
- * look like "nothing is wrong".
+ * Five segments, `score` of them lit, the rest a faint track. An unknown
+ * score draws five hollow segments — visibly "nothing is known", which must
+ * not look like "nothing is wrong", and must not look like a zero either.
  */
-fn pips(f : Frame, x : i32, cy : i32, score : i32) : i32 {
+fn meter(f : Frame, x : i32, cy : i32, score : i32) : i32 {
     let color : i32 = scoreColor(score);
-    for (i of 0..PIPS) {
-        let cx : i32 = x + i * PIP_STEP;
-        if (score >= 0 && i < score) {
-            f.disc(cx + PIP_D / 2, cy, PIP_D / 2, color);
+    let track : i32 = Color::mix(C_CARD, C_LINE, 3, 2);
+    for (i of 0..SEGMENTS) {
+        let r : Rect = Rect::make(x + i * SEG_STEP, cy - SEG_H / 2, SEG_W, SEG_H);
+        if (score < 0) {
+            f.roundBorder(r, 2, track);
+        } else if (i < score) {
+            f.fillRound(r, 2, color);
         } else {
-            f.ring(cx + PIP_D / 2, cy, PIP_D / 2, Color::mix(C_CARD, color, 1, 2));
+            f.fillRound(r, 2, Color::mix(C_CARD, C_LINE, 1, 1));
         }
     }
-    return x + PIPS * PIP_STEP;
+
+    return x + METER_W;
 }
 
 /**
- * A small filled label — a protocol badge, a toggle, a tier. The fill is the
- * ink at a third strength, so a chip reads as coloured without competing
- * with the text next to it.
+ * A small pill label — a protocol badge, a tier. The fill is the ink at a
+ * fifth strength, so a chip reads as coloured without competing with the
+ * text next to it. Answers the right edge.
  */
-fn chip(f : Frame, fo : BitmapFont, x : i32, y : i32, label : string, ink : i32, on : bool) : i32 {
-    let w : i32 = fo.width(label) + 16;
-    let back : i32 = Color::mix(C_CARD, ink, 1, 4);
-    if (!on) {
-        back = C_CARD;
-    }
-    f.fillRound(Rect::make(x, y, w, 18), 5, back);
-    let text : i32 = ink;
-    if (!on) {
-        text = C_FAINT;
-        f.roundBorder(Rect::make(x, y, w, 18), 5, Color::mix(C_CARD, C_LINE, 2, 3));
-    }
-    fo.draw(f, x + 8, y + 13, label, text);
+fn chip(p : Paint, x : i32, y : i32, label : string, ink : i32) : i32 {
+    let w : i32 = p.width(label) + 16;
+    p.f.fillRound(Rect::make(x, y, w, CHIP_H), CHIP_H / 2, Color::mix(C_CARD, ink, 1, 5));
+    p.text(x + 8, y + 13, label, ink);
     return x + w;
 }
 
 /**
- * A trace of `hist` across the box, newest sample at the right edge.
- *
- * The band is computed here and handed to `Frame::spark`, because the
- * vertical scale is a reading decision rather than a drawing one: it is the
- * span the samples actually occupy, padded a little either side, not
- * zero-to-peak. Drawn from zero, a reading that sits near a hundred and
- * sixty and wobbles by four is a solid block — the shape that matters is
- * four pixels tall at the top of forty, and the forty say nothing a reader
- * did not already read off the figure beside it. Scaled to its own band,
- * that same wobble is the whole picture, and a perfectly flat run draws a
- * line across the middle, which is the honest picture of a reading that has
- * not changed.
+ * The same chip switched off: a neutral tint and faint text. A tint, not an
+ * outline, because the chip sits on rows whose surface changes under the
+ * pointer and the selection — an outline would need to know which.
  */
-fn spark(f : Frame, x : i32, y : i32, w : i32, h : i32, hist : i32[], n : i32, color : i32) : void {
-    if (n < 2) {
+fn ghostChip(p : Paint, x : i32, y : i32, label : string) : i32 {
+    let w : i32 = p.width(label) + 16;
+    p.f.fillRound(Rect::make(x, y, w, CHIP_H), CHIP_H / 2, Color::mix(C_CARD, C_FAINT, 1, 6));
+    p.text(x + 8, y + 13, label, C_FAINT);
+    return x + w;
+}
+
+/**
+ * A key, drawn as a key: a small raised cap with its legend. The status bar
+ * and the help card spell their shortcuts this way so a reader's eye can
+ * pick the keys out of the sentence without reading it.
+ */
+fn keycap(p : Paint, x : i32, base : i32, label : string) : i32 {
+    let w : i32 = keycapWidth(p, label);
+    let r : Rect = Rect::make(x, base - 13, w, CHIP_H);
+    outline(p.f, r, 5, C_LINE, C_HEADER);
+    p.f.hLine(x + 3, base + 3, w - 6, Color::mix(C_HEADER, 0x000000, 1, 3));
+    p.text(x + 6, base, label, C_DIM);
+    return x + w;
+}
+
+/** How wide `keycap` draws `label`. */
+fn keycapWidth(p : Paint, label : string) : i32 {
+    return p.width(label) + 12;
+}
+
+/**
+ * An on/off switch: a track and a knob. The knob sits right and the track
+ * takes the accent when on — the shape every settings screen has taught a
+ * reader to read without a label. Under the pointer the off track lifts a
+ * step, so the switch itself answers the hover, not only its frame.
+ */
+fn toggleSwitch(f : Frame, x : i32, cy : i32, on : bool, touch : Touch) : void {
+    let r : Rect = Rect::make(x, cy - 9, 32, 18);
+    if (on) {
+        f.fillRound(r, 9, C_ACCENT);
+        f.disc(x + 23, cy, 7, 0xFFFFFF);
         return;
     }
+
+    let track : i32 = C_LINE;
+    if (touch != Touch::Idle) {
+        track = C_EDGE_HOVER;
+    }
+
+    f.fillRound(r, 9, track);
+    f.disc(x + 9, cy, 7, Color::mix(C_DIM, 0xFFFFFF, 1, 4));
+}
+
+/** A small round separator, for the places a middle dot would go. */
+fn dot(f : Frame, cx : i32, cy : i32, ink : i32) : void {
+    f.disc(cx, cy, 2, ink);
+}
+
+/** A status light: a dot with a soft halo, for "this is live". */
+fn light(f : Frame, back : i32, cx : i32, cy : i32, ink : i32) : void {
+    f.disc(cx, cy, 6, Color::mix(back, ink, 1, 5));
+    f.disc(cx, cy, 3, ink);
+}
+
+/**
+ * A program's monogram: its initial on a tile tinted by its identity.
+ *
+ * Forty programs in a column of names are forty words to read; forty
+ * coloured tiles are a column the eye can find its program in before it
+ * has read anything. The hue comes from the group's key, so a program keeps
+ * its colour for the session however the rows are sorted.
+ */
+fn avatar(p : Paint, x : i32, cy : i32, initial : i32, key : i64) : void {
+    let hue : i32 = hueOf(key);
+    let tile : Rect = Rect::make(x, cy - AVATAR / 2, AVATAR, AVATAR);
+    p.f.fillRound(tile, 7, Color::mix(C_CARD, hue, 1, 4));
+    let c : i32 = upper(initial);
+    p.ui.glyph(p.f, x + (AVATAR - p.ui.advance(c)) / 2, cy + 5, c, hue);
+}
+
+/** One of eight hues, chosen by `key`. */
+fn hueOf(key : i64) : i32 {
+    let k : i64 = key % 8;
+    if (k < 0) {
+        k = 0 - k;
+    }
+
+    let slot : i32 = k as i32;
+    return match slot {
+        0 => 0x7A8CFF,
+        1 => 0x3DD68C,
+        2 => 0xF2B84B,
+        3 => 0xFF7A9C,
+        4 => 0x4FC3F7,
+        5 => 0xB98CFF,
+        6 => 0xFF9E5E,
+        _ => 0x5ED6C3,
+    };
+}
+
+/** ASCII upper-casing, and `?` for anything the face does not carry. */
+fn upper(c : i32) : i32 {
+    if (c >= 97 && c <= 122) {
+        return c - 32;
+    }
+
+    if (c < 33 || c > 126) {
+        return 63;
+    }
+
+    return c;
+}
+
+/**
+ * A soft shadow under a floating surface at `r`. `Frame::shade` darkens a
+ * rectangle; three of them, each a little larger and fainter, fall off the
+ * way a real shadow does, and the rounded surface drawn on top hides their
+ * square corners.
+ */
+fn shadow(f : Frame, r : Rect) : void {
+    f.shade(Rect::make(r.x - 2, r.y + 2, r.w + 4, r.h + 6), 0x000000, 1, 6);
+    f.shade(Rect::make(r.x - 6, r.y + 4, r.w + 12, r.h + 12), 0x000000, 1, 8);
+    f.shade(Rect::make(r.x - 12, r.y + 8, r.w + 24, r.h + 20), 0x000000, 1, 12);
+}
+
+/**
+ * The vertical scale of a trace: the value at the box's bottom edge, and how
+ * many units its height spans. A span of zero means there is nothing to draw.
+ */
+struct Band {
+    pub(crate) lo : i32;
+    pub(crate) span : i32;
+}
+
+/**
+ * The band the first `n` samples of `hist` are drawn against.
+ *
+ * It is the span the samples actually occupy, padded a little either side,
+ * not zero-to-peak. Drawn from zero, a reading that sits near a hundred and
+ * sixty and wobbles by four is a solid block — the shape that matters is
+ * four pixels tall at the top of forty. Scaled to its own band, that same
+ * wobble is the whole picture, and a perfectly flat run draws a line across
+ * the middle, which is the honest picture of a reading that has not changed.
+ */
+fn bandOf(hist : i32[], n : i32) : Band {
     let lo : i32 = hist[0];
     let hi : i32 = hist[0];
     for (i of 1..n) {
-        if (hist[i] < lo) {
-            lo = hist[i];
-        }
-        if (hist[i] > hi) {
-            hi = hist[i];
-        }
+        lo = lo.min(hist[i]);
+        hi = hi.max(hist[i]);
     }
+
     // A run that never left zero has nothing to show, and a band drawn
     // around it fills half the box — which on the flagged card is a wide red
     // stripe announcing that nothing has been flagged.
     if (hi == 0 && lo == 0) {
-        return;
+        return Band {
+            lo: 0,
+            span: 0,
+        };
     }
+
     let pad : i32 = (hi - lo) / 4 + 1;
-    f.spark(
-        Rect::make(x, y, w, h),
-        hist,
-        n,
-        lo - pad,
-        hi + pad,
-        color,
-        Color::mix(C_CARD, color, 1, 6)
-    );
+    return Band {
+        lo: lo - pad,
+        span: hi - lo + pad * 2,
+    };
 }
 
-/** A disclosure triangle: pointing right when shut, down when open. */
-fn twisty(f : Frame, x : i32, cy : i32, open : bool, color : i32) : void {
-    for (i of 0..5) {
-        if (open) {
-            f.fillRect(Rect::make(x + i, cy - 2 + i, 9 - i * 2, 1), color);
-        } else {
-            f.fillRect(Rect::make(x + 2 + i, cy - 4 + i, 1, 9 - i * 2), color);
-        }
-    }
+/** The sample column `col` of a `w`-wide trace shows, newest at the right. */
+fn sampleAt(hist : i32[], n : i32, col : i32, w : i32) : i32 {
+    let back : i32 = ((w - 1 - col) * (n - 1)) / (w - 1).max(1);
+    return hist[n - 1 - back];
+}
+
+/** The row value `v` is drawn at inside `r`. */
+fn traceY(r : Rect, band : Band, v : i32) : i32 {
+    let bottom : i32 = r.y + r.h - 1;
+    let rise : i32 = ((v - band.lo) * (r.h - 1)) / band.span;
+    return (bottom - rise).max(r.y).min(bottom);
 }
 
 /**
- * The figure standing in `s`, right-aligned at `right`.
+ * A trace of the first `n` samples of `hist` across `r`, newest at the
+ * right edge: a line, a fill under it that fades towards the bottom, and a
+ * dot on the newest reading — the one the figure beside it states.
  *
- * Named for what it draws rather than for how: a *figure* is a number this
- * frame formatted and will throw away, as against a label, which is a
- * literal. The two take different doors into a face, and the name is what
- * says which one a reader is looking at.
+ * Drawn here rather than with `Frame::spark`, whose fill is one flat tint:
+ * a flat run then reads as a solid slab, and the eye takes the slab for the
+ * figure rather than the line for it. Consecutive columns are joined, so a
+ * step is a wall rather than two dots with a gap between.
  */
-fn figureRight(f : Frame, fo : BitmapFont, right : i32, base : i32, s : Scratch, color : i32) : i32 {
-    return fo.drawBytesRight(f, right, base, s.at(), 0, s.length(), color);
+fn spark(f : Frame, r : Rect, hist : i32[], n : i32, color : i32) : void {
+    if (n < 2) {
+        return;
+    }
+
+    let band : Band = bandOf(hist, n);
+    if (band.span == 0) {
+        return;
+    }
+
+    let bottom : i32 = r.y + r.h;
+    let prev : i32 = -1;
+    for (col of 0..r.w) {
+        let x : i32 = r.x + col;
+        let y : i32 = traceY(r, band, sampleAt(hist, n, col, r.w));
+
+        // The fill: strongest just under the line, gone at the bottom.
+        for (row of y..bottom) {
+            f.blend(x, row, color, bottom - row, r.h * 6);
+        }
+
+        // The line, joined to the previous column's point.
+        let top : i32 = y;
+        let low : i32 = y;
+        if (prev >= 0) {
+            top = y.min(prev);
+            low = y.max(prev);
+        }
+
+        f.fillRect(Rect::make(x, top, 1, low - top + 1), color);
+        f.blend(x, y + 1, color, 1, 3);
+        prev = y;
+    }
+
+    let end : i32 = r.x + r.w - 1;
+    f.disc(end, prev, 6, Color::mix(C_CARD, color, 1, 4));
+    f.disc(end, prev, 3, color);
 }
 
-/** The figure standing in `s`, left-aligned at `x`. */
-fn figure(f : Frame, fo : BitmapFont, x : i32, base : i32, s : Scratch, color : i32) : i32 {
-    return fo.drawBytes(f, x, base, s.at(), 0, s.length(), color);
+/**
+ * A dropdown chevron: pointing down at rest, up while its list is open —
+ * the control says which way the list will go.
+ */
+fn chevron(f : Frame, x : i32, cy : i32, up : bool, color : i32) : void {
+    for (i of 0..4) {
+        let dy : i32 = cy - 2 + i;
+        if (up) {
+            dy = cy + 1 - i;
+        }
+
+        f.fillRect(Rect::make(x + i, dy, 2, 1), color);
+        f.fillRect(Rect::make(x + 6 - i, dy, 2, 1), color);
+    }
 }
 
-/** How wide that figure draws, without drawing it. */
-fn figureWidth(fo : BitmapFont, s : Scratch) : i32 {
-    return fo.widthBytes(s.at(), 0, s.length());
+/** A check mark whose short stroke starts at `(x, cy)`. */
+fn check(f : Frame, x : i32, cy : i32, color : i32) : void {
+    for (i of 0..3) {
+        f.fillRect(Rect::make(x + i, cy + i, 2, 2), color);
+    }
+
+    for (i of 0..6) {
+        f.fillRect(Rect::make(x + 3 + i, cy + 1 - i, 2, 2), color);
+    }
+}
+
+/** A disclosure chevron: pointing right when shut, down when open. */
+fn twisty(f : Frame, x : i32, cy : i32, open : bool, color : i32) : void {
+    for (i of 0..4) {
+        if (open) {
+            f.fillRect(Rect::make(x + i, cy - 2 + i, 2, 1), color);
+            f.fillRect(Rect::make(x + 6 - i, cy - 2 + i, 2, 1), color);
+        } else {
+            f.fillRect(Rect::make(x + 1 + i, cy - 4 + i, 1, 2), color);
+            f.fillRect(Rect::make(x + 1 + i, cy + 2 - i, 1, 2), color);
+        }
+    }
 }

@@ -1,0 +1,36 @@
+// session — everything the loop owns, as one value.
+//
+// The model (`World`), the readers of the machine (`Machine`), the lookup
+// queue and the reader's interaction state (`App`) are created together at
+// start, live exactly as long as the window, and are handed together to every
+// step of the loop: a refresh, a lookup coming back, a key, a repaint. One
+// value for the four of them is what lets each of those steps say what it
+// does in its signature rather than list what it touches.
+//
+// The two lookup tasks are not here. A `Task` is a handle minted on the
+// loop's thread and joinable only there; parking one in a field would be
+// parking it where the thread that must join it cannot be sure to reach it.
+
+use crate::model::world::World;
+use crate::sys::machine::Machine;
+use crate::enrich::queue::Queue;
+use crate::app::App;
+
+/** The loop's state, whole. */
+class Session {
+    /** The journal and every reading taken off it. */
+    pub(crate) w : World = new World(),
+    /** The process list, the connection tables, the DNS cache, the tiers. */
+    pub(crate) mach : Machine = new Machine(),
+    /** Which addresses get looked up, and when. */
+    pub(crate) q : Queue = new Queue(),
+    /** What the reader is doing: selection, filter, folds, scroll. */
+    pub(crate) a : App = new App(),
+
+    /** Release everything, the model last. */
+    pub(crate) fn dispose(mut self) : void {
+        self.mach.dispose();
+        self.a.dispose();
+        self.w.dispose();
+    }
+}

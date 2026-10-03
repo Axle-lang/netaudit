@@ -12,8 +12,10 @@
 // happens at all, so nothing moves under a reader's hand between seeing a
 // row and clicking it.
 
-use smalt::{Scratch, Mem};
-use crate::model::view::{Sort, SORT_COUNT, sortAt, RowKind};
+use smalt::{Scratch, Mem, Rect};
+use crate::model::pool::Bytes;
+use crate::model::view::{Sort, SORT_COUNT, sortAt, RowKind, Lens};
+use crate::theme::{Layout, WIN_W, WIN_H};
 
 /** Bytes of the filter field. */
 const FILTER_CAP : i32 = 64;
@@ -23,6 +25,57 @@ const SCRATCH_CAP : i64 = 512;
 /** How long a status message stays up, in refresh ticks. */
 const SAY_TICKS : i32 = 4;
 
+/**
+ * The control under the pointer — what a hover state is drawn on.
+ *
+ * One value for the whole window rather than a flag per control: a pointer
+ * can only be over one thing, and a change of this value is exactly when a
+ * repaint is owed. `input::hotAt` decides it, with the same hit tests the
+ * clicks use, so a control lights up over precisely the pixels that answer.
+ */
+enum Hot : i32 {
+    /** Nothing that reacts. */
+    None = 0,
+    /** The filter field. */
+    Filter = 1,
+    /** The filter's clear control. */
+    Clear = 2,
+    /** The ranking control. */
+    Sort = 3,
+    /** The local-traffic toggle. */
+    Local = 4,
+    /** The listening / UDP toggle. */
+    Bound = 5,
+    /** The `Program / endpoint` header. */
+    HeadProgram = 6,
+    /** The `Trust` header. */
+    HeadTrust = 7,
+    /** The `Repetition / rhythm` header. */
+    HeadRhythm = 8,
+    /** The `Traffic / last seen` header. */
+    HeadTraffic = 9,
+    /** A tier badge in the title bar. */
+    TierPoll = 10,
+    TierDns = 11,
+    TierEtw = 12,
+    /** The scrollbar. */
+    Bar = 13,
+    /** The rows themselves; the hovered row is `hoverRow`. */
+    Rows = 14,
+    /** A ranking in the open sort menu; which one is `menuPick`. */
+    Menu = 15,
+}
+
+/** How a control is being touched, which is how it is drawn. */
+enum Touch : i32 {
+    /** The pointer is elsewhere. */
+    Idle = 0,
+    /** The pointer is over it. */
+    Hover = 1,
+    /** The pointer is over it with the button held. */
+    Press = 2,
+}
+
 /** Which dialog, if any, is over the tree. */
 enum Modal : i32 {
     /** No dialog is up. */
@@ -31,6 +84,8 @@ enum Modal : i32 {
     Detail = 1,
     /** The keyboard reference. */
     Help = 2,
+    /** The list of rankings, open under the sort control. */
+    SortMenu = 3,
 }
 
 /**
@@ -78,75 +133,68 @@ const TIP_DELAY_MS : i64 = 450;
 const FREEZE_TAIL_MS : i64 = 2000;
 
 class App {
-    pub(crate) sortKey : Sort,
+    pub(crate) sortKey : Sort = Sort::Salience,
 
-    pub(crate) filter : i64,
-    pub(crate) filterLen : i32,
-    pub(crate) typing : bool,
-    pub(crate) swallow : bool,
+    pub(crate) filter : i64 = Mem::take(FILTER_CAP as i64),
+    pub(crate) filterLen : i32 = 0,
+    pub(crate) typing : bool = false,
+    pub(crate) swallow : bool = false,
 
-    pub(crate) showLocal : bool,
-    pub(crate) showBound : bool,
+    pub(crate) showLocal : bool = false,
+    pub(crate) showBound : bool = false,
 
-    pub(crate) selected : bool,
-    pub(crate) selKind : RowKind,
-    pub(crate) selKey : i64,
+    pub(crate) selected : bool = false,
+    pub(crate) selKind : RowKind = RowKind::Group,
+    pub(crate) selKey : i64 = 0,
 
-    pub(crate) scroll : i32,
-    pub(crate) dragging : bool,
-    pub(crate) dragGrip : i32,
-    pub(crate) picked : bool,
-    pub(crate) hoverRow : i32,
-    pub(crate) mouseX : i32,
-    pub(crate) mouseY : i32,
-    hoverSinceMs : i64,
-    pub(crate) inTree : bool,
-    freezeUntilMs : i64,
+    pub(crate) scroll : i32 = 0,
+    pub(crate) dragging : bool = false,
+    pub(crate) dragGrip : i32 = 0,
+    pub(crate) picked : bool = false,
+    pub(crate) hoverRow : i32 = -1,
+    pub(crate) mouseX : i32 = -1,
+    pub(crate) mouseY : i32 = -1,
+    hoverSinceMs : i64 = 0,
+    pub(crate) inTree : bool = false,
+    freezeUntilMs : i64 = 0,
 
-    pub(crate) modal : Modal,
-    pub(crate) quitting : bool,
-    pub(crate) refreshDue : bool,
-    pub(crate) paused : bool,
-    pub(crate) dirty : bool,
+    pub(crate) modal : Modal = Modal::None,
+    /** Where everything sits, for the window's current size. */
+    pub(crate) lay : Layout = Layout::make(WIN_W, WIN_H),
+    /** The control under the pointer. */
+    pub(crate) hot : Hot = Hot::None,
+    /** The highlighted entry of the sort menu, by its place in the list. */
+    pub(crate) menuPick : i32 = 0,
+    /** Whether the left button is held. */
+    pub(crate) pressed : bool = false,
+    /** Where the open dialog was last drawn, so a click inside it keeps it. */
+    pub(crate) cardRect : Rect = Rect::make(0, 0, 0, 0),
+    /** Whether the tooltip for the current resting place has been drawn. */
+    pub(crate) tipDrawn : bool = false,
+    pub(crate) quitting : bool = false,
+    pub(crate) refreshDue : bool = false,
+    pub(crate) paused : bool = false,
+    pub(crate) dirty : bool = true,
 
-    pub(crate) scratch : Scratch,
-    pub(crate) say : Say,
-    sayLeft : i32,
-
-    constructor() {
-        self.sortKey = Sort::Salience;
-        self.filter = Mem::take(FILTER_CAP as i64);
-        self.filterLen = 0;
-        self.typing = false;
-        self.swallow = false;
-        self.showLocal = false;
-        self.showBound = false;
-        self.selected = false;
-        self.selKind = RowKind::Group;
-        self.selKey = 0;
-        self.scroll = 0;
-        self.dragging = false;
-        self.dragGrip = 0;
-        self.picked = false;
-        self.hoverRow = -1;
-        self.mouseX = -1;
-        self.mouseY = -1;
-        self.hoverSinceMs = 0;
-        self.inTree = false;
-        self.freezeUntilMs = 0;
-        self.modal = Modal::None;
-        self.quitting = false;
-        self.refreshDue = false;
-        self.paused = false;
-        self.dirty = true;
-        self.scratch = new Scratch(SCRATCH_CAP);
-        self.say = Say::None;
-        self.sayLeft = 0;
-    }
+    pub(crate) scratch : Scratch = new Scratch(SCRATCH_CAP),
+    pub(crate) say : Say = Say::None,
+    sayLeft : i32 = 0,
 
     /** Whether reordering is currently suspended. */
     pub(crate) fn frozen(self, nowMs : i64) : bool {
         return nowMs < self.freezeUntilMs;
+    }
+
+    /** What the tree should show at `nowMs`, as the model reads it. */
+    pub(crate) fn lens(self, nowMs : i64) : Lens {
+        return Lens {
+            needle: self.filter,
+            needleLen: self.filterLen,
+            sortKey: self.sortKey,
+            showLocal: self.showLocal,
+            showBound: self.showBound,
+            freeze: self.frozen(nowMs),
+        };
     }
 
     /** Hold the order still, because the pointer is over the rows. */
@@ -161,13 +209,54 @@ class App {
             && nowMs - self.hoverSinceMs >= TIP_DELAY_MS;
     }
 
+    /**
+     * Whether a tooltip has finished waiting and not been drawn yet. The
+     * loop asks this every turn: nothing else would repaint the window at
+     * the moment the wait ends, and the card would appear on the next
+     * refresh instead — up to a second late, which reads as sluggish.
+     */
+    pub(crate) fn tipPending(self, nowMs : i64) : bool {
+        return !self.tipDrawn && self.tipReady(nowMs);
+    }
+
     /** Note that the pointer moved, which restarts the tooltip's wait. */
     pub(crate) fn pointerMoved(mut self, nowMs : i64, x : i32, y : i32) : void {
         if (x != self.mouseX || y != self.mouseY) {
             self.mouseX = x;
             self.mouseY = y;
             self.hoverSinceMs = nowMs;
+            if (self.tipDrawn) {
+                self.tipDrawn = false;
+                self.dirty = true;
+            }
         }
+    }
+
+    /** Lay the window out again for a `w` by `h` client area. */
+    pub(crate) fn resize(mut self, w : i32, h : i32) : void {
+        self.lay = Layout::make(w, h);
+        self.dirty = true;
+    }
+
+    /** Put the pointer over `h`, repainting only when that changes something. */
+    pub(crate) fn setHot(mut self, h : Hot) : void {
+        if (h != self.hot) {
+            self.hot = h;
+            self.dirty = true;
+        }
+    }
+
+    /** How control `h` is being touched. */
+    pub(crate) fn touch(self, h : Hot) : Touch {
+        if (self.hot != h || self.modal != Modal::None) {
+            return Touch::Idle;
+        }
+
+        if (self.pressed) {
+            return Touch::Press;
+        }
+
+        return Touch::Hover;
     }
 
     /** Select the group carrying `key`. */
@@ -196,9 +285,15 @@ class App {
         if (self.filterLen >= FILTER_CAP || c < 32 || c > 126) {
             return;
         }
+
         Mem::putByte(self.filter, self.filterLen as i64, c);
         self.filterLen = self.filterLen + 1;
         self.dirty = true;
+    }
+
+    /** What has been typed into the filter, as drawable bytes. */
+    pub(crate) fn filterBytes(self) : Bytes {
+        return Bytes::make(self.filter, self.filterLen);
     }
 
     /** Drop the last filter byte. */
@@ -222,6 +317,38 @@ class App {
         self.dirty = true;
     }
 
+    /** Open the sort menu with the active ranking under the keyboard. */
+    pub(crate) fn openSortMenu(mut self) : void {
+        self.modal = Modal::SortMenu;
+        self.menuPick = self.sortKey as i32;
+        self.dirty = true;
+    }
+
+    /** Rank by the menu's highlighted entry, and close it. */
+    pub(crate) fn pickSort(mut self) : void {
+        self.sortKey = sortAt(self.menuPick);
+        self.modal = Modal::None;
+        self.dirty = true;
+    }
+
+    /**
+     * Put the menu's highlight on entry `item`, the one under the pointer.
+     * The pointer and the arrow keys move the same highlight, so whichever
+     * the reader used last is where Enter lands. `-1` leaves it where it is.
+     */
+    pub(crate) fn pointAtPick(mut self, item : i32) : void {
+        if (item >= 0 && item != self.menuPick) {
+            self.menuPick = item;
+            self.dirty = true;
+        }
+    }
+
+    /** Move the menu's highlight by `delta`, held inside the list. */
+    pub(crate) fn movePick(mut self, delta : i32) : void {
+        self.menuPick = (self.menuPick + delta).max(0).min(SORT_COUNT - 1);
+        self.dirty = true;
+    }
+
     /**
      * Rank by `key`, or by `alt` when `key` is already the active one.
      *
@@ -237,6 +364,7 @@ class App {
         } else {
             self.sortKey = key;
         }
+
         self.dirty = true;
     }
 
@@ -293,6 +421,7 @@ class App {
             Mem::release(self.filter);
             self.filter = 0;
         }
+
         self.scratch.close();
     }
 }
@@ -303,12 +432,12 @@ fn sayText(say : Say, showLocal : bool, showBound : bool) : string {
         Say::None => "",
         Say::Opened => "Opened the folder holding that program.",
         Say::NoPath =>
-            "Windows would not give that program's path, so there is no folder to open.",
-        Say::Paused => "Paused — the journal is frozen.",
+            "Windows gave no path for that program, or Explorer refused it.",
+        Say::Paused => "Paused. The journal is frozen until Space resumes it.",
         Say::Resumed => "Live again.",
         Say::Cleared => "History cleared back to what is live now.",
-        Say::Snapped => "Window written to netaudit.bmp, beside the binary.",
-        Say::NoSnap => "Could not write netaudit.bmp — the folder may be read-only.",
+        Say::Snapped => "Window written to netaudit.bmp, in the folder it was started from.",
+        Say::NoSnap => "Could not write netaudit.bmp; the folder may be read-only.",
         // The two toggles say which way they went, so each carries both
         // sentences: a message that only said "local traffic" would leave a
         // reader to check the row count to find out what just happened.
@@ -317,9 +446,22 @@ fn sayText(say : Say, showLocal : bool, showBound : bool) : string {
             false => "Hiding traffic that stays on this machine and this network.",
         },
         Say::Bound => match showBound {
-            true => "Showing listening sockets and UDP handles — Windows names no peer for either.",
+            true => "Showing listening sockets and UDP handles; neither has a peer.",
             false => "Hiding listening sockets and UDP handles.",
         },
+    };
+}
+
+/** The name of a ranking as a title, as the sort menu lists it. */
+fn sortTitle(key : Sort) : string {
+    return match key {
+        Sort::Salience => "Salience",
+        Sort::Traffic => "Traffic",
+        Sort::Risk => "Risk",
+        Sort::Rhythm => "Rhythm",
+        Sort::Hits => "Repeats",
+        Sort::Name => "Name",
+        Sort::Recent => "Last seen",
     };
 }
 
@@ -346,7 +488,7 @@ fn sortNote(key : Sort) : string {
         Sort::Salience => "repeats, rhythm, risk, traffic and recency, weighted",
         Sort::Traffic => "most bytes moving first",
         Sort::Risk => "worst trust score first; unknown addresses last",
-        Sort::Rhythm => "steadiest repeat interval first — the shape a timer makes",
+        Sort::Rhythm => "steadiest repeat interval first: the shape a timer makes",
         Sort::Hits => "most repeat visits first",
         Sort::Name => "by host name, A to Z",
         Sort::Recent => "most recently seen first",

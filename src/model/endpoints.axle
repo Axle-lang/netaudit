@@ -33,6 +33,8 @@ use crate::model::hosts;
 use crate::model::groups;
 use crate::model::pool;
 use crate::sys::procs;
+use crate::sys::machine::Machine;
+use crate::model::world::World;
 
 /** Rows the journal can hold. */
 const MAX_ENDPOINTS : i32 = 8192;
@@ -57,6 +59,28 @@ enum SocketKind : i32 {
 
 
 /**
+ * One socket, as the journal keys it: which program, which protocol and
+ * kind, which port, and the address bytes it names. Everything a new row is
+ * minted from, carried as one value from the table that saw it.
+ */
+struct Sighting {
+    /** The identity the row is indexed under. */
+    pub(crate) key : i64;
+    /** The program's group slot. */
+    pub(crate) group : i32;
+    /** Peer, listening socket, or UDP handle. */
+    pub(crate) kind : SocketKind;
+    /** TCP or UDP. */
+    pub(crate) proto : Proto;
+    /** 4 or 6, as the address is shown — a v4-mapped v6 address is 4. */
+    pub(crate) family : i32;
+    /** The peer's port, or the bind's for a listening socket or a UDP handle. */
+    pub(crate) port : i32;
+    /** Where the shown address bytes start. */
+    pub(crate) addr : i64;
+}
+
+/**
  * The endpoint journal, in column form.
  *
  * Slots are compacted when a row expires, so nothing outside this class may
@@ -64,112 +88,60 @@ enum SocketKind : i32 {
  * the selection and the scroll — are held as a key and as pixels.
  */
 class Endpoints {
-    pub(crate) key : i64[],
-    pub(crate) group : i32[],
-    pub(crate) host : i32[],
-    pub(crate) kind : SocketKind[],
-    pub(crate) proto : Proto[],
-    pub(crate) family : i32[],
-    pub(crate) port : i32[],
-    pub(crate) state : i32[],
+    pub(crate) key : i64[] = malloc<i64>(MAX_ENDPOINTS as i64),
+    pub(crate) group : i32[] = malloc<i32>(MAX_ENDPOINTS as i64),
+    pub(crate) host : i32[] = malloc<i32>(MAX_ENDPOINTS as i64),
+    pub(crate) kind : SocketKind[] = malloc<SocketKind>(MAX_ENDPOINTS as i64),
+    pub(crate) proto : Proto[] = malloc<Proto>(MAX_ENDPOINTS as i64),
+    pub(crate) family : i32[] = malloc<i32>(MAX_ENDPOINTS as i64),
+    pub(crate) port : i32[] = malloc<i32>(MAX_ENDPOINTS as i64),
+    pub(crate) state : i32[] = malloc<i32>(MAX_ENDPOINTS as i64),
 
-    pub(crate) firstMs : i64[],
-    pub(crate) lastMs : i64[],
-    pub(crate) closedMs : i64[],
+    pub(crate) firstMs : i64[] = malloc<i64>(MAX_ENDPOINTS as i64),
+    pub(crate) lastMs : i64[] = malloc<i64>(MAX_ENDPOINTS as i64),
+    pub(crate) closedMs : i64[] = malloc<i64>(MAX_ENDPOINTS as i64),
 
-    pub(crate) hits : i32[],
-    pub(crate) liveNow : i32[],
-    livePrev : i32[],
-    pub(crate) sockets : i32[],
+    pub(crate) hits : i32[] = malloc<i32>(MAX_ENDPOINTS as i64),
+    pub(crate) liveNow : i32[] = malloc<i32>(MAX_ENDPOINTS as i64),
+    livePrev : i32[] = malloc<i32>(MAX_ENDPOINTS as i64),
+    pub(crate) sockets : i32[] = malloc<i32>(MAX_ENDPOINTS as i64),
 
-    pub(crate) bytesIn : i64[],
-    pub(crate) bytesOut : i64[],
-    pub(crate) rateIn : i64[],
-    pub(crate) rateOut : i64[],
-    tickIn : i64[],
-    tickOut : i64[],
+    pub(crate) bytesIn : i64[] = malloc<i64>(MAX_ENDPOINTS as i64),
+    pub(crate) bytesOut : i64[] = malloc<i64>(MAX_ENDPOINTS as i64),
+    pub(crate) rateIn : i64[] = malloc<i64>(MAX_ENDPOINTS as i64),
+    pub(crate) rateOut : i64[] = malloc<i64>(MAX_ENDPOINTS as i64),
+    tickIn : i64[] = malloc<i64>(MAX_ENDPOINTS as i64),
+    tickOut : i64[] = malloc<i64>(MAX_ENDPOINTS as i64),
 
-    pub(crate) salience : i64[],
-    pub(crate) score : i32[],
-    pub(crate) reasons : i32[],
+    pub(crate) salience : i64[] = malloc<i64>(MAX_ENDPOINTS as i64),
+    pub(crate) score : i32[] = malloc<i32>(MAX_ENDPOINTS as i64),
+    pub(crate) reasons : i32[] = malloc<i32>(MAX_ENDPOINTS as i64),
 
-    addrs : i64,
-    pub(crate) count : i32,
-    index : SlotIndex,
-    pub(crate) rhythm : Rhythm,
-    pub(crate) dropped : i32,
-
-    constructor() {
-        self.key = malloc<i64>(MAX_ENDPOINTS as i64);
-        self.group = malloc<i32>(MAX_ENDPOINTS as i64);
-        self.host = malloc<i32>(MAX_ENDPOINTS as i64);
-        self.kind = malloc<SocketKind>(MAX_ENDPOINTS as i64);
-        self.proto = malloc<Proto>(MAX_ENDPOINTS as i64);
-        self.family = malloc<i32>(MAX_ENDPOINTS as i64);
-        self.port = malloc<i32>(MAX_ENDPOINTS as i64);
-        self.state = malloc<i32>(MAX_ENDPOINTS as i64);
-        self.firstMs = malloc<i64>(MAX_ENDPOINTS as i64);
-        self.lastMs = malloc<i64>(MAX_ENDPOINTS as i64);
-        self.closedMs = malloc<i64>(MAX_ENDPOINTS as i64);
-        self.hits = malloc<i32>(MAX_ENDPOINTS as i64);
-        self.liveNow = malloc<i32>(MAX_ENDPOINTS as i64);
-        self.livePrev = malloc<i32>(MAX_ENDPOINTS as i64);
-        self.sockets = malloc<i32>(MAX_ENDPOINTS as i64);
-        self.bytesIn = malloc<i64>(MAX_ENDPOINTS as i64);
-        self.bytesOut = malloc<i64>(MAX_ENDPOINTS as i64);
-        self.rateIn = malloc<i64>(MAX_ENDPOINTS as i64);
-        self.rateOut = malloc<i64>(MAX_ENDPOINTS as i64);
-        self.tickIn = malloc<i64>(MAX_ENDPOINTS as i64);
-        self.tickOut = malloc<i64>(MAX_ENDPOINTS as i64);
-        self.salience = malloc<i64>(MAX_ENDPOINTS as i64);
-        self.score = malloc<i32>(MAX_ENDPOINTS as i64);
-        self.reasons = malloc<i32>(MAX_ENDPOINTS as i64);
-        self.addrs = Mem::take((MAX_ENDPOINTS as i64) * EP_ADDR_BYTES);
-        self.count = 0;
-        self.dropped = 0;
-        self.index = new SlotIndex(MAX_ENDPOINTS * 2);
-        self.rhythm = new Rhythm(MAX_ENDPOINTS);
-    }
+    addrs : i64 = Mem::take((MAX_ENDPOINTS as i64) * EP_ADDR_BYTES),
+    pub(crate) count : i32 = 0,
+    index : SlotIndex = new SlotIndex(MAX_ENDPOINTS * 2),
+    pub(crate) rhythm : Rhythm = new Rhythm(MAX_ENDPOINTS),
+    pub(crate) dropped : i32 = 0,
 
     /** Byte address of row `s`'s sixteen address bytes. */
     pub(crate) fn addrAt(self, s : i32) : i64 {
         return self.addrs + (s as i64) * EP_ADDR_BYTES;
     }
 
-    /**
-     * Fold one whole connection snapshot into the journal.
-     *
-     * The three passes are separate on purpose. The first clears the
-     * per-tick counters, the second attributes every socket, and only the
-     * third decides what changed — because "this endpoint became live
-     * again" is a statement about the tick as a whole, and cannot be made
-     * while rows are still arriving.
-     */
-    pub(crate) fn absorb(
-        mut self,
-        nowMs : i64,
-        conns : Conns,
-        pool : Pool,
-        procs : Procs,
-        groups : Groups,
-        hosts : Hosts
-    ) : void {
-        if (!conns.ok || self.addrs == 0) {
-            return;
-        }
-        self.beginTick();
-        groups.beginTick();
-
-        for (r of 0..conns.count) {
-            self.attribute(nowMs, conns, r, pool, procs, groups, hosts);
-        }
-
-        self.settle(nowMs);
-        self.expire(nowMs);
+    /** Whether the journal's storage was allocated — a reading needs it. */
+    pub(crate) fn ready(self) : bool {
+        return self.addrs != 0;
     }
 
-    /** Move this tick's live counts into `livePrev` and start fresh. */
-    fn beginTick(mut self) : void {
+    /**
+     * Move this tick's live counts into `livePrev` and start fresh.
+     *
+     * `dropped` restarts too: it reports the conversations the full journal
+     * could not take *now*. Accumulated, ten sockets left out for a minute
+     * would read as six hundred.
+     */
+    pub(crate) fn beginTick(mut self) : void {
+        self.dropped = 0;
         for (s of 0..self.count) {
             self.livePrev[s] = self.liveNow[s];
             self.liveNow[s] = 0;
@@ -177,96 +149,33 @@ class Endpoints {
         }
     }
 
-    /** Fold one connection row into the endpoint it belongs to. */
-    fn attribute(
-        mut self,
-        nowMs : i64,
-        conns : Conns,
-        r : i32,
-        pool : Pool,
-        procs : Procs,
-        groups : Groups,
-        hosts : Hosts
-    ) : void {
-        let g : i32 = groups.forPid(pool, procs, conns.pid[r] as i64);
-        if (g < 0) {
-            return;
-        }
-
-        let proto : Proto = conns.proto[r];
-        let state : i32 = conns.state[r];
-        let kind : SocketKind = SocketKind::Peer;
-        let port : i32 = conns.remotePort[r];
-        if (proto == Proto::Udp) {
-            kind = SocketKind::Udp;
-            port = conns.localPort[r];
-        } else if (state == TCP_LISTEN) {
-            kind = SocketKind::Listen;
-            port = conns.localPort[r];
-        }
-
-        let raw : i64 = conns.addrAt(r);
-        let fam : i32 = shownFamily(raw, conns.family[r]);
-        let at : i64 = raw + shownOffset(raw, conns.family[r]);
-
-        let k : i64 = hashStep(
-            hashStep(hashStep(seed(), g as i64), ((proto as i32) * 8 + (kind as i32)) as i64),
-            port as i64
-        );
-        k = hashAddr(k, at, fam);
-
-        let s : i32 = self.index.get(k);
-        if (s < 0) {
-            s = self.mint(nowMs, k, g, kind, proto, fam, port, at);
-            if (s < 0) {
-                return;
-            }
-            self.host[s] = hosts.intern(at, fam);
-        }
-
-        self.state[s] = state;
-        self.lastMs[s] = nowMs;
-        self.sockets[s] = self.sockets[s] + 1;
-        if (proto == Proto::Udp || state == TCP_LISTEN || isLive(state)) {
-            self.liveNow[s] = self.liveNow[s] + 1;
-        }
-    }
-
-    /** Mint a row for a conversation never seen before. */
-    fn mint(
-        mut self,
-        nowMs : i64,
-        k : i64,
-        g : i32,
-        kind : SocketKind,
-        proto : Proto,
-        family : i32,
-        port : i32,
-        at : i64
-    ) : i32 {
+    /** Mint a row for a conversation never seen before; `-1` when the journal is full. */
+    pub(crate) fn mint(mut self, at : Sighting, nowMs : i64) : i32 {
         if (self.count >= MAX_ENDPOINTS) {
             self.dropped = self.dropped + 1;
             return -1;
         }
+
         let s : i32 = self.count;
         self.count = s + 1;
 
         Mem::clear(self.addrAt(s), EP_ADDR_BYTES);
         let n : i64 = 4;
-        if (family == 6) {
+        if (at.family == 6) {
             n = 16;
         }
+
         for (i of 0..n) {
-            Mem::putByte(self.addrAt(s), i, Mem::byteAt(at, i));
+            Mem::putByte(self.addrAt(s), i, Mem::byteAt(at.addr, i));
         }
 
-        self.key[s] = k;
-        self.group[s] = g;
+        self.key[s] = at.key;
+        self.group[s] = at.group;
         self.host[s] = -1;
-        self.kind[s] = kind;
-        self.proto[s] = proto;
-        self.family[s] = family;
-        self.port[s] = port;
+        self.kind[s] = at.kind;
+        self.proto[s] = at.proto;
+        self.family[s] = at.family;
+        self.port[s] = at.port;
         self.state[s] = 0;
         self.firstMs[s] = nowMs;
         self.lastMs[s] = nowMs;
@@ -291,7 +200,7 @@ class Endpoints {
         self.reasons[s] = 0;
         self.rhythm.reset(s);
         self.rhythm.arrive(s, nowMs);
-        self.index.put(k, s);
+        self.index.put(at.key, s);
         return s;
     }
 
@@ -303,7 +212,7 @@ class Endpoints {
      * every tick would make a permanently-open connection the most regular
      * thing on the machine, which is both true and useless.
      */
-    fn settle(mut self, nowMs : i64) : void {
+    pub(crate) fn settle(mut self, nowMs : i64) : void {
         for (s of 0..self.count) {
             if (self.liveNow[s] > 0 && self.livePrev[s] == 0) {
                 self.hits[s] = self.hits[s] + 1;
@@ -312,6 +221,7 @@ class Endpoints {
             } else if (self.liveNow[s] == 0 && self.livePrev[s] > 0) {
                 self.closedMs[s] = nowMs;
             }
+
             self.decay(s);
         }
     }
@@ -339,7 +249,7 @@ class Endpoints {
      * a patch that missed one moved slot would answer a lookup with another
      * endpoint's row, and nothing would go red.
      */
-    fn expire(mut self, nowMs : i64) : void {
+    pub(crate) fn expire(mut self, nowMs : i64) : void {
         let moved : bool = false;
         let s : i32 = 0;
         while (s < self.count) {
@@ -349,11 +259,13 @@ class Endpoints {
                     self.copySlot(s, last);
                     moved = true;
                 }
+
                 self.count = last;
             } else {
                 s = s + 1;
             }
         }
+
         if (moved || self.index.size() > self.count) {
             self.reindex();
         }
@@ -388,6 +300,7 @@ class Endpoints {
         for (b of 0..EP_ADDR_BYTES) {
             Mem::putByte(self.addrAt(to), b, Mem::byteAt(self.addrAt(from), b));
         }
+
         self.rhythm.copyFrom(to, from);
     }
 
@@ -448,9 +361,98 @@ class Endpoints {
             Mem::release(self.addrs);
             self.addrs = 0;
         }
+
         self.index.close();
         self.rhythm.dispose();
     }
+}
+
+/**
+ * Fold one whole connection snapshot into the journal.
+ *
+ * The three passes are separate on purpose. The first clears the per-tick
+ * counters, the second attributes every socket, and only the third decides
+ * what changed — because "this endpoint became live again" is a statement
+ * about the tick as a whole, and cannot be made while rows are still
+ * arriving.
+ */
+fn absorbSnapshot(w : World, mach : Machine, nowMs : i64) : void {
+    let e : Endpoints = w.eps;
+    if (!mach.conns.ok || !e.ready()) {
+        return;
+    }
+
+    e.beginTick();
+    w.groups.beginTick();
+    for (r of 0..mach.conns.count) {
+        attribute(w, mach, r, nowMs);
+    }
+
+    e.settle(nowMs);
+    e.expire(nowMs);
+}
+
+/** Fold connection row `r` into the endpoint it belongs to. */
+fn attribute(w : World, mach : Machine, r : i32, nowMs : i64) : void {
+    let conns : Conns = mach.conns;
+    let g : i32 = w.groups.forPid(w.pool, mach.procs, conns.pid[r] as i64);
+    if (g < 0) {
+        return;
+    }
+
+    let at : Sighting = sighted(conns, r, g);
+    let e : Endpoints = w.eps;
+    let s : i32 = e.bySlotKey(at.key);
+    if (s < 0) {
+        s = e.mint(at, nowMs);
+        if (s < 0) {
+            return;
+        }
+
+        e.host[s] = w.hosts.intern(at.addr, at.family);
+    }
+
+    let state : i32 = conns.state[r];
+    e.state[s] = state;
+    e.lastMs[s] = nowMs;
+    e.sockets[s] = e.sockets[s] + 1;
+    if (at.proto == Proto::Udp || state == TCP_LISTEN || isLive(state)) {
+        e.liveNow[s] = e.liveNow[s] + 1;
+    }
+}
+
+/**
+ * Connection row `r` of program `g`, as the journal keys it. The identity
+ * deliberately leaves out the local port — see the head of this file.
+ */
+fn sighted(conns : Conns, r : i32, g : i32) : Sighting {
+    let proto : Proto = conns.proto[r];
+    let kind : SocketKind = SocketKind::Peer;
+    let port : i32 = conns.remotePort[r];
+    if (proto == Proto::Udp) {
+        kind = SocketKind::Udp;
+        port = conns.localPort[r];
+    } else if (conns.state[r] == TCP_LISTEN) {
+        kind = SocketKind::Listen;
+        port = conns.localPort[r];
+    }
+
+    let raw : i64 = conns.addrAt(r);
+    let fam : i32 = shownFamily(raw, conns.family[r]);
+    let addr : i64 = raw + shownOffset(raw, conns.family[r]);
+    let k : i64 = hashStep(
+        hashStep(hashStep(seed(), g as i64), ((proto as i32) * 8 + (kind as i32)) as i64),
+        port as i64
+    );
+    return Sighting {
+        key: hashAddr(k, addr, fam),
+        group: g,
+        kind: kind,
+        proto: proto,
+        family: fam,
+        port: port,
+        addr: addr,
+    };
 }
 
 // ─── Ranking ─────────────────────────────────────────────────
@@ -463,7 +465,7 @@ const RATE_FULL : i64 = 1048576;
 const RECENCY_MS : i64 = 600000;
 
 /**
- * How much this row deserves the reader's attention, from 0 to 10000.
+ * How much this row deserves the reader's attention, from 0 to 13200.
  *
  * The five terms are the five reasons an audit looks twice, weighted by how
  * often each one is the reason something turned out to matter:
@@ -474,11 +476,11 @@ const RECENCY_MS : i64 = 600000;
  *   traffic     something substantial is moving
  *   recency     it happened recently enough to still be actionable
  *
- * Risk is weighted highest and regularity second, because a big transfer to
+ * Risk is weighted highest, repetition and regularity next, because a big transfer to
  * a well-known network is the normal state of a working machine, and a tiny
  * one to an unnamed host every thirty seconds is not.
  */
-fn salienceOf(e : Endpoints, hosts : Hosts, s : i32, nowMs : i64) : i64 {
+fn salienceOf(e : Endpoints, s : i32, nowMs : i64) : i64 {
     let hits : i64 = (e.hits[s] as i64) * 1000 / (HITS_FULL as i64);
     if (hits > 1000) {
         hits = 1000;
@@ -509,6 +511,7 @@ fn salienceOf(e : Endpoints, hosts : Hosts, s : i32, nowMs : i64) : i64 {
     if (e.liveNow[s] > 0) {
         live = 200;
     }
+
     return hits * 3 + regular * 3 + risk * 4 + traffic * 2 + recency + live;
 }
 
@@ -518,9 +521,9 @@ fn salienceOf(e : Endpoints, hosts : Hosts, s : i32, nowMs : i64) : i64 {
  * salience jumps by a little does not overtake its neighbour on the next
  * frame, and the reader's pointer stays over the row they were reading.
  */
-fn rank(e : Endpoints, hosts : Hosts, nowMs : i64) : void {
+fn rank(e : Endpoints, nowMs : i64) : void {
     for (s of 0..e.count) {
-        let now : i64 = salienceOf(e, hosts, s, nowMs);
+        let now : i64 = salienceOf(e, s, nowMs);
         e.salience[s] = (e.salience[s] * 3 + now) / 4;
     }
 }
@@ -530,8 +533,10 @@ fn kindBadge(kind : SocketKind, proto : Proto) : string {
     if (kind == SocketKind::Listen) {
         return "LISTEN";
     }
+
     if (proto == Proto::Udp) {
         return "UDP";
     }
+
     return "TCP";
 }

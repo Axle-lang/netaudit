@@ -1,8 +1,9 @@
 // input — keys, clicks and wheel turned into changes on `app`.
 //
 // Nothing here draws and nothing here reads the OS. It maps an event onto a
-// change of interaction state, and hands back an **action** for the three
-// things it cannot do itself: quit, force a refresh, and open a folder.
+// change of interaction state, and hands back an **action** for the things
+// it cannot do itself: quit, force a refresh, clear the journal, open a
+// folder, write a snapshot.
 //
 // Every movement goes through the flat row list, so the keyboard and the
 // pointer agree on what "the next row" means — including the fact that an
@@ -10,20 +11,21 @@
 // is stored as a key: by the time the reader presses Down again, the tree
 // has been rebuilt and the index they moved from means something else.
 
+use smalt::{Event, MouseButton, Scancode};
 use crate::ui::tree;
 use crate::ui::chrome;
-use smalt::{Event, MouseButton, Scancode};
-use crate::app::App;
-use crate::app::{Modal, Say};
-use crate::model::view::{View, RowKind, rowOfEndpoint, rowOfGroup};
-use crate::model::endpoints;
-use crate::model::groups;
+use crate::app::{App, Modal, Say, Hot};
+use crate::session::Session;
+use crate::theme::Layout;
+use crate::model::view::{View, RowKind, Sort, rowOfEndpoint, rowOfGroup};
+use crate::model::groups::Groups;
+use crate::sys::tiers::Tier;
 
 /**
  * What the loop must do that this file cannot do itself.
  *
  * Everything else an event causes is a change on `App`, made here. These
- * five need the window, the OS or the journal, so they are handed back as a
+ * need the window, the OS or the journal, so they are handed back as a
  * value the loop matches on — and the match is exhaustive, so an action
  * added here is one the loop is made to handle.
  */
@@ -42,44 +44,50 @@ enum Action : i32 {
     Snap = 5,
 }
 
-/** Rows a page key moves by — a little less than a screen, to keep context. */
-const PAGE_ROWS : i32 = 12;
-
 /** The flat-list position of whatever is selected, or `-1`. */
-fn selectedRow(a : App, v : View, e : Endpoints, g : Groups) : i32 {
+fn selectedRow(ss : Session) : i32 {
+    let a : App = ss.a;
     if (!a.selected) {
         return -1;
     }
+
     return match a.selKind {
-        RowKind::Group => rowOfGroup(v, g, a.selKey),
-        RowKind::Endpoint => rowOfEndpoint(v, e, a.selKey),
+        RowKind::Group => rowOfGroup(ss.w.view, ss.w.groups, a.selKey),
+        RowKind::Endpoint => rowOfEndpoint(ss.w.view, ss.w.eps, a.selKey),
     };
 }
 
 /** Select the row at flat position `r`, and scroll it into view. */
-fn selectRow(a : App, v : View, e : Endpoints, g : Groups, r : i32) : void {
+fn selectRow(ss : Session, r : i32) : void {
+    let a : App = ss.a;
+    let v : View = ss.w.view;
     if (r < 0 || r >= v.count) {
         return;
     }
+
     if (v.rowKind[r] == RowKind::Group) {
-        a.selectGroup(g.key[v.rowRef[r]]);
+        a.selectGroup(ss.w.groups.key[v.rowRef[r]]);
     } else {
-        a.selectEndpoint(e.key[v.rowRef[r]]);
+        a.selectEndpoint(ss.w.eps.key[v.rowRef[r]]);
     }
-    a.scroll = tree::reveal(v, r, a.scroll);
+
+    a.scroll = tree::reveal(a.lay, v, r, a.scroll);
 }
 
 /** Move the selection `delta` rows, clamped to the ends of the list. */
-fn moveSel(a : App, v : View, e : Endpoints, g : Groups, delta : i32) : void {
+fn moveSel(ss : Session, delta : i32) : void {
+    let v : View = ss.w.view;
     if (v.count == 0) {
         return;
     }
-    let from : i32 = selectedRow(a, v, e, g);
+
+    let from : i32 = selectedRow(ss);
     if (from < 0) {
-        selectRow(a, v, e, g, 0);
+        selectRow(ss, 0);
         return;
     }
-    selectRow(a, v, e, g, (from + delta).max(0).min(v.count - 1));
+
+    selectRow(ss, (from + delta).max(0).min(v.count - 1));
 }
 
 /** The group a row belongs to: itself if it is one, otherwise the one above. */
@@ -89,28 +97,70 @@ fn groupOf(v : View, r : i32) : i32 {
         if (v.rowKind[i] == RowKind::Group) {
             return v.rowRef[i];
         }
+
         i = i - 1;
     }
+
     return -1;
 }
 
 /** Route a key by what currently has focus. */
-fn onKey(a : App, v : View, e : Endpoints, g : Groups, sc : Scancode) : Action {
-    if (a.modal != Modal::None) {
-        return modalKey(a, sc);
+fn onKey(ss : Session, sc : Scancode) : Action {
+    if (ss.a.modal != Modal::None) {
+        return modalKey(ss.a, sc);
     }
-    if (a.typing) {
-        return typingKey(a, v, e, g, sc);
+
+    if (ss.a.typing) {
+        return typingKey(ss, sc);
     }
-    return browsingKey(a, v, e, g, sc);
+
+    return browsingKey(ss, sc);
 }
 
-/** Keys while a card is up — anything closes it. */
+/**
+ * Keys while a card is up. Esc, Enter, Space and F1 close it; O still opens
+ * the program's folder, which is what the detail card's footer offers; Q
+ * still quits. Everything else is swallowed rather than acting on the tree
+ * hidden behind the card.
+ */
 fn modalKey(a : App, sc : Scancode) : Action {
-    if (sc == Scancode::Escape || sc == Scancode::Return || sc == Scancode::Space) {
+    if (a.modal == Modal::SortMenu) {
+        return menuKey(a, sc);
+    }
+
+    if (sc == Scancode::Escape || sc == Scancode::Return || sc == Scancode::KeypadEnter
+        || sc == Scancode::Space || sc == Scancode::F1) {
         a.modal = Modal::None;
         a.dirty = true;
+        return Action::None;
     }
+
+    if (sc == Scancode::O && a.modal == Modal::Detail) {
+        return Action::Open;
+    }
+
+    if (sc == Scancode::Q) {
+        return Action::Quit;
+    }
+
+    return Action::None;
+}
+
+/** Keys while the sort menu is open: the arrows move, Enter picks, Esc closes. */
+fn menuKey(a : App, sc : Scancode) : Action {
+    if (sc == Scancode::Up) {
+        a.movePick(-1);
+    } else if (sc == Scancode::Down) {
+        a.movePick(1);
+    } else if (sc == Scancode::Return || sc == Scancode::KeypadEnter || sc == Scancode::Space) {
+        a.pickSort();
+    } else if (sc == Scancode::Escape || sc == Scancode::S) {
+        a.modal = Modal::None;
+        a.dirty = true;
+    } else if (sc == Scancode::Q) {
+        return Action::Quit;
+    }
+
     return Action::None;
 }
 
@@ -118,68 +168,91 @@ fn modalKey(a : App, sc : Scancode) : Action {
  * Keys while the filter field has focus. Navigation stays live: the point
  * of narrowing the list is to pick something out of it.
  */
-fn typingKey(a : App, v : View, e : Endpoints, g : Groups, sc : Scancode) : Action {
+fn typingKey(ss : Session, sc : Scancode) : Action {
+    let a : App = ss.a;
     if (sc == Scancode::Escape) {
         a.clearFilter();
         return Action::None;
     }
+
     if (sc == Scancode::Return || sc == Scancode::KeypadEnter) {
         a.typing = false;
         a.dirty = true;
         return Action::None;
     }
+
     if (sc == Scancode::Backspace) {
         a.backspace();
         return Action::None;
     }
+
     if (sc == Scancode::Up) {
-        moveSel(a, v, e, g, -1);
+        moveSel(ss, -1);
     }
+
     if (sc == Scancode::Down) {
-        moveSel(a, v, e, g, 1);
+        moveSel(ss, 1);
     }
+
     return Action::None;
 }
 
 /** Keys while the tree has focus. */
-fn browsingKey(a : App, v : View, e : Endpoints, g : Groups, sc : Scancode) : Action {
-    if (sc == Scancode::Escape || sc == Scancode::Q) {
-        if (a.filterLen > 0) {
-            a.clearFilter();
-            return Action::None;
+fn browsingKey(ss : Session, sc : Scancode) : Action {
+    // Esc backs out of whatever is narrowing the view and never closes the
+    // window: a key pressed to dismiss something must not be able to end
+    // the session the reader was in the middle of. Q quits.
+    if (sc == Scancode::Escape) {
+        if (ss.a.filterLen > 0) {
+            ss.a.clearFilter();
         }
+
+        return Action::None;
+    }
+
+    if (sc == Scancode::Q) {
         return Action::Quit;
     }
+
     if (sc == Scancode::Up) {
-        moveSel(a, v, e, g, -1);
+        moveSel(ss, -1);
         return Action::None;
     }
+
     if (sc == Scancode::Down) {
-        moveSel(a, v, e, g, 1);
+        moveSel(ss, 1);
         return Action::None;
     }
+
     if (sc == Scancode::PageUp) {
-        moveSel(a, v, e, g, 0 - PAGE_ROWS);
+        moveSel(ss, 0 - tree::pageRows(ss.a.lay));
         return Action::None;
     }
+
     if (sc == Scancode::PageDown) {
-        moveSel(a, v, e, g, PAGE_ROWS);
+        moveSel(ss, tree::pageRows(ss.a.lay));
         return Action::None;
     }
+
     if (sc == Scancode::Home) {
-        selectRow(a, v, e, g, 0);
+        selectRow(ss, 0);
         return Action::None;
     }
+
     if (sc == Scancode::End) {
-        selectRow(a, v, e, g, v.count - 1);
+        selectRow(ss, ss.w.view.count - 1);
         return Action::None;
     }
-    return foldKey(a, v, e, g, sc);
+
+    return foldKey(ss, sc);
 }
 
 /** The keys that open and close what the tree is showing. */
-fn foldKey(a : App, v : View, e : Endpoints, g : Groups, sc : Scancode) : Action {
-    let r : i32 = selectedRow(a, v, e, g);
+fn foldKey(ss : Session, sc : Scancode) : Action {
+    let a : App = ss.a;
+    let v : View = ss.w.view;
+    let g : Groups = ss.w.groups;
+    let r : i32 = selectedRow(ss);
 
     if (sc == Scancode::Right) {
         let gi : i32 = groupOf(v, r);
@@ -187,8 +260,10 @@ fn foldKey(a : App, v : View, e : Endpoints, g : Groups, sc : Scancode) : Action
             g.toggle(gi);
             a.dirty = true;
         }
+
         return Action::None;
     }
+
     if (sc == Scancode::Left) {
         let gi : i32 = groupOf(v, r);
         if (gi >= 0) {
@@ -200,10 +275,13 @@ fn foldKey(a : App, v : View, e : Endpoints, g : Groups, sc : Scancode) : Action
             } else if (g.isOpen(gi)) {
                 g.toggle(gi);
             }
+
             a.dirty = true;
         }
+
         return Action::None;
     }
+
     if (sc == Scancode::Return || sc == Scancode::KeypadEnter) {
         if (r >= 0 && v.rowKind[r] == RowKind::Group) {
             g.toggle(v.rowRef[r]);
@@ -212,13 +290,16 @@ fn foldKey(a : App, v : View, e : Endpoints, g : Groups, sc : Scancode) : Action
             a.modal = Modal::Detail;
             a.dirty = true;
         }
+
         return Action::None;
     }
+
     if (sc == Scancode::Num8) {
         g.setAll(!anyOpen(g));
         a.dirty = true;
         return Action::None;
     }
+
     return commandKey(a, sc);
 }
 
@@ -229,6 +310,7 @@ fn anyOpen(g : Groups) : bool {
             return true;
         }
     }
+
     return false;
 }
 
@@ -242,26 +324,30 @@ fn commandKey(a : App, sc : Scancode) : Action {
         a.dirty = true;
         return Action::None;
     }
+
     if (sc == Scancode::S) {
         a.nextSort();
         return Action::None;
     }
+
     if (sc == Scancode::L) {
-        a.showLocal = !a.showLocal;
-        a.saying(Say::Local);
+        flipLocal(a);
         return Action::None;
     }
+
     if (sc == Scancode::B) {
-        a.showBound = !a.showBound;
-        a.saying(Say::Bound);
+        flipBound(a);
         return Action::None;
     }
+
     if (sc == Scancode::O) {
         return Action::Open;
     }
+
     if (sc == Scancode::C) {
         return Action::Clear;
     }
+
     if (sc == Scancode::Space) {
         a.paused = !a.paused;
         if (a.paused) {
@@ -269,20 +355,37 @@ fn commandKey(a : App, sc : Scancode) : Action {
         } else {
             a.saying(Say::Resumed);
         }
+
         return Action::None;
     }
+
     if (sc == Scancode::F5 || sc == Scancode::R) {
         return Action::Refresh;
     }
+
     if (sc == Scancode::F1) {
         a.modal = Modal::Help;
         a.dirty = true;
         return Action::None;
     }
+
     if (sc == Scancode::F12) {
         return Action::Snap;
     }
+
     return Action::None;
+}
+
+/** Show or hide traffic that never leaves the building, and say which. */
+fn flipLocal(a : App) : void {
+    a.showLocal = !a.showLocal;
+    a.saying(Say::Local);
+}
+
+/** Show or hide listening sockets and UDP handles, and say which. */
+fn flipBound(a : App) : void {
+    a.showBound = !a.showBound;
+    a.saying(Say::Bound);
 }
 
 /** A typed character, once the `/` that opened the field has been eaten. */
@@ -290,10 +393,12 @@ fn onText(a : App, c : i32) : Action {
     if (!a.typing) {
         return Action::None;
     }
+
     if (a.swallow) {
         a.swallow = false;
         return Action::None;
     }
+
     a.typeByte(c);
     return Action::None;
 }
@@ -303,23 +408,50 @@ fn onText(a : App, c : i32) : Action {
  * the pointer is over the rows — reordering is frozen, so nothing the reader
  * is about to click can move first.
  */
-fn onMotion(a : App, v : View, nowMs : i64, x : i32, y : i32) : Action {
+fn onMotion(ss : Session, nowMs : i64, x : i32, y : i32) : Action {
+    let a : App = ss.a;
+    let v : View = ss.w.view;
     a.pointerMoved(nowMs, x, y);
+
     if (a.dragging) {
         tree::dragTo(a, v, y);
         a.holdOrder(nowMs);
         return Action::None;
     }
+
+    a.setHot(hotFor(a, x, y));
+    if (a.modal == Modal::SortMenu) {
+        a.pointAtPick(chrome::menuItemAt(x, y));
+    }
+
     let was : i32 = a.hoverRow;
     a.hoverRow = tree::rowAtPoint(v, a, x, y);
-    a.inTree = tree::inRows(x, y);
+    a.inTree = tree::inRows(a.lay, x, y);
     if (a.inTree) {
         a.holdOrder(nowMs);
     }
+
     if (a.hoverRow != was) {
         a.dirty = true;
     }
+
     return Action::None;
+}
+
+/**
+ * What the pointer at `(x, y)` is over, given what is open: with the sort
+ * menu up only its entries react, and under a card nothing does.
+ */
+fn hotFor(a : App, x : i32, y : i32) : Hot {
+    if (a.modal == Modal::None) {
+        return hotAt(a.lay, x, y);
+    }
+
+    if (a.modal == Modal::SortMenu && chrome::menuItemAt(x, y) >= 0) {
+        return Hot::Menu;
+    }
+
+    return Hot::None;
 }
 
 /**
@@ -327,78 +459,179 @@ fn onMotion(a : App, v : View, nowMs : i64, x : i32, y : i32) : Action {
  * is here rather than in the loop: which buttons a program answers is an
  * input decision, not a dispatch one.
  */
-fn onClick(a : App, v : View, e : Endpoints, g : Groups, ev : Event) : Action {
+fn onClick(ss : Session, ev : Event) : Action {
+    let a : App = ss.a;
     if (ev.button != MouseButton::Left) {
         return Action::None;
     }
-    let x : i32 = ev.x;
-    let y : i32 = ev.y;
+
+    if (a.modal == Modal::SortMenu) {
+        // A ranking picks; anywhere else, the sort control included, puts
+        // the menu away without acting on what is under it.
+        let item : i32 = chrome::menuItemAt(ev.x, ev.y);
+        if (item >= 0) {
+            a.menuPick = item;
+            a.pickSort();
+        } else {
+            a.modal = Modal::None;
+            a.dirty = true;
+        }
+
+        return Action::None;
+    }
+
     if (a.modal != Modal::None) {
-        a.modal = Modal::None;
-        a.dirty = true;
-        return Action::None;
-    }
-    if (chrome::onFilter(x, y)) {
-        a.typing = true;
-        a.dirty = true;
-        return Action::None;
-    }
-    if (chrome::onSort(x, y)) {
-        a.nextSort();
-        return Action::None;
-    }
-    let tg : i32 = chrome::onToggle(x, y);
-    if (tg == 0) {
-        a.showLocal = !a.showLocal;
-        a.saying(Say::Local);
-        return Action::None;
-    }
-    if (tg == 1) {
-        a.showBound = !a.showBound;
-        a.saying(Say::Bound);
+        // A click on the card is a reader reading it; only a click on the
+        // dimmed page around it means "put it away".
+        if (!a.cardRect.contains(ev.x, ev.y)) {
+            a.modal = Modal::None;
+            a.dirty = true;
+        }
+
         return Action::None;
     }
 
-    if (chrome::onFilterClear(x, y) && a.filterLen > 0) {
-        a.clearFilter();
-        return Action::None;
-    }
-    let (onHeader, col) = tree::headerAt(x, y);
-    if (onHeader) {
-        a.sortByColumn(col, tree::alternate(col));
-        return Action::None;
-    }
-    if (tree::onBar(x, y)) {
-        tree::grab(a, v, y);
-        return Action::None;
-    }
-
-    let r : i32 = tree::rowAtPoint(v, a, x, y);
-    if (r < 0) {
+    let hot : Hot = hotAt(a.lay, ev.x, ev.y);
+    if (hot != Hot::Filter && hot != Hot::Clear) {
         a.typing = false;
-        a.dirty = true;
-        return Action::None;
     }
-    a.typing = false;
-    selectRow(a, v, e, g, r);
-    if (v.rowKind[r] == RowKind::Group && tree::onTwisty(x)) {
-        g.toggle(v.rowRef[r]);
-        a.dirty = true;
-    }
+
+    a.pressed = true;
+    a.dirty = true;
+    clickOn(ss, hot, ev);
     return Action::None;
+}
+
+/**
+ * A left click on `hot`. The same hit test decides what the pointer lights
+ * up, what shape it takes and what a click does — so a control answers
+ * exactly where it shows that it will.
+ */
+fn clickOn(ss : Session, hot : Hot, ev : Event) : void {
+    let a : App = ss.a;
+    match hot {
+        Hot::Clear => clearOrType(a),
+        Hot::Filter => {
+            a.typing = true;
+        }
+        Hot::Sort => a.openSortMenu(),
+        Hot::Local => flipLocal(a),
+        Hot::Bound => flipBound(a),
+        Hot::HeadProgram => sortBy(a, Sort::Salience),
+        Hot::HeadTrust => sortBy(a, Sort::Risk),
+        Hot::HeadRhythm => sortBy(a, Sort::Hits),
+        Hot::HeadTraffic => sortBy(a, Sort::Traffic),
+        Hot::Bar => tree::grab(a, ss.w.view, ev.y),
+        Hot::Rows => clickRow(ss, ev.x, ev.y),
+        Hot::Menu => {}
+        Hot::TierPoll => {}
+        Hot::TierDns => {}
+        Hot::TierEtw => {}
+        Hot::None => {}
+    }
+}
+
+/** The clear control empties a filter, and on an empty one starts typing. */
+fn clearOrType(a : App) : void {
+    if (a.filterLen > 0) {
+        a.clearFilter();
+    } else {
+        a.typing = true;
+    }
+}
+
+/** Rank by a column header: its first reading, or its second when already on the first. */
+fn sortBy(a : App, key : Sort) : void {
+    a.sortByColumn(key, tree::alternate(key));
+}
+
+/**
+ * A click on the rows: it selects the row, and on a program's chevron it
+ * folds the program too.
+ */
+fn clickRow(ss : Session, x : i32, y : i32) : void {
+    let v : View = ss.w.view;
+    let r : i32 = tree::rowAtPoint(v, ss.a, x, y);
+    if (r < 0) {
+        return;
+    }
+
+    selectRow(ss, r);
+    if (v.rowKind[r] == RowKind::Group && tree::onTwisty(x)) {
+        ss.w.groups.toggle(v.rowRef[r]);
+    }
 }
 
 /** A release ends a scrollbar drag; nothing else is held. */
 fn onRelease(a : App, ev : Event) : Action {
-    if (ev.button == MouseButton::Left && a.dragging) {
+    if (ev.button != MouseButton::Left) {
+        return Action::None;
+    }
+
+    if (a.dragging || a.pressed) {
         a.dragging = false;
+        a.pressed = false;
         a.dirty = true;
     }
+
     return Action::None;
 }
 
-/** The wheel scrolls the rows. */
-fn onWheel(a : App, v : View, notches : i32) : Action {
-    tree::wheel(a, v, notches);
+/** The control under `(x, y)`, with nothing open over the window. */
+fn hotAt(lay : Layout, x : i32, y : i32) : Hot {
+    let (overTier, tier) = chrome::tierAt(lay, x, y);
+    if (overTier) {
+        return match tier {
+            Tier::Poll => Hot::TierPoll,
+            Tier::Dns => Hot::TierDns,
+            Tier::Etw => Hot::TierEtw,
+        };
+    }
+
+    // The clear control sits inside the field, so it is asked first.
+    if (chrome::onFilterClear(x, y)) {
+        return Hot::Clear;
+    }
+
+    if (chrome::onFilter(x, y)) {
+        return Hot::Filter;
+    }
+
+    if (chrome::onSort(x, y)) {
+        return Hot::Sort;
+    }
+
+    let toggle : i32 = chrome::onToggle(x, y);
+    if (toggle == 0) {
+        return Hot::Local;
+    }
+
+    if (toggle == 1) {
+        return Hot::Bound;
+    }
+
+    let (onHeader, col) = tree::headerAt(lay, x, y);
+    if (onHeader) {
+        return tree::headHot(col);
+    }
+
+    if (tree::onBar(lay, x, y)) {
+        return Hot::Bar;
+    }
+
+    if (tree::inRows(lay, x, y)) {
+        return Hot::Rows;
+    }
+
+    return Hot::None;
+}
+
+/** The wheel scrolls the rows — not while a card is covering them. */
+fn onWheel(ss : Session, notches : i32) : Action {
+    if (ss.a.modal != Modal::None) {
+        return Action::None;
+    }
+
+    tree::wheel(ss.a, ss.w.view, notches);
     return Action::None;
 }

@@ -1,0 +1,90 @@
+// model/world — the journal and every reading taken off it, as one value.
+//
+// The pool, the endpoints, their programs, their addresses, the flattened
+// tree and the headline figures are six tables that are almost never read
+// alone: a row of the tree is an endpoint, drawn with its program's name, its
+// host's attribution and text out of the pool. Passed separately they made
+// every reader take six arguments before saying what it wanted; held here,
+// a reader takes the world and the one thing it is about.
+//
+// Nothing in this class decides anything. It owns the tables, builds them in
+// the order they depend on each other, and releases them in the reverse.
+
+use crate::model::pool::{Pool, Bytes};
+use crate::model::endpoints::Endpoints;
+use crate::model::groups::Groups;
+use crate::model::hosts::Hosts;
+use crate::model::view::View;
+use crate::model::pulse::Pulse;
+
+/** The model, whole. */
+class World {
+    /** Every piece of interned text. */
+    pub(crate) pool : Pool = new Pool(),
+    /** The journal: one row per conversation. */
+    pub(crate) eps : Endpoints = new Endpoints(),
+    /** One row per program. */
+    pub(crate) groups : Groups = new Groups(),
+    /** One row per address. */
+    pub(crate) hosts : Hosts = new Hosts(),
+    /** The flattened tree, as last rebuilt. */
+    pub(crate) view : View = new View(),
+    /** The headline figures, sampled once a tick. */
+    pub(crate) beat : Pulse = new Pulse(),
+
+    // ─── Text, as drawable spans ─────────────────────────────
+    //
+    // Every name is interned in the pool and recorded as an offset and a
+    // length on its row. These turn that pair into the span a surface
+    // draws, empty when nothing was interned.
+
+    /** Host `h`'s name. */
+    pub(crate) fn hostName(self, h : i32) : Bytes {
+        return self.pool.span(self.hosts.nameOff[h], self.hosts.nameLen[h]);
+    }
+
+    /** The network that announces host `h`. */
+    pub(crate) fn network(self, h : i32) : Bytes {
+        return self.pool.span(self.hosts.netOff[h], self.hosts.netLen[h]);
+    }
+
+    /** The operator behind host `h`. */
+    pub(crate) fn operator(self, h : i32) : Bytes {
+        return self.pool.span(self.hosts.orgOff[h], self.hosts.orgLen[h]);
+    }
+
+    /** Host `h`'s city. */
+    pub(crate) fn city(self, h : i32) : Bytes {
+        return self.pool.span(self.hosts.cityOff[h], self.hosts.cityLen[h]);
+    }
+
+    /** Host `h`'s country. */
+    pub(crate) fn country(self, h : i32) : Bytes {
+        return self.pool.span(self.hosts.countryOff[h], self.hosts.countryLen[h]);
+    }
+
+    /** Host `h`'s two-letter country code. */
+    pub(crate) fn countryCode(self, h : i32) : Bytes {
+        return self.pool.span(self.hosts.ccOff[h], self.hosts.ccLen[h]);
+    }
+
+    /** Program `gi`'s name. */
+    pub(crate) fn groupName(self, gi : i32) : Bytes {
+        return self.pool.span(self.groups.nameOff[gi], self.groups.nameLen[gi]);
+    }
+
+    /** Program `gi`'s image path, or its name when the path was refused. */
+    pub(crate) fn groupPath(self, gi : i32) : Bytes {
+        return self.pool.span(self.groups.pathOff[gi], self.groups.pathLen[gi]);
+    }
+
+    /** Release every table; the pool goes last, since the others point into it. */
+    pub(crate) fn dispose(mut self) : void {
+        self.view.dispose();
+        self.eps.dispose();
+        self.hosts.dispose();
+        self.groups.dispose();
+        self.beat.dispose();
+        self.pool.close();
+    }
+}

@@ -5,93 +5,184 @@
 // literal stays inside `i32`'s positive range. Blending happens on our
 // side, against the pixel already in the frame (`Frame::blend`, and the
 // two bits of coverage a glyph row carries), which is what lets
-// anti-aliased text sit on a card, a hovered row or a score pip without
+// anti-aliased text sit on a card, a hovered row or a score meter without
 // knowing which.
+//
+// The palette is a cool near-black with one periwinkle accent. Surfaces are
+// separated by a step of lightness and a hairline rather than by contrast,
+// so the window reads as calm until something in it is red: the only
+// saturated inks on a quiet machine are the accent and the green of a
+// healthy reading, and a flagged row is the one thing that breaks that.
+//
+// Every literal drawn in this program is ASCII. The baked face carries
+// codes 32 to 126 and nothing else, and a byte past that range draws as
+// nothing at all — an em dash or a middle dot simply vanishes, and a minus
+// sign written as U+2212 turns a penalty into a bonus on the card that
+// explains the score. Separators that want to be more than a hyphen are
+// drawn as shapes (`ui::parts::dot`), not typed.
 //
 // The grid has one property the rest of the program depends on: a group row
 // and an endpoint row are **different heights**. An endpoint carries two
 // lines (identity, then attribution) because squeezing an AS name, a
 // country, a score and a rhythm onto the same line as the address makes
 // every one of them unreadable. Nothing may assume a uniform row pitch —
-// `ui::tree` lays the rows out once per rebuild and everything else reads
+// `model::view` lays the rows out once per rebuild and everything else reads
 // the layout it produced.
 
-/** Window width — wide enough for the address, the host and the attribution. */
+/** Width the window opens at — wide enough for the address, the host and the attribution. */
 const WIN_W : i32 = 1440;
-/** Window height. */
+/** Height the window opens at. */
 const WIN_H : i32 = 900;
+/**
+ * Narrowest the layout goes. Below it the right-hand column would run into
+ * the rhythm column, so the window may get smaller but the layout does not:
+ * the frame is cut at the window's edge instead of every column overlapping.
+ */
+const LAYOUT_MIN_W : i32 = 1280;
+/** Shortest the layout goes — enough for the cards, the toolbar and a few rows. */
+const LAYOUT_MIN_H : i32 = 640;
 
 // ─── Palette ─────────────────────────────────────────────────
 
 /** Page background. */
-const C_BG : i32 = 0x1B1B1B;
+const C_BG : i32 = 0x0E1015;
 /** Raised surface: the stat cards and the tree body. */
-const C_CARD : i32 = 0x252525;
-/** Header strip of the tree, and the filter field. */
-const C_HEADER : i32 = 0x2C2C2C;
+const C_CARD : i32 = 0x161920;
+/** One step above a card: the column legend, the fields, a keycap. */
+const C_HEADER : i32 = 0x1C2029;
 /** Hairline between surfaces. */
-const C_LINE : i32 = 0x383838;
-/** A group row's own surface, one step above the body. */
-const C_GROUP : i32 = 0x2A2A2A;
+const C_LINE : i32 = 0x272C37;
+/** A program row's own surface, a breath above the body. */
+const C_GROUP : i32 = 0x191C24;
 /** Every other endpoint row, so a long row stays trackable across. */
-const C_STRIPE : i32 = 0x222222;
+const C_STRIPE : i32 = 0x181B22;
 /** Row under the pointer. */
-const C_HOVER : i32 = 0x303030;
+const C_HOVER : i32 = 0x20242F;
+/** A control's surface under the pointer — one step lighter than at rest. */
+const C_FIELD_HOVER : i32 = 0x1C2029;
+/** A control's surface while the button is held — one step darker. */
+const C_FIELD_PRESS : i32 = 0x121419;
+/** A control's outline under the pointer. */
+const C_EDGE_HOVER : i32 = 0x3A4152;
 /** Selected row. */
-const C_SEL : i32 = 0x11405E;
-/** Left marker on the selected row. */
-const C_SEL_EDGE : i32 = 0x4CC2FF;
+const C_SEL : i32 = 0x1E2742;
+/** The bar on the selected row's left edge. */
+const C_SEL_EDGE : i32 = 0x7A8CFF;
 /** Primary text. */
-const C_TEXT : i32 = 0xE8E8E8;
-/** Secondary text: column titles, units, hosts. */
-const C_DIM : i32 = 0x9A9A9A;
-/** Tertiary text: the keyboard legend, the units of a figure. */
-const C_FAINT : i32 = 0x6E6E6E;
-/** Accent — the disclosure triangle, the focused field, the throughput trace. */
-const C_ACCENT : i32 = 0x4CC2FF;
-/** A reading that is unremarkable: score 5, an established connection. */
-const C_OK : i32 = 0x4FD16C;
+const C_TEXT : i32 = 0xE8EBF1;
+/** Secondary text: column titles, hosts, figures that support another. */
+const C_DIM : i32 = 0x9AA3B5;
+/** Tertiary text: units, hints, the keyboard legend. */
+const C_FAINT : i32 = 0x626A7B;
+/** Accent — the selection, the focused field, the live trace, a steady rhythm. */
+const C_ACCENT : i32 = 0x7A8CFF;
+/** A reading that is unremarkable: score 4 or 5, an established connection. */
+const C_OK : i32 = 0x3DD68C;
 /** A reading worth a second look: score 3, a closing connection. */
-const C_WARN : i32 = 0xE3C64A;
-/** A reading that is the endpoint's whole story: score 1, a blocklist hit. */
-const C_HOT : i32 = 0xE8503A;
-/** Byte counts and the traffic gauge. */
-const C_MEM : i32 = 0xB07CE8;
+const C_WARN : i32 = 0xF2B84B;
+/** A reading that is the endpoint's whole story: score 2 or less. */
+const C_HOT : i32 = 0xFF5C6C;
+/** Byte counts and the traffic figures. */
+const C_MEM : i32 = 0xB98CFF;
 /** Dialog surface, lifted above the dimmed page. */
-const C_MODAL : i32 = 0x2E2E2E;
+const C_MODAL : i32 = 0x1A1D26;
 /** The tooltip's surface — lighter than the dialog, it sits on top of rows. */
-const C_TIP : i32 = 0x3A3A3A;
+const C_TIP : i32 = 0x232835;
 
 /** TCP badge. */
-const C_TCP : i32 = 0x4CC2FF;
+const C_TCP : i32 = 0x5AA8FF;
 /** UDP badge — a different hue because a UDP row means something weaker. */
-const C_UDP : i32 = 0xC29A4C;
+const C_UDP : i32 = 0xE5A55A;
 /** A row whose connection is gone and which is now only history. */
-const C_CLOSED : i32 = 0x5A5A5A;
+const C_CLOSED : i32 = 0x4B5263;
 /** A local peer (loopback, private range, link-local): outside the scoring. */
-const C_LOCAL : i32 = 0x7FA3B8;
+const C_LOCAL : i32 = 0x7FB4CC;
 
 // ─── Layout grid ─────────────────────────────────────────────
 
 /** Left and right page margin. */
-const PAD : i32 = 16;
+const PAD : i32 = 20;
 /** Title bar height. */
-const TITLE_H : i32 = 44;
+const TITLE_H : i32 = 52;
 /** Stat card band. */
-const CARD_Y : i32 = 52;
+const CARD_Y : i32 = 60;
 /** Stat card height. */
 const CARD_H : i32 = 104;
-/** Toolbar (filter + sort + counts) top. */
-const BAR_Y : i32 = 168;
+/** Toolbar (filter, ranking, toggles, counts) top. */
+const BAR_Y : i32 = 180;
 /** Toolbar height. */
-const BAR_H : i32 = 32;
+const BAR_H : i32 = 36;
 /** Tree top — column-legend strip included. */
-const TREE_Y : i32 = 212;
+const TREE_Y : i32 = 232;
 /** Column-legend strip height. */
-const HEAD_H : i32 = 30;
+const HEAD_H : i32 = 34;
 /** A collapsed or expanded program row. */
-const ROW_GROUP : i32 = 32;
+const ROW_GROUP : i32 = 36;
 /** An endpoint row: identity on top, attribution beneath. */
-const ROW_ENDPOINT : i32 = 40;
+const ROW_ENDPOINT : i32 = 42;
 /** Status bar height, pinned to the bottom of the window. */
-const STATUS_H : i32 = 28;
+const STATUS_H : i32 = 32;
+
+/** Top of the scrolling rows: the tree's top plus its column legend. */
+const ROWS_Y : i32 = 266;
+/** Gap between the tree box and the status bar. */
+const TREE_GAP : i32 = 12;
+/** Gutter between two headline cards. */
+const CARD_GUTTER : i32 = 16;
+
+/**
+ * Everything on screen that depends on the window's size.
+ *
+ * The left of the window is a fixed grid — the filter, the toggles, the
+ * tree's columns up to the rhythm reading — because those widths are set by
+ * what they hold. What follows the window's edges is computed here, once per
+ * resize: the cards share the width, the tree grows to the bottom, and the
+ * right-hand column, the scrollbar and the title bar's badges stay anchored
+ * to the right. Every surface and every hit test reads this one value, so a
+ * control cannot be drawn at one width and clicked at another.
+ */
+struct Layout {
+    /** The width laid out for: the window's, but never below `LAYOUT_MIN_W`. */
+    pub(crate) w : i32;
+    /** The height laid out for, never below `LAYOUT_MIN_H`. */
+    pub(crate) h : i32;
+    /** Width of the tree box. */
+    pub(crate) treeW : i32;
+    /** Bottom edge of the tree box. */
+    pub(crate) treeBottom : i32;
+    /** Height of the scrolling rows. */
+    pub(crate) rowsH : i32;
+    /** Right edge of a row's content — the traffic column ends here. */
+    pub(crate) xRight : i32;
+    /** Left edge of the scrollbar. */
+    pub(crate) barX : i32;
+    /** Right edge of a program row's live pill. */
+    pub(crate) gLive : i32;
+    /** Width of one headline card. */
+    pub(crate) cardW : i32;
+    /** Top of the status bar. */
+    pub(crate) statusY : i32;
+
+    /** The layout of a `w` by `h` client area. */
+    pub(crate) static fn make(width : i32, height : i32) : Layout {
+        let w : i32 = width.max(LAYOUT_MIN_W);
+        let h : i32 = height.max(LAYOUT_MIN_H);
+        let treeW : i32 = w - PAD * 2;
+        let treeBottom : i32 = h - STATUS_H - TREE_GAP;
+        let xRight : i32 = PAD + treeW - 32;
+        return Layout {
+            w: w,
+            h: h,
+            treeW: treeW,
+            treeBottom: treeBottom,
+            // The rows stop where the box's bottom corners start to curve,
+            // so no row can square off a rounded corner.
+            rowsH: treeBottom - 12 - ROWS_Y,
+            xRight: xRight,
+            barX: PAD + treeW - 15,
+            gLive: xRight - 118,
+            cardW: (w - PAD * 2 - CARD_GUTTER * 3) / 4,
+            statusY: h - STATUS_H,
+        };
+    }
+}

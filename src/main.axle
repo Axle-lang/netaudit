@@ -1,17 +1,16 @@
 // netaudit — what every program on this machine is talking to.
 //
-//   sys/conn     the OS reading: the per-process TCP and UDP tables
-//   sys/procs    a pid's name, and where its binary lives
-//   sys/shell    showing that binary in Explorer
-//   sys/tiers    which of the three readings are actually running
+//   session      the loop's state, whole: the model, the machine, the
+//                lookup queue, and what the reader is doing
+//   sys/machine  the OS readings: processes, connection tables, the DNS
+//                cache, and which of the three readings are running
 //   sys/raw      the four pointer views those imports need, and every
 //                `unsafe` in this program
-//   model/pool   the readings taken of interned text — no `string` survives
-//                a frame
-//   model/*      the journal: endpoints, their programs, their addresses,
+//   model/world  the journal: endpoints, their programs, their addresses,
 //                their rhythm, their score, and the flattened tree
 //   app          what the reader is doing to it
-//   ui/*         the chrome, the tree, the hover card, the detail card
+//   ui/*         the chrome, the tree, the hover card, the detail card,
+//                all drawn through one `Paint` per repaint
 //   smalt        the window, the surface, the event queue, the clipped
 //                2-D primitives, the two faces and the BMP writer
 //   fmt          the figures a library cannot format: an address, and the
@@ -27,46 +26,39 @@
 // linger, the sort is damped, and reordering stops entirely while the
 // pointer is over the rows.
 //
-// Build & run:  axle build   then run the binary
-//               (run it as administrator to add the byte counts)
+// Build & run:  axle build, then target/netaudit.exe
+//               (no elevation needed; elevated, service paths also read)
 
-use smalt::{
-    Platform, PlatformError, WindowDesc, Clock, Events, Event, EventKind, MouseButton,
-    Surface, Frame, BitmapFont, Face, Bmp,
-};
+use smalt::{Platform, PlatformError, WindowDesc, Clock, Events, Event, EventKind};
+use smalt::{Surface, Bmp};
 use crate::input;
 use crate::ui::chrome;
 use crate::ui::tree;
 use crate::ui::tooltip;
 use crate::ui::detail;
-use crate::app::App;
-use crate::app::{Modal, Say};
-use crate::model::pool;
+use crate::ui::paint::Paint;
+use crate::app::{App, Modal, Say};
+use crate::session::Session;
+use crate::model::world::World;
 use crate::model::view;
-use crate::model::view::{View, RowKind};
-use crate::model::pulse;
 use crate::model::pulse;
 use crate::model::score;
-use crate::model::groups;
-use crate::model::endpoints::{Endpoints, rank};
-use crate::sys::conn;
-use crate::sys::procs;
+use crate::model::endpoints::{rank, absorbSnapshot};
+use crate::model::hosts::{Hosts, NameSource, HOST_MAX, Look, ASKED_ORIGIN, ASKED_AS_NAME};
+use crate::model::addr::Reach;
+use crate::sys::machine::Machine;
 use crate::sys::shell;
-use crate::sys::tiers::{Tiers, TierState};
-use crate::sys::dnscache;
+use crate::sys::tiers::TierState;
 use crate::sys::dnscache;
 use crate::sys::rdns;
-use crate::model::hosts::{Hosts, NameSource, HOST_MAX, Look};
-use crate::model::addr;
 use crate::enrich::queue;
 use crate::enrich::queue::{Queue, WhoisKind};
 use crate::enrich::ipapi;
 use crate::enrich::cymru;
 use crate::enrich::worker;
-use crate::theme::WIN_W;
+use crate::theme::{WIN_W, WIN_H};
 use std::sys::process::{argc, argAt};
 use std::lang::{IndexOutOfBoundsException, ParseException};
-use crate::theme::WIN_H;
 
 /** How often the machine is re-read, in milliseconds. */
 const REFRESH_MS : i64 = 1000;
@@ -80,7 +72,9 @@ const REFRESH_MS : i64 = 1000;
  * that measures the machine owes it.
  */
 const IDLE_MS : i32 = 250;
-/** Where a snapshot lands. */
+/** The window's caption. */
+const TITLE : string = "netaudit";
+/** Where a snapshot lands: the folder the program was started from. */
 const SNAP_PATH : string = "netaudit.bmp";
 
 fn main() : void {
@@ -94,9 +88,12 @@ fn main() : void {
 fn run() : void ! PlatformError {
     let platform = new Platform()?;
     defer platform.close();
-    let win = platform.open(
-        WindowDesc { title: "Axle Network Audit", w: WIN_W, h: WIN_H }
-    )?;
+    let win = platform.open(WindowDesc {
+        title: TITLE,
+        w: WIN_W,
+        h: WIN_H,
+        resizable: true,
+    })?;
     defer win.close();
     let screen = new Surface(WIN_W, WIN_H);
     defer screen.close();
@@ -106,28 +103,16 @@ fn run() : void ! PlatformError {
     defer events.close();
 
     // A `Frame` is a view of the surface's plane, not an owner of it, and
-    // it is taken afresh at each repaint. The surface never hands its
-    // colour buffer out as an array, and that is what makes the double
-    // release unwritable: an `i32[]` field over a borrowed plane gives one
-    // allocation two owners, and the second release is a fault on exit,
+    // it is taken afresh at each repaint (`Paint::begin`). The surface never
+    // hands its colour buffer out as an array, and that is what makes the
+    // double release unwritable: an `i32[]` field over a borrowed plane gives
+    // one allocation two owners, and the second release is a fault on exit,
     // after everything has been drawn and flushed.
-    let uif : BitmapFont = BitmapFont::baked(Face::Ui);
-    let bigf : BitmapFont = BitmapFont::baked(Face::Headline);
+    let pt : Paint = new Paint(screen.frame());
+    let ss : Session = new Session();
+    let a : App = ss.a;
 
-    let pool : Pool = new Pool();
-    let procs : Procs = new Procs();
-    let conns : Conns = new Conns();
-    let groups : Groups = new Groups();
-    let hosts : Hosts = new Hosts();
-    let eps : Endpoints = new Endpoints();
-    let v : View = new View();
-    let beat : Pulse = new Pulse();
-    let tiers : Tiers = new Tiers();
-    let dns : DnsCache = new DnsCache();
-    let a : App = new App();
-    let q : Queue = new Queue();
-
-    // The two lookups in flight. They live here rather than on `Queue`
+    // The two lookups in flight. They live here rather than on `Session`
     // because a `Task` is a handle minted on this thread and consumable only
     // here — parking one in a field would be parking it where the thread
     // that must join it cannot reach.
@@ -157,13 +142,13 @@ fn run() : void ! PlatformError {
             let e : Event = events.next();
             let act : Action = match e.kind {
                 EventKind::Quit => Action::Quit,
-                EventKind::KeyDown => input::onKey(a, v, eps, groups, e.scancode),
+                EventKind::KeyDown => input::onKey(ss, e.scancode),
                 EventKind::TextInput => input::onText(a, e.text),
-                EventKind::MouseMotion => input::onMotion(a, v, nowMs, e.x, e.y),
-                EventKind::MouseButtonDown => input::onClick(a, v, eps, groups, e),
+                EventKind::MouseMotion => input::onMotion(ss, nowMs, e.x, e.y),
+                EventKind::MouseButtonDown => input::onClick(ss, e),
                 EventKind::MouseButtonUp => input::onRelease(a, e),
-                EventKind::MouseWheel => input::onWheel(a, v, e.wheel),
-                EventKind::WindowResized => a.repaint(),
+                EventKind::MouseWheel => input::onWheel(ss, e.wheel),
+                EventKind::WindowResized => resized(screen, a, e),
                 _ => Action::None,
             };
 
@@ -171,32 +156,30 @@ fn run() : void ! PlatformError {
                 Action::Quit => a.quit(),
                 Action::Refresh => a.refreshNow(),
                 Action::Clear => {
-                    eps.forget();
+                    ss.w.eps.forget();
                     a.saying(Say::Cleared);
                     a.refreshNow();
                 }
-                Action::Open => open(pool, groups, eps, a),
+                Action::Open => open(ss),
                 Action::Snap => snap(screen, a),
                 Action::None => {}
             }
         }
 
-        if (collect(q, hosts, pool, a, nowMs, jobs)) {
+        // Each step runs every turn; only then is it asked whether any of
+        // them changed what is on screen.
+        let landed : bool = collect(ss, nowMs, jobs);
+        let named : bool = sweepDns(ss, nowMs);
+        if (landed || named || a.tipPending(nowMs)) {
             a.dirty = true;
         }
-        if (!a.paused && dns.due(nowMs) && dnscache::sweep(dns, hosts, pool, nowMs)) {
-            a.dirty = true;
-        }
-        tiers.dns = match dns.ok {
-            true => TierState::On,
-            false => TierState::Off,
-        };
-        dispatch(q, hosts, a, nowMs, jobs);
+
+        dispatch(ss, nowMs, jobs);
 
         let now : i64 = clock.counter();
         if (!a.paused && (a.refreshDue || now >= due)) {
             a.refreshDue = false;
-            refresh(nowMs, pool, procs, conns, groups, hosts, eps, beat, tiers);
+            refresh(ss, nowMs);
             a.tick();
             a.dirty = true;
             due = now + (freq * REFRESH_MS) / 1000;
@@ -208,49 +191,17 @@ fn run() : void ! PlatformError {
         }
 
         if (a.dirty) {
-            view::rebuild(
-                v, eps, groups, hosts, pool, a.filter, a.filterLen,
-                a.sortKey, a.showLocal, a.showBound, a.frozen(nowMs)
-            );
-            a.scroll = (a.scroll).max(0).min(tree::maxScroll(v));
-            // The first frame that has rows puts the selection on one, so the
-            // arrow keys and Enter work before the pointer has been anywhere.
-            if (!a.picked && v.count > 0) {
-                input::selectRow(a, v, eps, groups, 0);
-                a.picked = true;
-            }
-            paint(
-                screen.frame(),
-                uif,
-                bigf,
-                q,
-                dns,
-                v,
-                eps,
-                groups,
-                hosts,
-                pool,
-                beat,
-                tiers,
-                a,
-                nowMs
-            );
+            rebuildView(ss, nowMs);
+            pt.begin(screen.frame(), a.lay, nowMs);
+            paint(pt, ss);
             screen.present(win);
             a.dirty = false;
         }
     }
 
-    drain(q, jobs);
-    dns.dispose();
-    v.dispose();
-    eps.dispose();
-    hosts.dispose();
-    groups.dispose();
-    beat.dispose();
-    conns.dispose();
-    procs.dispose();
-    a.dispose();
-    pool.close();
+    drain(ss.q, jobs);
+    pt.dispose();
+    ss.dispose();
 }
 
 /**
@@ -265,11 +216,67 @@ fn waitMs(clock : Clock, due : i64, freq : i64, paused : bool) : i32 {
     if (paused) {
         return IDLE_MS;
     }
+
     let left : i64 = ((due - clock.counter()) * 1000) / freq;
     if (left <= 0) {
         return 0;
     }
+
     return (left as i32).min(IDLE_MS);
+}
+
+/**
+ * Read the resolver's cache when a sweep is due, and set its badge. Answers
+ * whether a name landed on screen.
+ *
+ * The badge is off when the reader could not be set up at all, and lost while
+ * the cache answers nothing — which an empty cache also does.
+ */
+fn sweepDns(ss : Session, nowMs : i64) : bool {
+    let dns : DnsCache = ss.mach.dns;
+    let learned : bool = false;
+    if (!ss.a.paused && dns.due(nowMs)) {
+        learned = dnscache::sweep(dns, ss.w.hosts, ss.w.pool, nowMs);
+    }
+
+    ss.mach.tiers.dns = TierState::Off;
+    if (dns.ok && dns.answering) {
+        ss.mach.tiers.dns = TierState::On;
+    } else if (dns.ok) {
+        ss.mach.tiers.dns = TierState::Lost;
+    }
+
+    return learned;
+}
+
+/**
+ * Rebuild the tree for what the reader asked to see, and keep the scroll
+ * inside it. The first rebuild that has rows also puts the selection on one,
+ * so the arrow keys and Enter work before the pointer has been anywhere.
+ */
+fn rebuildView(ss : Session, nowMs : i64) : void {
+    let a : App = ss.a;
+    view::rebuild(ss.w, a.lens(nowMs));
+    a.scroll = a.scroll.max(0).min(tree::maxScroll(a.lay, ss.w.view));
+
+    if (!a.picked && ss.w.view.count > 0) {
+        input::selectRow(ss, 0);
+        a.picked = true;
+    }
+}
+
+/**
+ * The window changed size: the framebuffer follows it pixel for pixel and
+ * the layout is redone, rather than the old frame being stretched to fit.
+ * A minimised window reports a zero size, which is not a size to lay out.
+ */
+fn resized(screen : Surface, a : App, e : Event) : Action {
+    if (e.width > 0 && e.height > 0) {
+        screen.resize(e.width, e.height);
+        a.resize(e.width, e.height);
+    }
+
+    return Action::None;
 }
 
 /** Write what is on screen to a file, and say whether it landed. */
@@ -295,6 +302,7 @@ fn snapDeadline() : i64 {
                         return ms;
                     }
                 }
+
                 return 3000;
             }
         } catch e : IndexOutOfBoundsException {
@@ -302,8 +310,10 @@ fn snapDeadline() : i64 {
         } catch e : ParseException {
             return 3000;
         }
+
         i = i + 1;
     }
+
     return 0;
 }
 
@@ -317,20 +327,15 @@ fn snapDeadline() : i64 {
  * which every reader below treats as "did not answer" — see `enrich/worker`
  * for why the failure is a value here rather than an exception.
  */
-fn collect(
-    q : Queue,
-    hosts : Hosts,
-    pool : Pool,
-    a : App,
-    nowMs : i64,
-    jobs : Task<string>[2]
-) : bool {
+fn collect(ss : Session, nowMs : i64, jobs : Task<string>[2]) : bool {
+    let q : Queue = ss.q;
+    let hosts : Hosts = ss.w.hosts;
     let changed : bool = false;
 
     if (q.inFlight && !jobs[0].isAlive()) {
         let body : string = jobs[0].join();
-        if (ipapi::absorb(q, hosts, pool, body, a.scratch)) {
-            q.succeeded(nowMs);
+        if (ipapi::absorb(q, ss.w, body, ss.a.scratch)) {
+            q.succeeded(hosts, nowMs);
             changed = true;
         } else {
             q.failed(hosts, nowMs);
@@ -342,11 +347,11 @@ fn collect(
         let h : i32 = q.whoisHost;
         if (h >= 0) {
             if (q.whoisKind == WhoisKind::Ptr) {
-                changed = tookName(hosts, pool, h, body) || changed;
+                changed = tookName(ss.w, h, body) || changed;
             } else if (q.whoisKind == WhoisKind::Origin) {
                 // The origin answer carries the number; the name is a second
-                // lookup, which the next tick starts. Recording the number
-                // now is what stops the same address being asked again.
+                // lookup, which a later turn starts. Each question is asked
+                // once (`Hosts::ask`), answered or not.
                 let asn : i32 = cymru::originAsn(body);
                 if (asn > 0) {
                     hosts.asn[h] = asn;
@@ -354,11 +359,13 @@ fn collect(
                     changed = true;
                 }
             } else {
-                changed = cymru::takeName(hosts, pool, h, q.whoisAsn, body) || changed;
+                changed = cymru::takeName(hosts, ss.w.pool, h, q.whoisAsn, body) || changed;
             }
         }
+
         q.whoisDone(nowMs);
     }
+
     return changed;
 }
 
@@ -367,9 +374,11 @@ fn collect(
  * hundred addresses at once, and the registry lookups only exist to fill the
  * gaps it leaves.
  */
-fn dispatch(q : Queue, hosts : Hosts, a : App, nowMs : i64, jobs : Task<string>[2]) : void {
+fn dispatch(ss : Session, nowMs : i64, jobs : Task<string>[2]) : void {
+    let q : Queue = ss.q;
+    let hosts : Hosts = ss.w.hosts;
     if (q.ready(nowMs) && queue::pending(hosts)) {
-        let payload : string = queue::build(q, hosts, a.scratch);
+        let payload : string = queue::build(q, hosts, ss.a.scratch);
         jobs[0] = spawn worker::post(queue::batchUrl(), payload);
         q.inFlight = true;
     }
@@ -386,18 +395,22 @@ fn dispatch(q : Queue, hosts : Hosts, a : App, nowMs : i64, jobs : Task<string>[
         q.whoisHost = named;
         q.whoisKind = WhoisKind::AsName;
         q.whoisAsn = hosts.asn[named];
+        hosts.ask(named, ASKED_AS_NAME);
         jobs[1] = spawn rdns::txt(cymru::asName(hosts.asn[named]));
         q.whoisInFlight = true;
         return;
     }
+
     let origin : i32 = needsOrigin(hosts);
     if (origin >= 0) {
         q.whoisHost = origin;
         q.whoisKind = WhoisKind::Origin;
+        hosts.ask(origin, ASKED_ORIGIN);
         jobs[1] = spawn rdns::txt(cymru::originName(hosts, origin));
         q.whoisInFlight = true;
         return;
     }
+
     // Last, and weakest: what the address's own owner publishes. It never
     // overwrites a name the machine itself resolved.
     let nameless : i32 = firstUnnamed(hosts);
@@ -410,43 +423,55 @@ fn dispatch(q : Queue, hosts : Hosts, a : App, nowMs : i64, jobs : Task<string>[
 }
 
 /** Fold a reverse-lookup answer into row `h`. */
-fn tookName(hosts : Hosts, pool : Pool, h : i32, body : string) : bool {
+fn tookName(w : World, h : i32, body : string) : bool {
     // Measured before it is interned, so an empty answer never reaches the
     // run at all — there is nothing to retract, and no offset whose meaning
     // depends on nothing having been interned since.
-    let len : i32 = pool.measure(body, HOST_MAX);
+    let len : i32 = w.pool.measure(body, HOST_MAX);
     if (len > 0) {
-        let off : i64 = pool.putString(body, HOST_MAX);
+        let off : i64 = w.pool.putString(body, HOST_MAX);
         if (off >= 0) {
-            hosts.name(h, off, len, NameSource::Ptr);
+            w.hosts.name(h, off, len, NameSource::Ptr);
             return true;
         }
     }
+
     // Nothing published, or nothing the pool could hold. The row keeps its
     // address, and `nameFrom` records that a source has now answered — so
-    // the question is asked once and not once a second forever.
-    hosts.nameFrom[h] = NameSource::Ptr;
+    // the question is asked once and not once a second forever. A name the
+    // cache supplied while the lookup was in flight keeps its own source.
+    if (w.hosts.nameFrom[h] == NameSource::None) {
+        w.hosts.nameFrom[h] = NameSource::Ptr;
+    }
+
     return false;
 }
 
-/** A routable address whose announcing network is still unknown. */
+/**
+ * A routable address whose announcing network is still unknown and has not
+ * been asked about — including one the batch failed for, which is exactly
+ * the address the registry fallback exists for.
+ */
 fn needsOrigin(hosts : Hosts) : i32 {
     for (h of 0..hosts.count) {
-        if (hosts.look[h] == Look::Done && hosts.reach[h] == Reach::Public
-            && hosts.netOff[h] < 0 && hosts.asn[h] == 0) {
+        if (hosts.settled(h) && hosts.reach[h] == Reach::Public && hosts.netOff[h] < 0
+            && hosts.asn[h] == 0 && !hosts.wasAsked(h, ASKED_ORIGIN)) {
             return h;
         }
     }
+
     return -1;
 }
 
-/** A routable address that has a network number but no name for it. */
+/** A routable address that has a network number but no name for it yet. */
 fn needsAsName(hosts : Hosts) : i32 {
     for (h of 0..hosts.count) {
-        if (hosts.netOff[h] < 0 && hosts.asn[h] > 0 && hosts.reach[h] == Reach::Public) {
+        if (hosts.netOff[h] < 0 && hosts.asn[h] > 0 && hosts.reach[h] == Reach::Public
+            && !hosts.wasAsked(h, ASKED_AS_NAME)) {
             return h;
         }
     }
+
     return -1;
 }
 
@@ -457,6 +482,7 @@ fn firstUnnamed(hosts : Hosts) : i32 {
             return h;
         }
     }
+
     return -1;
 }
 
@@ -470,6 +496,7 @@ fn drain(q : Queue, jobs : Task<string>[2]) : void {
         jobs[0].join();
         q.inFlight = false;
     }
+
     if (q.whoisInFlight) {
         jobs[1].join();
         q.whoisInFlight = false;
@@ -485,25 +512,17 @@ fn drain(q : Queue, jobs : Task<string>[2]) : void {
  * in; then the ranking, which reads the scores; then the cards, which reduce
  * all of it.
  */
-fn refresh(
-    nowMs : i64,
-    pool : Pool,
-    procs : Procs,
-    conns : Conns,
-    groups : Groups,
-    hosts : Hosts,
-    eps : Endpoints,
-    beat : Pulse,
-    tiers : Tiers
-) : void {
-    procs.refresh(pool);
-    conns.refresh();
-    eps.absorb(nowMs, conns, pool, procs, groups, hosts);
-    score::assessAll(eps, hosts);
-    rank(eps, hosts, nowMs);
-    pulse::sample(beat, eps, groups, hosts, pool);
+fn refresh(ss : Session, nowMs : i64) : void {
+    let w : World = ss.w;
+    let mach : Machine = ss.mach;
+    mach.procs.refresh(w.pool);
+    mach.conns.refresh();
+    absorbSnapshot(w, mach, nowMs);
+    score::assessAll(w.eps, w.hosts);
+    rank(w.eps, nowMs);
+    pulse::sample(w);
 
-    tiers.poll = match conns.ok {
+    mach.tiers.poll = match mach.conns.ok {
         true => TierState::On,
         false => TierState::Off,
     };
@@ -514,21 +533,25 @@ fn refresh(
  * opens its program's folder — "where does this thing live" is a question
  * about the program, and the reader is usually standing on one of its rows.
  */
-fn open(pool : Pool, groups : Groups, eps : Endpoints, a : App) : void {
+fn open(ss : Session) : void {
+    let a : App = ss.a;
+    let groups : Groups = ss.w.groups;
     let gi : i32 = -1;
     if (a.selKind == RowKind::Group) {
         gi = groups.byKey(a.selKey);
     } else if (a.selKind == RowKind::Endpoint) {
-        let s : i32 = eps.bySlotKey(a.selKey);
+        let s : i32 = ss.w.eps.bySlotKey(a.selKey);
         if (s >= 0) {
-            gi = eps.group[s];
+            gi = ss.w.eps.group[s];
         }
     }
+
     if (gi < 0 || !groups.identified(gi)) {
         a.saying(Say::NoPath);
         return;
     }
-    if (revealBinary(pool, groups.pathOff[gi], groups.pathLen[gi])) {
+
+    if (revealBinary(ss.w.pool, groups.wideOff[gi], groups.wideChars[gi])) {
         a.saying(Say::Opened);
     } else {
         a.saying(Say::NoPath);
@@ -536,33 +559,18 @@ fn open(pool : Pool, groups : Groups, eps : Endpoints, a : App) : void {
 }
 
 /** One full repaint, back to front. */
-fn paint(
-    f : Frame,
-    uif : BitmapFont,
-    bigf : BitmapFont,
-    q : Queue,
-    dns : DnsCache,
-    v : View,
-    eps : Endpoints,
-    groups : Groups,
-    hosts : Hosts,
-    pool : Pool,
-    beat : Pulse,
-    tiers : Tiers,
-    a : App,
-    nowMs : i64
-) : void {
-    chrome::background(f);
-    chrome::titleBar(f, uif, tiers, a);
-    chrome::cards(f, uif, bigf, beat, tiers, a);
-    chrome::toolbar(f, uif, v, a);
-    tree::drawTree(f, uif, v, eps, groups, hosts, pool, a, nowMs);
-    chrome::statusBar(f, uif, a, beat, q);
-    if (a.modal == Modal::None) {
-        let (overTier, tierHover) = chrome::tierAt(a.mouseX, a.mouseY);
-        tooltip::drawTip(
-            f, uif, v, eps, groups, hosts, pool, tiers, dns, a, nowMs, overTier, tierHover
-        );
+fn paint(p : Paint, ss : Session) : void {
+    chrome::background(p);
+    chrome::titleBar(p, ss);
+    chrome::cards(p, ss);
+    chrome::toolbar(p, ss);
+    tree::drawTree(p, ss);
+    chrome::statusBar(p, ss);
+
+    if (ss.a.modal == Modal::None) {
+        tooltip::drawTip(p, ss);
     }
-    detail::drawCard(f, uif, bigf, v, eps, groups, hosts, pool, tiers, a);
+
+    detail::drawCard(p, ss);
+    chrome::sortMenu(p, ss);
 }
