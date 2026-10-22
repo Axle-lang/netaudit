@@ -1,3 +1,3 @@
-[submodule "vendor/smalt"]
-	path = vendor/smalt
-	url = https://github.com/Axle-lang/smalt.git
+[submodule "vendor/zaffre"]
+	path = vendor/zaffre
+	url = https://github.com/Axle-lang/zaffre
