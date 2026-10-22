@@ -21,7 +21,7 @@ env:
   # current, so the build checks instead of assuming: an older `axle` then
   # fails with one clear line rather than a hundred confusing errors further
   # down.
-  AXLE_MIN: '0.14.0'
+  AXLE_MIN: '0.18.1'
 
 jobs:
   windows:
@@ -75,8 +75,9 @@ jobs:
           }
           "axle $got satisfies >= $env:AXLE_MIN"
 
-      # `submodules: recursive` is not optional: the platform layer is the
-      # `vendor/smalt` submodule and its src/ compiles with ours, so a checkout
+      # `submodules: recursive` is not optional: the interface is the
+      # `vendor/zaffre` submodule, and the platform layer under it is Zaffre's
+      # own `vendor/smalt`. Their src/ compile with ours, so a checkout
       # without it leaves the directory empty and `axle build` stops on a
       # missing dependency before it reads any source.
       - uses: actions/checkout@v4
@@ -95,9 +96,11 @@ jobs:
           $PKG = 'netaudit-windows-x86_64'
           New-Item -ItemType Directory -Path "dist\$PKG" -Force | Out-Null
           Copy-Item 'target\netaudit.exe' "dist\$PKG\"
-          # Which smalt this binary was built against — the submodule pin,
-          # recorded so a release names its own platform layer.
-          $smalt = (git -C vendor/smalt rev-parse --short HEAD)
+          # Which Zaffre and which smalt this binary was built against — the
+          # submodule pins, recorded so a release names its own interface and
+          # platform layer.
+          $zaffre = (git -C vendor/zaffre rev-parse --short HEAD)
+          $smalt = (git -C vendor/zaffre/vendor/smalt rev-parse --short HEAD)
           @"
           netaudit — what every program on this machine is talking to, in one window.
 
@@ -107,7 +110,8 @@ jobs:
           dnsapi, kernel32, shell32 and gdi32 ship with Windows, and no DLL is
           bundled because none is needed.
 
-          Built with $(axle --version) against smalt $smalt.
+          Built with $(axle --version) against Zaffre $zaffre, on smalt $smalt.
+          The interface is set in Instrument Sans (SIL Open Font License).
           "@ | Set-Content -Encoding utf8 "dist\$PKG\README.txt"
           Compress-Archive -Path "dist\$PKG\*" -DestinationPath "$PKG.zip"
 

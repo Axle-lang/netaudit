@@ -24,7 +24,7 @@ env:
   # current, so the build checks instead of assuming: an older `axle` then
   # fails with one clear line rather than a hundred confusing errors further
   # down.
-  AXLE_MIN: '0.14.0'
+  AXLE_MIN: '0.18.1'
 
 jobs:
   windows:
@@ -85,10 +85,11 @@ jobs:
           }
           "axle $got satisfies >= $env:AXLE_MIN"
 
-      # `submodules: recursive` is not optional: the platform layer is the
-      # `vendor/smalt` submodule and its src/ compiles with ours, so a checkout
-      # without it leaves the directory empty and `axle build` stops on a
-      # missing dependency before it reads any source.
+      # `submodules: recursive` is not optional: the interface is the
+      # `vendor/zaffre` submodule, and the platform layer under it is Zaffre's
+      # own `vendor/smalt`. Their src/ compiles with ours, so a checkout without
+      # them leaves the directories empty and `axle build` stops on a missing
+      # dependency before it reads any source.
       - uses: actions/checkout@v4
         with:
           submodules: recursive
