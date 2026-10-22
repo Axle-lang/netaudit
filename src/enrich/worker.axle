@@ -27,7 +27,7 @@ use std::lang::IOException;
  * POST `body` to `url` and answer the response body, or the empty string
  * when the request did not complete. Runs on the spawned thread.
  */
-fn post(url : string, body : string) : string {
+fn post(url : string, own body : string) : string {
     try {
         let client : HttpClient = new HttpClient();
         return client.post(url, body).body();

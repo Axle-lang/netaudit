@@ -32,7 +32,7 @@ use crate::model::addr::{Reach};
  * shape where adding a signal and forgetting one table shows the reader the
  * wrong weight beside the right words and nothing goes red.
  */
-enum Reason : i32 {
+enum Signal : i32 {
     /** The address answers as a proxy, a VPN exit or a Tor relay. */
     Proxy = 0,
     /** A steady repeat towards a host nothing will name — the timer's signature. */
@@ -63,32 +63,32 @@ const REASON_COUNT : i32 = 9;
  * variant, so the three tables below cannot drift out of step with the loop
  * that reads all three.
  */
-fn reasonAt(i : i32) : Reason {
+fn reasonAt(i : i32) : Signal {
     return match i {
-        0 => Reason::Proxy,
-        1 => Reason::Beacon,
-        2 => Reason::OpenDoor,
-        3 => Reason::OddPort,
-        4 => Reason::NoPtr,
-        5 => Reason::UnknownAs,
-        6 => Reason::Hosting,
-        7 => Reason::MajorAs,
-        _ => Reason::AskedFor,
+        0 => Signal::Proxy,
+        1 => Signal::Beacon,
+        2 => Signal::OpenDoor,
+        3 => Signal::OddPort,
+        4 => Signal::NoPtr,
+        5 => Signal::UnknownAs,
+        6 => Signal::Hosting,
+        7 => Signal::MajorAs,
+        _ => Signal::AskedFor,
     };
 }
 
 /** The bit `r` occupies in a row's `reasons` word. */
-fn reasonBit(r : Reason) : i32 {
+fn reasonBit(r : Signal) : i32 {
     return match r {
-        Reason::Proxy => 1,
-        Reason::Hosting => 4,
-        Reason::NoPtr => 8,
-        Reason::UnknownAs => 16,
-        Reason::OddPort => 32,
-        Reason::Beacon => 64,
-        Reason::OpenDoor => 128,
-        Reason::AskedFor => 256,
-        Reason::MajorAs => 512,
+        Signal::Proxy => 1,
+        Signal::Hosting => 4,
+        Signal::NoPtr => 8,
+        Signal::UnknownAs => 16,
+        Signal::OddPort => 32,
+        Signal::Beacon => 64,
+        Signal::OpenDoor => 128,
+        Signal::AskedFor => 256,
+        Signal::MajorAs => 512,
     };
 }
 
@@ -99,32 +99,32 @@ fn reasonBit(r : Reason) : i32 {
  * positive signals are deliberately small: a score that could be talked back
  * up to five by good news would stop being a floor.
  */
-fn reasonWeight(r : Reason) : i32 {
+fn reasonWeight(r : Signal) : i32 {
     return match r {
-        Reason::Proxy => -20,
-        Reason::Beacon => -10,
-        Reason::OpenDoor => -10,
-        Reason::OddPort => -10,
-        Reason::NoPtr => -5,
-        Reason::UnknownAs => -5,
-        Reason::Hosting => -5,
-        Reason::MajorAs => 5,
-        Reason::AskedFor => 5,
+        Signal::Proxy => -20,
+        Signal::Beacon => -10,
+        Signal::OpenDoor => -10,
+        Signal::OddPort => -10,
+        Signal::NoPtr => -5,
+        Signal::UnknownAs => -5,
+        Signal::Hosting => -5,
+        Signal::MajorAs => 5,
+        Signal::AskedFor => 5,
     };
 }
 
 /** What `r` says, in the words the detail card uses. */
-fn reasonText(r : Reason) : string {
+fn reasonText(r : Signal) : string {
     return match r {
-        Reason::Proxy => "the address answers as a proxy, VPN or Tor exit",
-        Reason::Beacon => "a steady repeat towards a host nothing will name",
-        Reason::OpenDoor => "this socket accepts connections from outside the machine",
-        Reason::OddPort => "an unusual port, to a network that hosts no public service",
-        Reason::NoPtr => "no name is published for the address",
-        Reason::UnknownAs => "the owning network is not one of the majors",
-        Reason::Hosting => "the address is in a datacenter, not on an access network",
-        Reason::MajorAs => "a major network, whose behaviour is a matter of public record",
-        Reason::AskedFor => "this machine resolved the name itself: the traffic was asked for",
+        Signal::Proxy => "the address answers as a proxy, VPN or Tor exit",
+        Signal::Beacon => "a steady repeat towards a host nothing will name",
+        Signal::OpenDoor => "this socket accepts connections from outside the machine",
+        Signal::OddPort => "an unusual port, to a network that hosts no public service",
+        Signal::NoPtr => "no name is published for the address",
+        Signal::UnknownAs => "the owning network is not one of the majors",
+        Signal::Hosting => "the address is in a datacenter, not on an access network",
+        Signal::MajorAs => "a major network, whose behaviour is a matter of public record",
+        Signal::AskedFor => "this machine resolved the name itself: the traffic was asked for",
     };
 }
 
@@ -159,7 +159,7 @@ fn assess(e : Endpoints, hosts : Hosts, s : i32) : void {
     // so nothing else about it can be scored — but the door itself can.
     if (e.kind[s] == SocketKind::Listen) {
         if (hosts.reach[h] == Reach::None || hosts.reach[h] == Reach::Public) {
-            e.reasons[s] = reasonBit(Reason::OpenDoor);
+            e.reasons[s] = reasonBit(Signal::OpenDoor);
             e.score[s] = fromReasons(e.reasons[s]);
         }
 
@@ -182,7 +182,7 @@ fn assess(e : Endpoints, hosts : Hosts, s : i32) : void {
     // A score needs something against the address or a lookup behind it.
     // "This machine asked for the name" alone is good news about nothing
     // yet checked, and would paint an unlooked-up row a full green.
-    let goodNewsOnly : bool = behavioural == 0 || behavioural == reasonBit(Reason::AskedFor);
+    let goodNewsOnly : bool = behavioural == 0 || behavioural == reasonBit(Signal::AskedFor);
     if (!known && goodNewsOnly) {
         return;
     }
@@ -200,26 +200,26 @@ fn assess(e : Endpoints, hosts : Hosts, s : i32) : void {
 fn reputation(hosts : Hosts, h : i32) : i32 {
     let mut r : i32 = 0;
     if (hosts.has(h, FLAG_PROXY)) {
-        r = r | reasonBit(Reason::Proxy);
+        r = r | reasonBit(Signal::Proxy);
     }
 
     if (hosts.has(h, FLAG_HOSTING)) {
-        r = r | reasonBit(Reason::Hosting);
+        r = r | reasonBit(Signal::Hosting);
     }
 
     // Only once the reverse lookup has actually answered empty. Before that
     // the name is merely not known *yet*, and charging for it would make the
     // score drop and then climb back the moment the PTR record lands.
     if (hosts.nameOff[h] < 0 && hosts.nameFrom[h] == NameSource::Ptr) {
-        r = r | reasonBit(Reason::NoPtr);
+        r = r | reasonBit(Signal::NoPtr);
     }
 
     // "Not a major network" needs a network to judge: an AS number, or a
     // registry that was asked and could not give one.
     if (isMajor(hosts.asn[h])) {
-        r = r | reasonBit(Reason::MajorAs);
+        r = r | reasonBit(Signal::MajorAs);
     } else if (hosts.asn[h] != 0 || hosts.wasAsked(h, ASKED_ORIGIN)) {
-        r = r | reasonBit(Reason::UnknownAs);
+        r = r | reasonBit(Signal::UnknownAs);
     }
 
     return r;
@@ -229,18 +229,18 @@ fn reputation(hosts : Hosts, h : i32) : i32 {
 fn behaviour(e : Endpoints, hosts : Hosts, s : i32, h : i32) : i32 {
     let mut r : i32 = 0;
     if (e.kind[s] == SocketKind::Peer && oddPort(e.port[s]) && !hosts.has(h, FLAG_HOSTING)) {
-        r = r | reasonBit(Reason::OddPort);
+        r = r | reasonBit(Signal::OddPort);
     }
 
     if (beaconing(e, hosts, s, h)) {
-        r = r | reasonBit(Reason::Beacon);
+        r = r | reasonBit(Signal::Beacon);
     }
 
     // Asked for means a program on this machine resolved the name: the cache
     // or the kernel trace. A PTR record is what the address's owner chose to
     // publish, which says nothing about whether anyone here asked for it.
     if (hosts.nameOff[h] >= 0 && askedFor(hosts.nameFrom[h])) {
-        r = r | reasonBit(Reason::AskedFor);
+        r = r | reasonBit(Signal::AskedFor);
     }
 
     return r;
@@ -318,7 +318,7 @@ fn oddPort(port : i32) : bool {
 fn fromReasons(reasons : i32) : i32 {
     let mut tenths : i32 = 50;
     for (i of 0..REASON_COUNT) {
-        let r : Reason = reasonAt(i);
+        let r : Signal = reasonAt(i);
         if ((reasons & reasonBit(r)) != 0) {
             tenths = tenths + reasonWeight(r);
         }

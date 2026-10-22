@@ -30,7 +30,11 @@ use crate::model::rhythm::hasRhythm;
 use crate::model::world::World;
 use crate::model::addr::{Reach};
 use crate::fmt;
-use crate::theme::{ROW_GROUP, ROW_ENDPOINT};
+
+/** Height of a program row, in pixels. */
+const ROW_GROUP : i32 = 48;
+/** Height of an endpoint row: identity on top, attribution beneath. */
+const ROW_ENDPOINT : i32 = 60;
 
 /** Rows the flat list can hold: every group, plus the endpoints of the open ones. */
 const VIEW_MAX_ROWS : i32 = 16384;
@@ -107,7 +111,7 @@ const MATCH_CAP : i64 = 256;
 /**
  * The flattened tree, plus the remembered orders that make it stable.
  */
-class View {
+class Rows {
     pub(crate) rowKind : RowKind[] = malloc<RowKind>(VIEW_MAX_ROWS as i64),
     pub(crate) rowRef : i32[] = malloc<i32>(VIEW_MAX_ROWS as i64),
     pub(crate) rowTop : i32[] = malloc<i32>(VIEW_MAX_ROWS as i64),
@@ -218,7 +222,7 @@ fn rebuild(w : World, lens : Lens) : void {
  * and climbs, instead of appearing in the middle of what someone is reading.
  */
 fn selectEndpoints(w : World, lens : Lens) : void {
-    let v : View = w.view;
+    let mut v : Rows = w.view;
     let e : Endpoints = w.eps;
     v.gen = v.gen + 1;
     let mut taken : i32 = 0;
@@ -379,7 +383,7 @@ fn sortEndpoints(w : World, sortKey : Sort) : void {
         return;
     }
 
-    let v : View = w.view;
+    let mut v : Rows = w.view;
     let e : Endpoints = w.eps;
     let hyst : i64 = band(sortKey);
     for (a of 1..v.shown) {
@@ -397,7 +401,7 @@ fn sortEndpoints(w : World, sortKey : Sort) : void {
 
 /** The same sort, on the host name, ascending — where a band makes no sense. */
 fn sortEndpointsByName(w : World) : void {
-    let v : View = w.view;
+    let mut v : Rows = w.view;
     for (a of 1..v.shown) {
         let x : i32 = v.slots[a];
         let mut b : i32 = a - 1;
@@ -440,7 +444,7 @@ fn nameOrder(w : World, x : i32, y : i32) : i32 {
  * order inside each run. One counting pass and one scatter pass, so the
  * cost is linear rather than one scan of the whole list per group.
  */
-fn bucketByGroup(v : View, e : Endpoints, g : Groups) : void {
+fn bucketByGroup(v : Rows, e : Endpoints, g : Groups) : void {
     for (gi of 0..g.count) {
         v.at[gi] = 0;
     }
@@ -472,7 +476,7 @@ fn bucketByGroup(v : View, e : Endpoints, g : Groups) : void {
 }
 
 /** The first index of group `gi`'s run in `bucket`. */
-fn runStart(v : View, gi : i32) : i32 {
+fn runStart(v : Rows, gi : i32) : i32 {
     if (gi == 0) {
         return 0;
     }
@@ -481,13 +485,13 @@ fn runStart(v : View, gi : i32) : i32 {
 }
 
 /** One past the last index of group `gi`'s run in `bucket`. */
-fn runEnd(v : View, gi : i32) : i32 {
+fn runEnd(v : Rows, gi : i32) : i32 {
     return v.at[gi];
 }
 
 /** Keep the groups that still have a visible endpoint, in remembered order. */
-fn selectGroups(v : View, g : Groups) : void {
-    let taken : i32 = 0;
+fn selectGroups(mut v : Rows, g : Groups) : void {
+    let mut taken : i32 = 0;
     for (i of 0..v.groupLen) {
         let gi : i32 = g.byKey(v.groupKeys[i]);
         if (gi >= 0 && v.gmark[gi] != v.gen) {
@@ -575,7 +579,7 @@ fn groupSalience(g : Groups, gi : i32) : i64 {
 
 /** Sort the selected groups, damped, as `sortEndpoints` does its own. */
 fn sortGroups(w : World, sortKey : Sort) : void {
-    let v : View = w.view;
+    let mut v : Rows = w.view;
     let g : Groups = w.groups;
     let hyst : i64 = band(sortKey);
     for (a of 1..v.groupLen) {
@@ -605,10 +609,10 @@ fn sortGroups(w : World, sortKey : Sort) : void {
  * Walk the sorted groups and their runs into the flat row list, and record
  * the orders so the next rebuild starts from what the reader is looking at.
  */
-fn emit(v : View, e : Endpoints, g : Groups) : void {
-    let rows : i32 = 0;
-    let y : i32 = 0;
-    let keys : i32 = 0;
+fn emit(v : Rows, e : Endpoints, g : Groups) : void {
+    let mut rows : i32 = 0;
+    let mut y : i32 = 0;
+    let mut keys : i32 = 0;
 
     let mut i : i32 = 0;
     while (i < v.groupLen && rows < VIEW_MAX_ROWS) {
@@ -649,7 +653,7 @@ fn emit(v : View, e : Endpoints, g : Groups) : void {
 }
 
 /** The row whose band contains `contentY`, or `-1`. */
-fn rowAt(v : View, contentY : i32) : i32 {
+fn rowAt(v : Rows, contentY : i32) : i32 {
     if (contentY < 0 || contentY >= v.height) {
         return -1;
     }
@@ -671,7 +675,7 @@ fn rowAt(v : View, contentY : i32) : i32 {
 }
 
 /** The flat-list position of the endpoint carrying `key`, or `-1`. */
-fn rowOfEndpoint(v : View, e : Endpoints, key : i64) : i32 {
+fn rowOfEndpoint(v : Rows, e : Endpoints, key : i64) : i32 {
     for (i of 0..v.count) {
         if (v.rowKind[i] == RowKind::Endpoint && e.key[v.rowRef[i]] == key) {
             return i;
@@ -682,7 +686,7 @@ fn rowOfEndpoint(v : View, e : Endpoints, key : i64) : i32 {
 }
 
 /** The flat-list position of the group carrying `key`, or `-1`. */
-fn rowOfGroup(v : View, g : Groups, key : i64) : i32 {
+fn rowOfGroup(v : Rows, g : Groups, key : i64) : i32 {
     for (i of 0..v.count) {
         if (v.rowKind[i] == RowKind::Group && g.key[v.rowRef[i]] == key) {
             return i;

@@ -14,7 +14,7 @@ use crate::model::pool::{Pool, Bytes};
 use crate::model::endpoints::Endpoints;
 use crate::model::groups::Groups;
 use crate::model::hosts::Hosts;
-use crate::model::view::View;
+use crate::model::view::Rows;
 use crate::model::pulse::Pulse;
 
 /** The model, whole. */
@@ -28,7 +28,7 @@ class World {
     /** One row per address. */
     pub(crate) hosts : Hosts = new Hosts(),
     /** The flattened tree, as last rebuilt. */
-    pub(crate) view : View = new View(),
+    pub(crate) view : Rows = new Rows(),
     /** The headline figures, sampled once a tick. */
     pub(crate) beat : Pulse = new Pulse(),
 
