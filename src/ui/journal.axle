@@ -1,0 +1,470 @@
+// ui/journal — the tree, as a Zaffre `DataGrid` sees it.
+//
+// The model has already produced the flat run of rows (`model/view`): programs,
+// and under each open one the endpoints it talks to, in a damped, stable order.
+// This is the `DataSource` over that run. The grid asks it how many rows there
+// are, what each is called, and — for the rows in view and no others — what
+// widget goes in each column; it keeps the pick as a key, the scroll in pixels,
+// and whether the pointer is over the rows, in the `DataState` the program
+// shares with it.
+//
+// An endpoint takes two lines. It has to: the address, the name behind it, the
+// network that owns it, the country, the trust score, the rhythm and the
+// traffic are seven facts, and squeezing seven onto one line makes all seven
+// unreadable. The first line is *what it is*, the second is *what is known
+// about it* — so a reader skimming for addresses reads only the upper lines,
+// and one auditing attribution reads only the lower ones.
+
+use zaffre::{
+    DataSource, DataState, DataColumn, Widget, Label, LabelProps, Column, Row, FlexProps, Avatar, Tag, TagProps,
+    Badge, BadgeProps, BadgeSize, ScoreMeter, Dot, Tone, TextRole, Align, Length, Justify, BadgeLook, StatLook,
+    ControlSize, Elevation,
+};
+use crate::fmt;
+use crate::ui::text;
+use crate::ui::actions;
+use crate::app::App;
+use crate::session::Session;
+use crate::model::world::World;
+use crate::model::view;
+use crate::model::view::{Rows, RowKind};
+use crate::model::endpoints::{Endpoints, SocketKind, kindBadge};
+use crate::model::groups::Groups;
+use crate::model::hosts::{Hosts, Look, NameSource};
+use crate::model::rhythm::{hasRhythm, regularityWord};
+use crate::model::addr::{reachWord, Reach};
+use crate::sys::conn::{Proto, stateName};
+
+/** How steady a rhythm has to be to be called out. */
+const STEADY : i32 = 750;
+
+/** The columns of the grid. */
+pub fn columns() : DataColumn[] {
+    let cols : DataColumn[] = [
+        DataColumn { title: "Program / endpoint", width: Length::Px(330.0) },
+        DataColumn { title: "Name / network" },
+        DataColumn { title: "Trust", width: Length::Px(120.0) },
+        DataColumn { title: "Repetition / rhythm", width: Length::Px(210.0) },
+        DataColumn { title: "Traffic / last seen", width: Length::Px(170.0), align: Align::End },
+    ];
+    return cols;
+}
+
+/** One line of text in `role`, cut with an ellipsis rather than run into the next column. */
+fn line(text : string, role : TextRole) : Label {
+    return new Label(LabelProps { role: role, elide: true }, text);
+}
+
+/** Two lines, the second quieter. */
+fn twoLines(own first : dyn Widget, own second : dyn Widget, align : Align) : Column {
+    let kids : dyn Widget[] = [first, second];
+    return new Column(FlexProps { gap: 2.0, align: align, grow: 1.0 }, kids);
+}
+
+/** An empty row to `add` to: widgets side by side, centred on a line. A row given its children cannot be added to. */
+fn strip(gap : f64) : Row {
+    return new Row(FlexProps { gap: gap, align: Align::Center });
+}
+
+/** Widgets side by side, centred on a line. */
+fn beside(gap : f64, own kids : dyn Widget[]) : Row {
+    return new Row(FlexProps { gap: gap, align: Align::Center }, kids);
+}
+
+/** The tree over the model's flat rows. */
+pub class Journal : DataSource {
+    ss : Shared<Session>;
+    seen : i64 = -1;
+    rank : i64 = -1;
+
+    /** A source over the session's journal. */
+    constructor(ss : Shared<Session>) {
+        self.ss = ss;
+    }
+
+    /**
+     * Bring the rows up to date if anything that decides them has moved: a
+     * reading, a fold, the filter, the ranking, a toggle. Asked first at every
+     * layout, so the grid never builds a cell from rows that are stale.
+     */
+    pub(file) fn sync(mut self) : void {
+        let a : App = self.ss.a;
+        let sig : i64 = a.signature();
+        if (sig == self.seen) {
+            return;
+        }
+
+        self.seen = sig;
+        // A new ranking is what the reader just asked for: it must not wait
+        // out the hold that keeps rows still under the pointer.
+        let ranking : i64 = a.ranking.changes();
+        if (ranking != self.rank) {
+            self.rank = ranking;
+            a.releaseOrder();
+        } else if (a.grid.hovering) {
+            a.holdOrder();
+        }
+
+        view::rebuild(self.ss.w, a.lens());
+        let v : Rows = self.ss.w.view;
+        if (a.localCount.get() != v.hiddenLocal) {
+            a.localCount.set(v.hiddenLocal);
+        }
+
+        if (a.boundCount.get() != v.hiddenBound) {
+            a.boundCount.set(v.hiddenBound);
+        }
+    }
+
+    /**
+     * What the cells say moves only with the rows or with a reading: the grid keeps
+     * the cells it built while this holds, instead of building a screenful of
+     * widgets at every hover and wheel notch.
+     */
+    pub fn revision(self) : i64 {
+        let a : App = self.ss.a;
+        return a.signature() + a.stamp.changes();
+    }
+
+    pub fn count(mut self) : i32 {
+        self.sync();
+        return self.ss.w.view.count;
+    }
+
+    pub fn key(self, row : i32) : i64 {
+        return actions::rowKey(self.ss, row);
+    }
+
+    pub fn depth(self, row : i32) : i32 {
+        if (self.ss.w.view.rowKind[row as i64] == RowKind::Group) {
+            return 0;
+        }
+
+        return 1;
+    }
+
+    pub fn branch(self, row : i32) : bool {
+        return self.ss.w.view.rowKind[row as i64] == RowKind::Group;
+    }
+
+    pub fn opened(self, row : i32) : bool {
+        let v : Rows = self.ss.w.view;
+        return self.ss.w.groups.isOpen(v.rowRef[row as i64]);
+    }
+
+    pub fn toggle(mut self, row : i32) : void {
+        let v : Rows = self.ss.w.view;
+        self.ss.w.groups.toggle(v.rowRef[row as i64]);
+        self.ss.a.rev = self.ss.a.rev + 1;
+    }
+
+    pub fn height(self, row : i32) : f64 {
+        return self.ss.w.view.rowH[row as i64] as f64;
+    }
+
+    pub fn cell(mut self, row : i32, col : i32) : dyn Widget {
+        let v : Rows = self.ss.w.view;
+        let at : i32 = v.rowRef[row as i64];
+        if (v.rowKind[row as i64] == RowKind::Group) {
+            return self.groupCell(at, col);
+        }
+
+        return self.endpointCell(at, col);
+    }
+
+    // ─── A program ───────────────────────────────────────────────
+
+    /** A program: its monogram and name, how many processes, its worst score, its endpoints and what is live. */
+    pub(file) fn groupCell(self, gi : i32, col : i32) : dyn Widget {
+        let w : World = self.ss.w;
+        let g : Groups = w.groups;
+        if (col == 0) {
+            return self.programName(gi);
+        }
+
+        if (col == 1) {
+            return line(text::counted(g.pids[gi as i64], "process", "processes"), TextRole::Dim);
+        }
+
+        if (col == 2) {
+            return new ScoreMeter(g.worst[gi as i64]);
+        }
+
+        if (col == 3) {
+            let shown : i32 = g.endpoints[gi as i64];
+            let row : Row = strip(8.0);
+            row.add(line(text::counted(shown, "endpoint", "endpoints"), TextRole::Dim));
+            if (g.flagged[gi as i64] > 0) {
+                row.add(new Badge(BadgeProps { text: text::count(g.flagged[gi as i64]) + " flagged", tone: Tone::Danger, size: BadgeSize::Sm }));
+            }
+
+            return row;
+        }
+
+        return self.liveCell(gi);
+    }
+
+    /** A monogram and the program's name, with a note when it was grouped by name alone. */
+    pub(file) fn programName(self, gi : i32) : dyn Widget {
+        let w : World = self.ss.w;
+        let mut name : string = text::spanText(w.groupName(gi));
+        if (name.byteLength == 0) {
+            name = "System and drivers";
+        }
+
+        let row : Row = strip(10.0);
+        row.add(new Avatar(name, 24.0));
+        row.add(new Label(name, TextRole::Strong));
+        if (!w.groups.identified(gi)) {
+            row.add(new Tag(TagProps { text: "by name", tone: Tone::Neutral, size: BadgeSize::Sm }));
+        }
+
+        return row;
+    }
+
+    /** How many of a program's endpoints are open now, and what they move. */
+    pub(file) fn liveCell(self, gi : i32) : dyn Widget {
+        let g : Groups = self.ss.w.groups;
+        let row : Row = new Row(FlexProps { gap: 10.0, align: Align::Center });
+        if (g.rate(gi) > 0) {
+            self.ss.a.scratch.reset();
+            fmt::rate(self.ss.a.scratch, g.rate(gi));
+            row.add(line(text::scratchText(self.ss.a.scratch), TextRole::Dim));
+        }
+
+        let live : i32 = g.live[gi as i64];
+        if (live > 0) {
+            row.add(new Badge(BadgeProps { text: text::count(live) + " live", tone: Tone::Ok, dot: true }));
+        } else {
+            row.add(line("idle", TextRole::Faint));
+        }
+
+        return row;
+    }
+
+    // ─── An endpoint ─────────────────────────────────────────────
+
+    pub(file) fn endpointCell(self, s : i32, col : i32) : dyn Widget {
+        if (col == 0) {
+            return self.identity(s);
+        }
+
+        if (col == 1) {
+            return self.attribution(s);
+        }
+
+        if (col == 2) {
+            return self.trust(s);
+        }
+
+        if (col == 3) {
+            return self.rhythm(s);
+        }
+
+        return self.traffic(s);
+    }
+
+    /** The tone of a protocol tag: listening and UDP read differently from a conversation. */
+    pub(file) fn protoTone(self, s : i32) : Tone {
+        let e : Endpoints = self.ss.w.eps;
+        if (e.liveNow[s as i64] == 0) {
+            return Tone::Neutral;
+        }
+
+        if (e.kind[s as i64] == SocketKind::Listen) {
+            return Tone::Accent;
+        }
+
+        if (e.proto[s as i64] == Proto::Udp) {
+            return Tone::Warn;
+        }
+
+        return Tone::Info;
+    }
+
+    /** Line one: the protocol and the address. Line two: what the socket is doing, with a light for it. */
+    pub(file) fn identity(self, s : i32) : dyn Widget {
+        let e : Endpoints = self.ss.w.eps;
+        let live : bool = e.liveNow[s as i64] > 0;
+        let mut role : TextRole = TextRole::Body;
+        if (!live) {
+            role = TextRole::Faint;
+        }
+
+        self.ss.a.scratch.reset();
+        fmt::addrPort(self.ss.a.scratch, e.addrAt(s), e.family[s as i64], e.port[s as i64]);
+        let addr : string = text::scratchText(self.ss.a.scratch);
+
+        let mut light : Tone = Tone::Ok;
+        let mut word : string = stateName(e.state[s as i64]);
+        if (e.kind[s as i64] == SocketKind::Listen) {
+            light = Tone::Accent;
+        } else if (e.proto[s as i64] == Proto::Udp) {
+            light = Tone::Warn;
+            word = "bound";
+        } else if (!live && e.sockets[s as i64] > 0) {
+            light = Tone::Warn;
+        } else if (!live) {
+            // How long ago it closed is the right-hand column's job; saying
+            // it twice on one row makes a reader check whether the two agree.
+            light = Tone::Neutral;
+            word = "closed";
+        }
+
+        let state : dyn Widget[] = [new Dot(light, 6.0), line(word, TextRole::Caption)];
+        let lines : Column = twoLines(line(addr, role), beside(6.0, state), Align::Start);
+        let kids : dyn Widget[] = [
+            new Tag(TagProps { text: kindBadge(e.kind[s as i64], e.proto[s as i64]), tone: self.protoTone(s), size: BadgeSize::Sm }),
+            lines,
+        ];
+        return beside(10.0, kids);
+    }
+
+    /**
+     * The name on top, the network beneath.
+     *
+     * When there is no name the row says which of the reasons applies — not
+     * routable, not looked up yet, looked up and unanswered, or answered with
+     * nothing — because those are different situations and only some are a wait.
+     */
+    pub(file) fn attribution(self, s : i32) : dyn Widget {
+        let w : World = self.ss.w;
+        let e : Endpoints = w.eps;
+        let h : i32 = e.host[s as i64];
+        if (h < 0) {
+            return line("", TextRole::Body);
+        }
+
+        let hosts : Hosts = w.hosts;
+        let live : bool = e.liveNow[s as i64] > 0;
+        let mut name : string = text::spanText(w.hostName(h));
+        let mut role : TextRole = TextRole::Body;
+        if (!live) {
+            role = TextRole::Faint;
+        }
+
+        if (name.byteLength == 0) {
+            role = TextRole::Faint;
+            if (e.kind[s as i64] == SocketKind::Listen && hosts.reach[h as i64] == Reach::None) {
+                name = "every interface";
+            } else if (hosts.reach[h as i64] != Reach::Public) {
+                name = reachWord(hosts.reach[h as i64]);
+            } else {
+                name = unnamedWord(hosts, h);
+            }
+        }
+
+        return twoLines(line(name, role), line(text::spanText(w.network(h)), TextRole::Caption), Align::Start);
+    }
+
+    /** The country, and the trust meter. */
+    pub(file) fn trust(self, s : i32) : dyn Widget {
+        let w : World = self.ss.w;
+        let h : i32 = w.eps.host[s as i64];
+        let mut code : string = "";
+        if (h >= 0) {
+            code = text::spanText(w.countryCode(h));
+        }
+
+        let kids : dyn Widget[] = [
+            new Label(LabelProps { role: TextRole::Mono, width: Length::Px(26.0) }, code),
+            new ScoreMeter(w.eps.score[s as i64]),
+        ];
+        return beside(10.0, kids);
+    }
+
+    /**
+     * Repetition on line one, rhythm on line two — the pair of readings this
+     * program exists to surface. A row visited once says so plainly rather
+     * than claiming a period it cannot have measured.
+     */
+    pub(file) fn rhythm(self, s : i32) : dyn Widget {
+        let e : Endpoints = self.ss.w.eps;
+        let hits : i32 = e.hits[s as i64];
+        let mut first : Label = line("seen once", TextRole::Faint);
+        if (hits != 1) {
+            let mut role : TextRole = TextRole::Dim;
+            if (hits >= 5) {
+                role = TextRole::Body;
+            }
+
+            self.ss.a.scratch.reset();
+            fmt::times(self.ss.a.scratch, hits as i64);
+            first = line(text::scratchText(self.ss.a.scratch) + " visits", role);
+        }
+
+        let second : Row = new Row(FlexProps { gap: 8.0, align: Align::Center });
+        if (hasRhythm(e.rhythm, s)) {
+            self.ss.a.scratch.reset();
+            self.ss.a.scratch.elapsed(e.rhythm.periodMs[s as i64]);
+            second.add(line("every " + text::scratchText(self.ss.a.scratch), TextRole::Caption));
+            let regular : i32 = e.rhythm.regular[s as i64];
+            if (regular >= STEADY) {
+                second.add(new Badge(BadgeProps { text: regularityWord(regular), tone: Tone::Accent, size: BadgeSize::Sm }));
+            } else {
+                second.add(line(regularityWord(regular), TextRole::Caption));
+            }
+        } else if (hits > 1) {
+            // A row seen once has already said so on the line above; repeating
+            // "not enough visits" under every one of forty rows is noise that
+            // teaches the reader to stop looking at this column.
+            second.add(line("no steady interval yet", TextRole::Caption));
+        } else {
+            second.add(line("", TextRole::Caption));
+        }
+
+        return twoLines(first, second, Align::Start);
+    }
+
+    /**
+     * What moved on line one, how long this has been going on beneath it.
+     *
+     * Without the kernel trace there is no byte figure, so line one says
+     * whether the conversation is open and, when it is not, how long ago it
+     * stopped. Leaving it blank would waste the one column a reader scans for
+     * "is this current", and printing a zero would claim a measurement never
+     * taken.
+     */
+    pub(file) fn traffic(self, s : i32) : dyn Widget {
+        let e : Endpoints = self.ss.w.eps;
+        let mut first : Label = line("open now", TextRole::Dim);
+        if (e.bytesIn[s as i64] + e.bytesOut[s as i64] > 0) {
+            self.ss.a.scratch.reset();
+            fmt::rate(self.ss.a.scratch, e.rate(s));
+            first = line(text::scratchText(self.ss.a.scratch), TextRole::Body);
+        } else if (e.liveNow[s as i64] == 0) {
+            let mut since : i64 = e.lastMs[s as i64];
+            if (e.closedMs[s as i64] > 0) {
+                since = e.closedMs[s as i64];
+            }
+
+            self.ss.a.scratch.reset();
+            self.ss.a.scratch.elapsed(self.ss.a.nowMs - since + 1);
+            first = line(text::scratchText(self.ss.a.scratch) + " ago", TextRole::Faint);
+        }
+
+        self.ss.a.scratch.reset();
+        self.ss.a.scratch.elapsed(e.lastMs[s as i64] - e.firstMs[s as i64] + 1);
+        return twoLines(first, line("known for " + text::scratchText(self.ss.a.scratch), TextRole::Caption), Align::End);
+    }
+}
+
+/** What a public address with no name is waiting for, if anything. */
+fn unnamedWord(hosts : Hosts, h : i32) : string {
+    return match hosts.look[h as i64] {
+        Look::New => "waiting for lookup",
+        Look::Sent => "looking up...",
+        Look::Local => "not routable",
+        Look::Failed => resolvingWord(hosts, h, "lookup failed"),
+        Look::Done => resolvingWord(hosts, h, "no name published"),
+    };
+}
+
+/** The reverse lookup still to come, or `settled` once it has answered empty. */
+fn resolvingWord(hosts : Hosts, h : i32, settled : string) : string {
+    if (hosts.nameFrom[h as i64] == NameSource::None) {
+        return "resolving name...";
+    }
+
+    return settled;
+}

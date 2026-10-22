@@ -1,0 +1,142 @@
+// ui/page — the window's one page: a title with the three readings and the
+// live state, the four key figures, the filter and its controls, the tree, and
+// the status bar.
+//
+// What changes once a second — the figures, the badges, the count of rows
+// shown — is a `Rebuilt` over a `Maker`; what does not is built once. The
+// tree is a `DataGrid` over the `Journal`, and keeps the pick and the scroll in
+// the `DataState` the session shares.
+
+use zaffre::{
+    Widget, Column, Row, FlexProps, Label, Spacer, Dot, SearchInput, SearchProps, Select, SelectProps, ToggleChip,
+    DataGrid, DataGridProps, StatusBar, StatusProps, KeyHint, Tone, TextRole, Align, Length, Insets, Justify,
+    BadgeLook, StatLook, ControlSize, Elevation, BadgeSize,
+};
+use crate::ui::text;
+use crate::ui::live::Rebuilt;
+use crate::ui::figures::{FigureMaker, PillMaker, ShownMaker};
+use crate::ui::journal::{Journal, columns};
+use crate::app::{App, Say, sayText, sortTitle};
+use crate::session::Session;
+use crate::enrich::queue::{Queue, troubleNote};
+use crate::model::pulse::Pulse;
+use crate::model::view::sortAt;
+
+/** What the tree says when nothing is showing: the filter, or the two reveals, are the usual reason. */
+const EMPTY : string = "Nothing to show. Esc clears the filter; L also shows local traffic, B listening and UDP sockets.";
+
+/** The whole page. */
+pub fn assemble(ss : Shared<Session>) : dyn Widget {
+    let a : App = ss.a;
+    let kids : dyn Widget[] = [
+        header(ss),
+        new Rebuilt(new FigureMaker(ss), a.stamp),
+        toolbar(ss),
+        new DataGrid(DataGridProps { grow: 1.0, empty: EMPTY }, columns(), new Journal(ss), a.grid),
+        new StatusBar(StatusProps { }, a.status, hints()),
+    ];
+    return new Column(
+        FlexProps {
+            gap: 16.0,
+            align: Align::Stretch,
+            padding: Insets { top: 16.0, right: 24.0, bottom: 0.0, left: 24.0 },
+            width: Length::Fill,
+            height: Length::Fill,
+        },
+        kids
+    );
+}
+
+/** The keys that matter most, in the order they are used. */
+fn hints() : KeyHint[] {
+    let keys : KeyHint[] = [
+        KeyHint { key: "Enter", what: "details" },
+        KeyHint { key: "O", what: "folder" },
+        KeyHint { key: "/", what: "filter" },
+        KeyHint { key: "S", what: "sort" },
+        KeyHint { key: "P", what: "pause" },
+        KeyHint { key: "F1", what: "all keys" },
+    ];
+    return keys;
+}
+
+/** The title, and at the right end the three readings and whether the window is live. */
+fn header(ss : Shared<Session>) : dyn Widget {
+    let mark : dyn Widget[] = [
+        new Dot(Tone::Accent, 10.0),
+        new Label("netaudit", TextRole::H3),
+        new Label("what every program on this machine is talking to", TextRole::Faint),
+    ];
+    let kids : dyn Widget[] = [
+        new Row(FlexProps { gap: 12.0, align: Align::Center }, mark),
+        new Spacer(1.0),
+        new Rebuilt(new PillMaker(ss), ss.a.stamp),
+    ];
+    return new Row(FlexProps { gap: 12.0, align: Align::Center, width: Length::Fill }, kids);
+}
+
+/** The filter, the ranking, the two reveals, and how many rows are showing. */
+fn toolbar(ss : Shared<Session>) : dyn Widget {
+    let a : App = ss.a;
+    let rankings : string[] = [
+        sortTitle(sortAt(0)), sortTitle(sortAt(1)), sortTitle(sortAt(2)), sortTitle(sortAt(3)),
+        sortTitle(sortAt(4)), sortTitle(sortAt(5)), sortTitle(sortAt(6)),
+    ];
+    let kids : dyn Widget[] = [
+        new SearchInput(SearchProps { placeholder: "Filter by program, host, network or address", grow: 1.0 }, a.query),
+        new Select(SelectProps { prefix: "Sort", width: Length::Px(210.0) }, rankings, a.ranking),
+        new ToggleChip("Local traffic", a.localCount, a.showLocal),
+        new ToggleChip("Listening / UDP", a.boundCount, a.showBound),
+        new Rebuilt(new ShownMaker(ss), a.stamp),
+    ];
+    return new Row(FlexProps { gap: 12.0, align: Align::Center, width: Length::Fill }, kids);
+}
+
+// ─── The status line ─────────────────────────────────────────
+
+/**
+ * Say what the window is waiting on, or what the reader just did.
+ *
+ * A message the reader caused wins while it lasts. Otherwise the one standing
+ * condition worth interrupting the quiet line for goes first — rows that will
+ * stay unnamed until it clears, through no fault of the machine being
+ * audited — then a full journal, which matters more than anything else here:
+ * the tree is missing rows, and a reader who does not know that will read an
+ * absence as evidence.
+ */
+pub fn refreshStatus(ss : Shared<Session>) : void {
+    let a : App = ss.a;
+    let q : Queue = ss.q;
+    let beat : Pulse = ss.w.beat;
+    if (a.say != Say::None) {
+        a.status.set(sayText(a.say, a.showLocal.get(), a.showBound.get()));
+        return;
+    }
+
+    if (q.lastError) {
+        a.status.set(troubleNote(q));
+        return;
+    }
+
+    if (beat.dropped > 0) {
+        a.status.set("Journal full: " + text::count(beat.dropped) + " conversations not recorded. C clears it.");
+        return;
+    }
+
+    if (beat.pending > 0) {
+        let mut line : string = text::counted(beat.pending, "address", "addresses") + " still to look up";
+        if (q.resolved > 0) {
+            line = line + " · " + text::count(q.resolved) + " answered";
+        }
+
+        a.status.set(line);
+        return;
+    }
+
+    if (beat.resolving > 0) {
+        a.status.set(text::count(beat.resolving) + " names still resolving through reverse DNS");
+        return;
+    }
+
+    a.status.set("Every internet address has been looked up.");
+}

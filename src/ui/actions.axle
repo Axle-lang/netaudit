@@ -1,0 +1,77 @@
+// ui/actions — what the reader can do to the journal that is more than a
+// change of view: show a program's binary, forget the history, fold every
+// program. Each is a plain function over the session, so a key, a button and a
+// menu entry all call the same thing and none of them has a copy of it.
+
+use crate::app::{App, Say};
+use crate::session::Session;
+use crate::model::groups::Groups;
+use crate::model::view::{Rows, RowKind};
+use crate::sys::shell;
+
+/** The key of row `row` of the flat list: the program's or the endpoint's own, which is what a pick follows. */
+pub fn rowKey(ss : Shared<Session>, row : i32) : i64 {
+    let v : Rows = ss.w.view;
+    if (v.rowKind[row as i64] == RowKind::Group) {
+        return ss.w.groups.key[v.rowRef[row as i64] as i64];
+    }
+
+    return ss.w.eps.key[v.rowRef[row as i64] as i64];
+}
+
+/** The endpoint the grid has picked, as a slot, or `-1` when a program or nothing is. */
+pub fn pickedEndpoint(ss : Shared<Session>) : i32 {
+    return ss.w.eps.bySlotKey(ss.a.grid.picked);
+}
+
+/** The program the pick belongs to — itself if it is one, its endpoint's if not — or `-1`. */
+pub fn pickedGroup(ss : Shared<Session>) : i32 {
+    let s : i32 = pickedEndpoint(ss);
+    if (s >= 0) {
+        return ss.w.eps.group[s as i64];
+    }
+
+    return ss.w.groups.byKey(ss.a.grid.picked);
+}
+
+/**
+ * Show the picked program's binary in Explorer. An endpoint pick opens its
+ * program's folder — "where does this thing live" is a question about the
+ * program, and the reader is usually standing on one of its rows.
+ */
+pub fn open(ss : Shared<Session>) : void {
+    let a : App = ss.a;
+    let groups : Groups = ss.w.groups;
+    let gi : i32 = pickedGroup(ss);
+    if (gi < 0 || !groups.identified(gi)) {
+        a.saying(Say::NoPath);
+        return;
+    }
+
+    if (shell::revealBinary(ss.w.pool, groups.wideOff[gi as i64], groups.wideChars[gi as i64])) {
+        a.saying(Say::Opened);
+    } else {
+        a.saying(Say::NoPath);
+    }
+}
+
+/** Forget the journal and start again from what is live. */
+pub fn clear(ss : Shared<Session>) : void {
+    ss.w.eps.forget();
+    ss.a.saying(Say::Cleared);
+    ss.a.refreshNow();
+}
+
+/** Fold every program, or, when all are folded, open every one. */
+pub fn foldAll(ss : Shared<Session>) : void {
+    let g : Groups = ss.w.groups;
+    let mut any : bool = false;
+    for (i of 0..g.count) {
+        if (g.isOpen(i)) {
+            any = true;
+        }
+    }
+
+    g.setAll(!any);
+    ss.a.rev = ss.a.rev + 1;
+}

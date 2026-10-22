@@ -1,0 +1,202 @@
+// ui/figures — the pieces of the page that are rebuilt from the model: the four
+// key figures, the three readings with the live state, and the count of rows
+// shown. Each is a `Maker` for a `Rebuilt`, made again at every reading.
+//
+// They live apart from the page because a class has to be declared before the
+// code that hands it to a trait object, and the page is the first thing read.
+
+// The enums that props structs default to are named in the *importer's* scope, so a file
+// that builds them has to import them even when it never writes their names.
+use zaffre::{
+    Widget, Column, Row, FlexProps, Label, Spacer, Stat, StatProps, Sparkline, Badge, BadgeProps, Tooltip, Tone,
+    TextRole, Align, Length, StatLook, BadgeLook, Justify, ControlSize,
+};
+use crate::fmt;
+use crate::ui::text;
+use crate::ui::live::Maker;
+use crate::app::sortNote;
+use crate::session::Session;
+use crate::model::pulse::Pulse;
+use crate::model::view::Rows;
+use crate::sys::tiers::{Tier, TierState, tierName, tierNote};
+
+/** The height a sparkline takes under a figure, which the two tiles without one reserve so the four stand level. */
+const TRACE_H : f64 = 40.0;
+
+/** The four key figures. */
+class FigureMaker : Maker {
+    ss : Shared<Session>;
+
+    constructor(ss : Shared<Session>) {
+        self.ss = ss;
+    }
+
+    pub fn make(mut self) : dyn Widget {
+        let beat : Pulse = self.ss.w.beat;
+        let kids : dyn Widget[] = [
+            self.live(beat),
+            new Stat(
+                StatProps {
+                    label: "Programs",
+                    value: text::count(beat.programs),
+                    note: text::count(beat.processes) + " processes holding sockets",
+                    dot: Tone::Ok,
+                    grow: 1.0,
+                },
+                new Spacer(0.0, TRACE_H)
+            ),
+            new Stat(
+                StatProps {
+                    label: "Reach",
+                    value: text::count(beat.publicHosts),
+                    unit: "internet addresses",
+                    note: text::count(beat.networks) + " networks · " + text::count(beat.countries) + " countries",
+                    dot: Tone::Info,
+                    grow: 1.0,
+                },
+                new Spacer(0.0, TRACE_H)
+            ),
+            self.flagged(beat),
+        ];
+        return new Row(FlexProps { gap: 16.0, align: Align::Start, width: Length::Fill }, kids);
+    }
+
+    /** Live conversations, with two minutes of them behind the figure. */
+    pub(file) fn live(self, beat : Pulse) : dyn Widget {
+        return new Stat(
+            StatProps {
+                label: "Live conversations",
+                value: text::count(beat.live),
+                note: text::count(beat.journal) + " in the journal",
+                dot: Tone::Accent,
+                grow: 1.0,
+            },
+            new Sparkline(series(beat.liveHist, beat.histLen), Tone::Accent)
+        );
+    }
+
+    /**
+     * What is worth looking at. When no lookup has come back the tile says so
+     * rather than showing a zero: "nothing flagged" and "nothing checked" are
+     * opposite states and must not share a face.
+     */
+    pub(file) fn flagged(self, beat : Pulse) : dyn Widget {
+        if (beat.worst < 0) {
+            let mut note : string = "no internet address seen yet";
+            if (beat.pending > 0) {
+                note = text::counted(beat.pending, "address", "addresses") + " waiting on a lookup";
+            }
+
+            return new Stat(StatProps { label: "Flagged", value: "—", note: note, dot: Tone::Neutral, grow: 1.0 }, new Spacer(0.0, TRACE_H));
+        }
+
+        let mut dot : Tone = Tone::Ok;
+        if (beat.flagged > 0) {
+            dot = Tone::Danger;
+        }
+
+        self.ss.a.scratch.reset();
+        fmt::outOfFive(self.ss.a.scratch, beat.worst);
+        return new Stat(
+            StatProps {
+                label: "Flagged",
+                value: text::count(beat.flagged),
+                unit: "endpoints",
+                note: "worst " + text::scratchText(self.ss.a.scratch),
+                dot: dot,
+                grow: 1.0,
+            },
+            new Sparkline(series(beat.flagHist, beat.histLen), Tone::Danger)
+        );
+    }
+}
+
+/** A ring of counts as the series a sparkline draws. */
+fn series(ring : i32[], n : i32) : f64[] {
+    let mut count : i32 = n;
+    if (count < 2) {
+        count = 2;
+    }
+
+    let mut values : f64[] = malloc<f64>(count as i64);
+    for (i of 0..count) {
+        values[i as i64] = 0.0;
+        if (i < n) {
+            values[i as i64] = ring[i as i64] as f64;
+        }
+    }
+
+    return values;
+}
+
+/** The three readings, each explaining itself under the pointer, and the live state. */
+class PillMaker : Maker {
+    ss : Shared<Session>;
+
+    constructor(ss : Shared<Session>) {
+        self.ss = ss;
+    }
+
+    pub fn make(mut self) : dyn Widget {
+        let kids : dyn Widget[] = [
+            self.tier(Tier::Poll),
+            self.tier(Tier::Dns),
+            self.tier(Tier::Etw),
+            self.state(),
+        ];
+        return new Row(FlexProps { gap: 8.0, align: Align::Center }, kids);
+    }
+
+    /**
+     * One reading. Running, it is an accent pill with a dot; stopped, a
+     * grey one without; lost — started and then gone quiet — amber. A badge
+     * says what it is doing when the pointer rests on it, because "off" is
+     * not a diagnosis.
+     */
+    pub(file) fn tier(self, which : Tier) : dyn Widget {
+        let state : TierState = self.ss.mach.tiers.stateOf(which);
+        let mut tone : Tone = Tone::Neutral;
+        let mut dot : bool = false;
+        if (state == TierState::On) {
+            tone = Tone::Accent;
+            dot = true;
+        } else if (state == TierState::Lost) {
+            tone = Tone::Warn;
+            dot = true;
+        }
+
+        return new Tooltip(
+            tierNote(which, state),
+            new Badge(BadgeProps { text: tierName(which), tone: tone, dot: dot })
+        );
+    }
+
+    /** Live, or paused. */
+    pub(file) fn state(self) : dyn Widget {
+        if (self.ss.a.paused) {
+            return new Badge(BadgeProps { text: "Paused", tone: Tone::Warn, dot: true });
+        }
+
+        return new Badge(BadgeProps { text: "Live", tone: Tone::Ok, dot: true });
+    }
+}
+
+/** How many rows are showing, and what the ranking weighs. */
+class ShownMaker : Maker {
+    ss : Shared<Session>;
+
+    constructor(ss : Shared<Session>) {
+        self.ss = ss;
+    }
+
+    pub fn make(mut self) : dyn Widget {
+        let v : Rows = self.ss.w.view;
+        let first : string = text::counted(v.shown, "endpoint", "endpoints") + " shown";
+        let kids : dyn Widget[] = [
+            new Label(first, TextRole::Body),
+            new Label(sortNote(self.ss.a.sortKey()), TextRole::Caption),
+        ];
+        return new Column(FlexProps { gap: 1.0, align: Align::End }, kids);
+    }
+}
+

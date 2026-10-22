@@ -1,0 +1,237 @@
+// ui/root — the widget around the page: the keys that belong to the window
+// and not to any control, and the sheets that open over it.
+//
+// The page is offered every event first, so a field that is being typed in
+// takes its letters and a grid that has the focus takes its arrows. What is
+// left over — a letter nothing wanted, a key with nothing to move — is the
+// window's own: `S` ranks, `L` and `B` reveal, `O` opens the program's folder,
+// `P` pauses. A key that moves the pick when nothing holds the keyboard hands
+// the keyboard to the grid first, so the arrows work from the moment the
+// window opens.
+
+use zaffre::{
+    Widget, Base, Context, Size, Bounds, Limits, UiEvent, EventKind, Key, Painter, Sheet, SheetProps, SheetSide,
+};
+use crate::ui::actions;
+use crate::ui::detail;
+use crate::app::App;
+use crate::session::Session;
+use crate::model::view::Rows;
+
+/** The sheet's width, in pixels. */
+const SHEET_W : f64 = 560.0;
+
+/** The characters the window answers to, as the codepoints a `Text` event carries. Letters are tested in lower case. */
+const CH_SLASH : i32 = 47;
+const CH_QUESTION : i32 = 63;
+const CH_EIGHT : i32 = 56;
+const CH_B : i32 = 98;
+const CH_C : i32 = 99;
+const CH_L : i32 = 108;
+const CH_O : i32 = 111;
+const CH_P : i32 = 112;
+const CH_Q : i32 = 113;
+const CH_R : i32 = 114;
+const CH_S : i32 = 115;
+/** What turns an upper-case ASCII letter into its lower-case. */
+const CASE_BIT : i32 = 32;
+
+/** The page, with the window's keys and sheets. */
+pub class Root : Base, Widget {
+    ss : Shared<Session>;
+    kid : dyn Widget[];
+    acted : i64 = 0;
+    /** Where the rows were scrolled when the button went down: a release after a drag is not a click on a row. */
+    downScroll : f64 = 0.0;
+
+    /** `page`, which it takes, driven by `ss`. */
+    constructor(ss : Shared<Session>, own page : dyn Widget) {
+        self.ss = ss;
+        self.kid = malloc<dyn Widget>(1 as i64);
+        self.kid[0] = page;
+        self.acted = ss.a.grid.activations;
+    }
+
+    pub fn flex(self) : f64 {
+        let c : dyn Widget = self.kid[0];
+        return c.flex();
+    }
+
+    pub fn measure(mut self, ctx : Context, limits : Limits) : Size {
+        let c : dyn Widget = self.kid[0];
+        return c.measure(ctx, limits);
+    }
+
+    pub fn arrange(mut self, ctx : Context, area : Bounds) : void {
+        self.area = area;
+        let c : dyn Widget = self.kid[0];
+        c.arrange(ctx, area);
+    }
+
+    pub fn paint(mut self, ctx : Context, p : Painter) : void {
+        let c : dyn Widget = self.kid[0];
+        c.paint(ctx, p);
+    }
+
+    pub fn event(mut self, ctx : Context, e : UiEvent) : bool {
+        let c : dyn Widget = self.kid[0];
+        if (e.kind == EventKind::PointerDown && e.button == 0) {
+            self.downScroll = self.ss.a.grid.scroll;
+        }
+
+        if (c.event(ctx, e)) {
+            if (e.kind == EventKind::PointerUp && e.button == 0) {
+                self.clicked(ctx);
+            }
+
+            return true;
+        }
+
+        if (e.kind == EventKind::Text) {
+            return self.letter(ctx, e);
+        }
+
+        if (e.kind == EventKind::KeyDown) {
+            return self.key(ctx, e);
+        }
+
+        return false;
+    }
+
+    /** A character nothing took: a command, or `/` for a field that was not listening. */
+    pub(file) fn letter(mut self, ctx : Context, e : UiEvent) : bool {
+        let c : dyn Widget = self.kid[0];
+        let mut a : App = self.ss.a;
+        if (e.cp == CH_SLASH) {
+            // The search field jumps in only while nothing holds the keyboard.
+            ctx.clearFocus();
+            return c.event(ctx, e);
+        }
+
+        // Letters in either case; the digit is the digit.
+        let lower : i32 = e.cp | CASE_BIT;
+        if (lower == CH_S) {
+            a.nextSort();
+        } else if (lower == CH_L) {
+            a.flipLocal();
+        } else if (lower == CH_B) {
+            a.flipBound();
+        } else if (lower == CH_O) {
+            actions::open(self.ss);
+        } else if (lower == CH_C) {
+            actions::clear(self.ss);
+        } else if (lower == CH_P) {
+            a.flipPause();
+        } else if (lower == CH_R) {
+            a.refreshNow();
+        } else if (lower == CH_Q) {
+            a.quit();
+        } else if (e.cp == CH_EIGHT) {
+            actions::foldAll(self.ss);
+        } else if (e.cp == CH_QUESTION) {
+            a.helpAsked = true;
+        } else {
+            return false;
+        }
+
+        ctx.invalidate();
+        return true;
+    }
+
+    /** A key nothing took. */
+    pub(file) fn key(mut self, ctx : Context, e : UiEvent) : bool {
+        let c : dyn Widget = self.kid[0];
+        let a : App = self.ss.a;
+        if (e.key == Key::Escape) {
+            if (a.query.get().byteLength > 0) {
+                a.query.set("");
+                return true;
+            }
+
+            return false;
+        }
+
+        if (e.key == Key::Space) {
+            a.flipPause();
+            ctx.invalidate();
+            return true;
+        }
+
+        let moves : bool = e.key == Key::Up || e.key == Key::Down || e.key == Key::PageUp || e.key == Key::PageDown
+            || e.key == Key::Home || e.key == Key::End || e.key == Key::Enter || e.key == Key::Left
+            || e.key == Key::Right;
+        if (moves) {
+            // The grid is the last thing in the Tab order: stepping back from
+            // nothing lands on it, and it then answers the same key.
+            ctx.clearFocus();
+            ctx.focusNext(true);
+            return c.event(ctx, e);
+        }
+
+        return false;
+    }
+
+    pub fn tick(mut self, ctx : Context, dt : f64) : bool {
+        let c : dyn Widget = self.kid[0];
+        let moving : bool = c.tick(ctx, dt);
+        let mut a : App = self.ss.a;
+
+        // The first row is picked as soon as there is one, so Enter and the
+        // arrows have somewhere to start.
+        let v : Rows = self.ss.w.view;
+        if (a.grid.picked == -1 && v.count > 0) {
+            a.grid.pick(actions::rowKey(self.ss, 0));
+        }
+
+        if (a.grid.activations != self.acted) {
+            self.acted = a.grid.activations;
+            self.activated(ctx);
+        }
+
+        if (a.helpAsked) {
+            a.helpAsked = false;
+            let help : () => dyn Widget = () => detail::help();
+            ctx.openOverlay(new Sheet(SheetProps { title: "Keyboard", side: SheetSide::Right, width: SHEET_W }, help));
+        }
+
+        return moving;
+    }
+
+    /**
+     * A click that came up on a row of the tree picks it, and an endpoint's
+     * sheet opens with it. A program's click only picks (its chevron folds), and
+     * a release after dragging the scrollbar or the rows is no click at all.
+     */
+    pub(file) fn clicked(mut self, ctx : Context) : void {
+        let g = self.ss.a.grid;
+        if (!g.hovering || g.scroll != self.downScroll || actions::pickedEndpoint(self.ss) < 0) {
+            return;
+        }
+
+        // A double click has also activated the row; the sheet it asked for is this one.
+        self.acted = g.activations;
+        self.openSheet(ctx);
+    }
+
+    /** The sheet for the picked endpoint. */
+    pub(file) fn openSheet(mut self, ctx : Context) : void {
+        let hand : Shared<Session> = self.ss;
+        let content : () => dyn Widget = () => detail::endpoint(hand);
+        ctx.openOverlay(new Sheet(SheetProps { title: detail::title(self.ss), side: SheetSide::Right, width: SHEET_W }, content));
+    }
+
+    /** Enter on a row: the sheet for an endpoint, the fold for a program. */
+    pub(file) fn activated(mut self, ctx : Context) : void {
+        if (actions::pickedEndpoint(self.ss) >= 0) {
+            self.openSheet(ctx);
+            return;
+        }
+
+        let gi : i32 = actions::pickedGroup(self.ss);
+        if (gi >= 0) {
+            self.ss.w.groups.toggle(gi);
+            self.ss.a.rev = self.ss.a.rev + 1;
+            ctx.invalidate();
+        }
+    }
+}

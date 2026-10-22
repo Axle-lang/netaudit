@@ -1,358 +1,262 @@
-// ui/detail — the card behind Enter: one endpoint, said in full, with the
-// score taken apart.
+// ui/detail — the sheet behind Enter: one endpoint, said in full, with the
+// score taken apart. And the keyboard reference.
 //
-// The tree row has to fit seven facts on two lines, which means every one of
+// A grid row has to fit seven facts on two lines, which means every one of
 // them is abbreviated. This is where they are not. Its most important
 // section is the last one: **why the score is what it is**, one line per
 // signal, each with the points it cost or earned. A trust reading that
 // cannot be interrogated is a reading that will be either believed blindly
 // or ignored entirely, and both are worse than no reading.
-//
-// The help card lives here too, for the same reason a keyboard reference
-// usually lives next to the thing it drives: it is the other card the window
-// can put in front of everything else, and it shares the frame that does so.
 
-use smalt::Rect;
+use zaffre::{
+    Widget, Column, Row, FlexProps, Label, LabelProps, Eyebrow, Tag, TagProps, ScoreMeter, ReasonList, ReasonProps,
+    Reason, Scroll, ScrollProps, Button, ButtonProps, ButtonKind, IconKind, Spacer, Divider, DescriptionList, Tone,
+    TextRole, BadgeSize, Align, Length, Insets, Justify, BadgeLook, StatLook, ControlSize, Elevation,
+};
 use std::text::StringBuilder;
 use crate::fmt;
-use crate::ui::paint::{Paint, Lane};
-use crate::ui::card;
-use crate::ui::card::Card;
-use crate::ui::parts;
-use crate::app::{App, Modal};
+use crate::ui::text;
+use crate::ui::actions;
+use crate::ui::live::Tall;
 use crate::session::Session;
 use crate::model::world::World;
-use crate::model::pool::Bytes;
-use crate::model::view::RowKind;
 use crate::model::endpoints::{Endpoints, SocketKind, kindBadge};
-use crate::model::groups::Groups;
 use crate::model::hosts::{Hosts, nameSource, lookNote, FLAG_PROXY, FLAG_HOSTING, FLAG_MOBILE};
 use crate::model::rhythm::{hasRhythm, regularityWord};
 use crate::model::addr::{reachWord, Reach};
-use crate::model::score::{Reason, reasonAt, reasonBit, reasonWeight, reasonText, REASON_COUNT};
-use crate::sys::conn::{Proto, stateName};
-use crate::theme::{C_MODAL, C_LINE, C_TEXT, C_DIM, C_FAINT};
-use crate::theme::{C_MEM, C_OK, C_HOT, C_ACCENT, C_TCP, C_UDP};
+use crate::model::score::{Signal, reasonAt, reasonBit, reasonWeight, reasonText, REASON_COUNT};
+use crate::sys::conn::stateName;
 
-/** Height of the card's header band. */
-const TOP_H : i32 = 78;
-/** Height of the footer band. */
-const FOOT_H : i32 = 44;
-/** Narrowest the card is drawn, whatever its content measures. */
-const CARD_MIN_W : i32 = 600;
-/** Horizontal padding of the header and footer — the card's own. */
-const SIDE : i32 = 22;
-/** Room the score takes in the header's right-hand corner. */
-const SCORE_W : i32 = 150;
+/** The width the scrollbar takes at the right of the sheet's content. */
+const BAR_ROOM : f64 = 16.0;
 
-/**
- * The whole card, dimming the page behind it. An endpoint can expire while
- * its card is open; the card then closes rather than showing a row that no
- * longer exists.
- */
-fn drawCard(p : Paint, ss : Session) : void {
-    let a : App = ss.a;
-    if (a.modal == Modal::None || a.modal == Modal::SortMenu) {
+/** What the sheet's header and padding take of the window's height, so the scroll inside it fits what is left. */
+const SHEET_CHROME : f64 = 112.0;
+
+/** The sheet's title: the name a reader knows the endpoint by. */
+pub fn title(ss : Shared<Session>) : string {
+    let s : i32 = actions::pickedEndpoint(ss);
+    if (s < 0) {
+        return "Endpoint";
+    }
+
+    let w : World = ss.w;
+    let h : i32 = w.eps.host[s as i64];
+    if (h >= 0 && w.hostName(h).some()) {
+        return text::spanText(w.hostName(h));
+    }
+
+    return addrText(ss, s);
+}
+
+/** Endpoint `s`'s address and port. */
+fn addrText(ss : Shared<Session>, s : i32) : string {
+    let e : Endpoints = ss.w.eps;
+    ss.a.scratch.reset();
+    fmt::addrPort(ss.a.scratch, e.addrAt(s), e.family[s as i64], e.port[s as i64]);
+    return text::scratchText(ss.a.scratch);
+}
+
+/** A term and its value on one line, the value wrapped if it is long. */
+fn fact(into : Column, term : string, value : string) : void {
+    if (value.byteLength == 0) {
         return;
     }
 
-    let s : i32 = endpointOf(ss);
-    if (a.modal == Modal::Detail && s < 0) {
-        // Closing is the only honest answer: a modal left up with nothing
-        // drawn would swallow keys and clicks behind a window that looks idle.
-        a.modal = Modal::None;
-        a.dirty = true;
-        return;
-    }
-
-    let c : Card = new Card();
-    c.measure();
-    c.atLeast(CARD_MIN_W - SIDE * 2);
-    cardBody(c, p, ss, s);
-
-    let w : i32 = c.boxWidth();
-    let h : i32 = TOP_H + c.boxHeight() + FOOT_H;
-    let box : Rect = Rect::make((p.lay.w - w) / 2, (p.lay.h - h) / 2, w, h);
-    a.cardRect = box;
-
-    p.f.shade(Rect::make(0, 0, p.lay.w, p.lay.h), 0x05060A, 3, 5);
-    parts::shadow(p.f, box);
-    parts::outline(p.f, box, 14, C_LINE, C_MODAL);
-
-    if (a.modal == Modal::Help) {
-        helpTop(p, box);
-    } else {
-        endpointTop(p, ss, s, box);
-    }
-
-    p.f.hLine(box.x + 1, box.y + TOP_H, w - 2, C_LINE);
-
-    c.paint(box.x + SIDE, c.firstBase(box.y + TOP_H));
-    cardBody(c, p, ss, s);
-    footer(p, ss, box);
+    let kids : dyn Widget[] = [
+        new Label(LabelProps { role: TextRole::Faint, width: Length::Px(112.0) }, term),
+        new Label(LabelProps { role: TextRole::Body, wrap: true, grow: 1.0 }, value),
+    ];
+    into.add(new Row(FlexProps { gap: 12.0, align: Align::Start, width: Length::Fill }, kids));
 }
 
-/** The footer band: the keys that act on the card. */
-fn footer(p : Paint, ss : Session, box : Rect) : void {
-    let top : i32 = box.y + box.h - FOOT_H;
-    let base : i32 = top + 27;
-    p.f.hLine(box.x + 1, top, box.w - 2, C_LINE);
-
-    let right : i32 = box.x + box.w - SIDE;
-    p.textRight(right, base, "close", C_FAINT);
-    let cap : i32 = right - p.width("close") - 6 - parts::keycapWidth(p, "Esc");
-    parts::keycap(p, cap, base, "Esc");
-
-    if (ss.a.modal == Modal::Detail) {
-        let pen : i32 = parts::keycap(p, box.x + SIDE, base, "O");
-        p.text(pen + 6, base, "open the program's folder", C_FAINT);
-    }
+/** A heading over a group of facts. */
+fn section(into : Column, name : string) : Column {
+    into.add(new Divider());
+    into.add(new Eyebrow(name, Tone::Neutral));
+    return new Column(FlexProps { gap: 8.0, align: Align::Stretch, width: Length::Fill, capacity: 16 });
 }
 
-/** The content under the header, in whichever pass. */
-fn cardBody(c : Card, p : Paint, ss : Session, s : i32) : void {
-    if (ss.a.modal == Modal::Help) {
-        help(c, p);
-    } else {
-        endpointCard(c, p, ss, s);
+/** The endpoint the grid has picked, said in full. */
+pub fn endpoint(ss : Shared<Session>) : dyn Widget {
+    // The scrollbar sits over the right edge of what it scrolls, so the content leaves it room.
+    let col : Column = new Column(FlexProps {
+        gap: 14.0,
+        align: Align::Stretch,
+        padding: Insets { right: BAR_ROOM },
+        width: Length::Fill,
+        capacity: 24,
+    });
+    let s : i32 = actions::pickedEndpoint(ss);
+    if (s < 0) {
+        col.add(new Label("That endpoint has expired from the journal.", TextRole::Dim));
+        return col;
     }
+
+    col.add(summary(ss, s));
+
+    let conn : Column = section(col, "Connection");
+    connection(conn, ss, s);
+    col.add(conn);
+
+    if (ss.w.eps.host[s as i64] >= 0) {
+        let who : Column = section(col, "Attribution");
+        attribution(who, ss, s);
+        col.add(who);
+    }
+
+    let again : Column = section(col, "Repetition");
+    repetition(again, ss, s);
+    col.add(again);
+
+    let moved : Column = section(col, "Traffic");
+    traffic(moved, ss, s);
+    col.add(moved);
+
+    col.add(new Divider());
+    col.add(trust(ss, s));
+    col.add(footer(ss));
+    return new Tall(SHEET_CHROME, new Scroll(ScrollProps { height: Length::Fill }, col));
 }
 
-/** The endpoint the card is about, or `-1` if it is gone. */
-fn endpointOf(ss : Session) : i32 {
-    let a : App = ss.a;
-    if (!a.selected || a.selKind != RowKind::Endpoint) {
-        return -1;
-    }
-
-    return ss.w.eps.bySlotKey(a.selKey);
-}
-
-/** The ink of a protocol chip. */
-fn kindInk(e : Endpoints, s : i32) : i32 {
-    if (e.kind[s] == SocketKind::Listen) {
-        return C_ACCENT;
-    }
-
-    if (e.proto[s] == Proto::Udp) {
-        return C_UDP;
-    }
-
-    return C_TCP;
-}
-
-/**
- * The header: the name a reader knows the endpoint by, the address and
- * program beneath it, and the score in the corner, large — the one figure
- * the rest of the card exists to justify.
- */
-fn endpointTop(p : Paint, ss : Session, s : i32, box : Rect) : void {
+/** The protocol and address, the program, and the score — the one figure the rest of the sheet exists to justify. */
+fn summary(ss : Shared<Session>, s : i32) : dyn Widget {
     let w : World = ss.w;
     let e : Endpoints = w.eps;
-    let h : i32 = e.host[s];
-    let left : i32 = box.x + SIDE;
-    let title : Lane = Lane::at(left, box.w - SIDE * 2 - SCORE_W);
-
-    p.scratch.reset();
-    fmt::addrPort(p.scratch, e.addrAt(s), e.family[s], e.port[s]);
-    let addr : Bytes = p.figureBytes();
-
-    // When there is no name the address is the title, and the line beneath
-    // leaves it out: said twice, it reads as two different things.
+    let h : i32 = e.host[s as i64];
+    let gi : i32 = e.group[s as i64];
     let named : bool = h >= 0 && w.hostName(h).some();
+
+    let line : Row = new Row(FlexProps { gap: 10.0, align: Align::Center });
+    line.add(new Tag(TagProps { text: kindBadge(e.kind[s as i64], e.proto[s as i64]), tone: Tone::Info, size: BadgeSize::Sm }));
     if (named) {
-        p.boldBytes(title, box.y + 32, w.hostName(h), C_TEXT);
-    } else {
-        p.boldBytes(title, box.y + 32, addr, C_TEXT);
+        line.add(new Label(addrText(ss, s), TextRole::Dim));
     }
 
-    let badge : string = kindBadge(e.kind[s], e.proto[s]);
-    let pen : i32 = parts::chip(p, left, box.y + 44, badge, kindInk(e, s)) + 10;
-    if (named) {
-        pen = p.bytes(pen, box.y + 57, addr, C_DIM) + 10;
-    }
-
-    let gi : i32 = e.group[s];
     if (gi >= 0 && w.groupName(gi).some()) {
-        if (named) {
-            parts::dot(p.f, pen, box.y + 53, C_FAINT);
-            pen = pen + 10;
-        }
-
-        let rest : Lane = Lane::at(pen, title.x + title.w - pen);
-        p.bytesElided(rest, box.y + 57, w.groupName(gi), C_DIM);
+        line.add(new Label(text::spanText(w.groupName(gi)), TextRole::Dim));
     }
 
-    scoreCorner(p, e.score[s], box);
-}
-
-/** The score, large, in the header's right-hand corner. */
-fn scoreCorner(p : Paint, score : i32, box : Rect) : void {
-    let right : i32 = box.x + box.w - SIDE;
-    if (score < 0) {
-        p.textRight(right, box.y + 34, "not scored yet", C_FAINT);
-        parts::meter(p.f, right - 62, box.y + 52, -1);
-        return;
+    let score : i32 = e.score[s as i64];
+    let mut verdict : string = "not scored yet";
+    if (score >= 0) {
+        ss.a.scratch.reset();
+        fmt::outOfFive(ss.a.scratch, score);
+        verdict = text::scratchText(ss.a.scratch);
     }
 
-    p.scratch.reset();
-    fmt::outOfFive(p.scratch, score);
-    p.bigFigureRight(right, box.y + 38, parts::scoreColor(score));
-    p.textRight(right - p.bigFigureWidth() - 8, box.y + 36, "trust", C_FAINT);
-    parts::meter(p.f, right - 62, box.y + 54, score);
-}
-
-/** The keyboard card's header. */
-fn helpTop(p : Paint, box : Rect) : void {
-    let lead : string = "Everything the window answers to. The pointer does the rest.";
-    p.bold(box.x + SIDE, box.y + 34, "Keyboard", C_TEXT);
-    p.text(box.x + SIDE, box.y + 56, lead, C_FAINT);
-}
-
-/** One endpoint, in full. */
-fn endpointCard(c : Card, p : Paint, ss : Session, s : i32) : void {
-    if (s < 0) {
-        return;
-    }
-
-    connection(c, p, ss, s);
-    attribution(c, p, ss, s);
-    repetition(c, p, ss, s);
-    traffic(c, p, ss, s);
-    trust(c, p, ss, s);
+    let right : dyn Widget[] = [new Label("trust", TextRole::Caption), new Label(verdict, TextRole::H3), new ScoreMeter(score)];
+    let kids : dyn Widget[] = [line, new Spacer(1.0), new Column(FlexProps { gap: 4.0, align: Align::End }, right)];
+    return new Row(FlexProps { gap: 12.0, align: Align::Center, width: Length::Fill }, kids);
 }
 
 /** What the socket is doing, and which program holds it. */
-fn connection(c : Card, p : Paint, ss : Session, s : i32) : void {
+fn connection(into : Column, ss : Shared<Session>, s : i32) : void {
     let w : World = ss.w;
     let e : Endpoints = w.eps;
-    card::head(c, p, "Connection");
-
-    if (e.kind[s] == SocketKind::Udp) {
-        card::textField(c, p, "state", "bound; Windows records no peer for UDP", C_DIM);
-    } else if (e.liveNow[s] > 0) {
-        card::textField(c, p, "state", stateName(e.state[s]), C_OK);
-    } else if (e.sockets[s] > 0) {
-        card::textField(c, p, "state", stateName(e.state[s]), C_DIM);
+    if (e.kind[s as i64] == SocketKind::Udp) {
+        fact(into, "state", "bound; Windows records no peer for UDP");
+    } else if (e.liveNow[s as i64] > 0 || e.sockets[s as i64] > 0) {
+        fact(into, "state", stateName(e.state[s as i64]));
     } else {
-        card::textField(c, p, "state", "no socket open now; kept as history", C_FAINT);
+        fact(into, "state", "no socket open now; kept as history");
     }
 
     // The path when Windows gave one; the name it was grouped by otherwise.
-    let gi : i32 = e.group[s];
+    let gi : i32 = e.group[s as i64];
     if (gi >= 0) {
-        card::spanField(c, p, "program", w.groupPath(gi), C_DIM);
+        fact(into, "program", text::spanText(w.groupPath(gi)));
     }
 }
 
 /** Who owns the address, and where the name came from. */
-fn attribution(c : Card, p : Paint, ss : Session, s : i32) : void {
+fn attribution(into : Column, ss : Shared<Session>, s : i32) : void {
     let w : World = ss.w;
-    let h : i32 = w.eps.host[s];
-    if (h < 0) {
-        return;
-    }
-
+    let h : i32 = w.eps.host[s as i64];
     let hosts : Hosts = w.hosts;
-    card::head(c, p, "Attribution");
-    card::spanField(c, p, "network", w.network(h), C_TEXT);
-    card::spanField(c, p, "operator", w.operator(h), C_DIM);
-    card::spanField(c, p, "city", w.city(h), C_DIM);
-    card::spanField(c, p, "country", w.country(h), C_DIM);
-    card::textField(c, p, "flags", flagWords(hosts, h), C_DIM);
+    fact(into, "network", text::spanText(w.network(h)));
+    fact(into, "operator", text::spanText(w.operator(h)));
+    fact(into, "city", text::spanText(w.city(h)));
+    fact(into, "country", text::spanText(w.country(h)));
+    fact(into, "flags", flagWords(hosts, h));
 
-    let reach : string = reachWord(hosts.reach[h]);
-    if (w.eps.kind[s] == SocketKind::Listen && hosts.reach[h] == Reach::None) {
+    let mut reach : string = reachWord(hosts.reach[h as i64]);
+    if (w.eps.kind[s as i64] == SocketKind::Listen && hosts.reach[h as i64] == Reach::None) {
         reach = "every interface of this machine";
     }
 
-    card::textField(c, p, "reach", reach, C_DIM);
-    card::textField(c, p, "name from", nameSource(hosts.nameFrom[h]), C_DIM);
-    card::textField(c, p, "lookup", lookNote(hosts.look[h]), C_FAINT);
+    fact(into, "reach", reach);
+    fact(into, "name from", nameSource(hosts.nameFrom[h as i64]));
+    fact(into, "lookup", lookNote(hosts.look[h as i64]));
 }
 
 /** What the lookup service said about the kind of network, in words. */
 fn flagWords(hosts : Hosts, h : i32) : string {
-    let s : string = "";
+    let mut s : string = "";
     if (hosts.has(h, FLAG_PROXY)) {
         s = "proxy, VPN or Tor exit";
     }
 
     if (hosts.has(h, FLAG_HOSTING)) {
-        s = joined(s, "datacenter");
+        s = text::joined(s, "datacenter");
     }
 
     if (hosts.has(h, FLAG_MOBILE)) {
-        s = joined(s, "mobile carrier");
+        s = text::joined(s, "mobile carrier");
     }
 
     return s;
 }
 
-/** `a, b`, or just `b` when `a` is empty. */
-fn joined(a : string, b : string) : string {
-    if (a.byteLength == 0) {
-        return b;
-    }
-
-    return a + ", " + b;
-}
-
 /** How often it came back, and how evenly. */
-fn repetition(c : Card, p : Paint, ss : Session, s : i32) : void {
+fn repetition(into : Column, ss : Shared<Session>, s : i32) : void {
     let e : Endpoints = ss.w.eps;
-    card::head(c, p, "Repetition");
-    p.count(e.hits[s] as i64);
-    card::figField(c, p, "visits", "", C_TEXT);
+    fact(into, "visits", text::count(e.hits[s as i64]));
 
     if (hasRhythm(e.rhythm, s)) {
-        let regular : i32 = e.rhythm.regular[s];
+        let regular : i32 = e.rhythm.regular[s as i64];
 
-        p.scratch.reset();
-        p.scratch.elapsed(e.rhythm.periodMs[s]);
-        card::figField(c, p, "typical gap", "", C_TEXT);
+        ss.a.scratch.reset();
+        ss.a.scratch.elapsed(e.rhythm.periodMs[s as i64]);
+        fact(into, "typical gap", text::scratchText(ss.a.scratch));
 
-        p.scratch.reset();
-        p.scratch.elapsed(e.rhythm.jitterMs[s]);
-        card::figField(c, p, "wander", "", C_DIM);
+        ss.a.scratch.reset();
+        ss.a.scratch.elapsed(e.rhythm.jitterMs[s as i64]);
+        fact(into, "wander", text::scratchText(ss.a.scratch));
 
-        p.count((regular / 10) as i64);
-        card::figField(c, p, "steadiness", "%  " + regularityWord(regular), C_ACCENT);
+        fact(into, "steadiness", text::count(regular / 10) + "%  " + regularityWord(regular));
     } else {
-        card::textField(c, p, "rhythm", "too few visits to read one", C_FAINT);
+        fact(into, "rhythm", "too few visits to read one");
     }
 
-    p.scratch.reset();
-    p.scratch.elapsed(e.lastMs[s] - e.firstMs[s] + 1);
-    card::figField(c, p, "known for", "", C_DIM);
-
-    p.count(e.sockets[s] as i64);
-    card::figField(c, p, "sockets now", "", C_DIM);
+    ss.a.scratch.reset();
+    ss.a.scratch.elapsed(e.lastMs[s as i64] - e.firstMs[s as i64] + 1);
+    fact(into, "known for", text::scratchText(ss.a.scratch));
+    fact(into, "sockets now", text::count(e.sockets[s as i64]));
 }
 
 /** What moved, or why nothing is known about what moved. */
-fn traffic(c : Card, p : Paint, ss : Session, s : i32) : void {
+fn traffic(into : Column, ss : Shared<Session>, s : i32) : void {
     let e : Endpoints = ss.w.eps;
-    card::head(c, p, "Traffic");
-
     if (!ss.mach.tiers.bytesMeasured()) {
-        card::line(c, p, "Not measured. Byte counts need the kernel trace (ETW),", C_FAINT);
-        card::line(c, p, "which this build does not have yet.", C_FAINT);
-        card::line(c, p, "Blank means unmeasured, not idle.", C_FAINT);
+        into.add(new Label(
+            LabelProps { role: TextRole::Dim, wrap: true },
+            "Not measured. Byte counts need the kernel trace (ETW), which this build does not have yet. Blank means unmeasured, not idle."
+        ));
         return;
     }
 
-    p.scratch.reset();
-    p.scratch.byteCount(e.bytesIn[s]);
-    card::figField(c, p, "received", "", C_MEM);
+    ss.a.scratch.reset();
+    ss.a.scratch.byteCount(e.bytesIn[s as i64]);
+    fact(into, "received", text::scratchText(ss.a.scratch));
 
-    p.scratch.reset();
-    p.scratch.byteCount(e.bytesOut[s]);
-    card::figField(c, p, "sent", "", C_MEM);
+    ss.a.scratch.reset();
+    ss.a.scratch.byteCount(e.bytesOut[s as i64]);
+    fact(into, "sent", text::scratchText(ss.a.scratch));
 
-    p.scratch.reset();
-    fmt::rate(p.scratch, e.rate(s));
-    card::figField(c, p, "now", "", C_MEM);
+    ss.a.scratch.reset();
+    fmt::rate(ss.a.scratch, e.rate(s));
+    fact(into, "now", text::scratchText(ss.a.scratch));
 }
 
 /**
@@ -360,47 +264,58 @@ fn traffic(c : Card, p : Paint, ss : Session, s : i32) : void {
  * cost or earned; the ones that did not apply are left out rather than shown
  * at zero, because a list of twenty zeroes hides the three lines that matter.
  */
-fn trust(c : Card, p : Paint, ss : Session, s : i32) : void {
+fn trust(ss : Shared<Session>, s : i32) : dyn Widget {
     let e : Endpoints = ss.w.eps;
-    card::head(c, p, "Trust");
-
-    if (e.score[s] < 0) {
-        card::line(c, p, "Nothing is known about this address yet.", C_DIM);
-        card::line(c, p, "A score now would be a number with no evidence behind it.", C_FAINT);
-        return;
+    let score : i32 = e.score[s as i64];
+    if (score < 0) {
+        let kids : dyn Widget[] = [
+            new Eyebrow("Trust", Tone::Neutral),
+            new Label("Nothing is known about this address yet. A score now would be a number with no evidence behind it.", TextRole::Dim),
+        ];
+        return new Column(FlexProps { gap: 8.0, align: Align::Stretch }, kids);
     }
 
-    if (e.reasons[s] == 0) {
-        card::line(c, p, "No signal applies.", C_DIM);
-        card::line(c, p, "The burden is on the evidence, so it scores five.", C_FAINT);
-        return;
-    }
-
+    let mut n : i32 = 0;
     for (i of 0..REASON_COUNT) {
-        let r : Reason = reasonAt(i);
-        if ((e.reasons[s] & reasonBit(r)) == 0) {
+        if ((e.reasons[s as i64] & reasonBit(reasonAt(i))) != 0) {
+            n = n + 1;
+        }
+    }
+
+    if (n == 0) {
+        let kids : dyn Widget[] = [
+            new Eyebrow("Trust", Tone::Neutral),
+            new Label("No signal applies. The burden is on the evidence, so it scores five.", TextRole::Dim),
+        ];
+        return new Column(FlexProps { gap: 8.0, align: Align::Stretch }, kids);
+    }
+
+    let mut signals : Reason[] = malloc<Reason>(n as i64);
+    let mut at : i32 = 0;
+    for (i of 0..REASON_COUNT) {
+        let r : Signal = reasonAt(i);
+        if ((e.reasons[s as i64] & reasonBit(r)) == 0) {
             continue;
         }
 
         let weight : i32 = reasonWeight(r);
-        let ink : i32 = C_HOT;
+        let mut tone : Tone = Tone::Danger;
         if (weight > 0) {
-            ink = C_OK;
+            tone = Tone::Ok;
         }
 
-        card::reason(c, p, signed(weight), reasonText(r), ink);
+        signals[at as i64] = Reason { weight: signed(weight), text: reasonText(r), tone: tone };
+        at = at + 1;
     }
+
+    return new ReasonList(ReasonProps { title: "Trust" }, signals);
 }
 
-/**
- * A weight in tenths, with its sign. ASCII on purpose: a minus sign typed as
- * U+2212 is a byte the face does not carry, and it draws as nothing — which
- * turns every penalty on this card into a bonus.
- */
+/** A weight in tenths, with its sign. */
 fn signed(tenths : i32) : string {
     let sb : StringBuilder = new StringBuilder();
     if (tenths < 0) {
-        sb.append("-");
+        sb.append("−");
     } else {
         sb.append("+");
     }
@@ -412,27 +327,60 @@ fn signed(tenths : i32) : string {
     return sb.toString();
 }
 
-/** The keyboard reference. */
-fn help(c : Card, p : Paint) : void {
-    card::head(c, p, "Moving");
-    card::keyLine(c, p, "Up / Down", "move between rows");
-    card::keyLine(c, p, "PgUp / PgDn", "move by a screen; Home and End go to the ends");
-    card::keyLine(c, p, "Right / Left", "open and fold a program");
-    card::keyLine(c, p, "8", "fold or open every program");
-    card::keyLine(c, p, "Enter", "this card, on an endpoint; fold, on a program");
+/** The action the sheet offers: the program's folder. */
+fn footer(ss : Shared<Session>) : dyn Widget {
+    let hand : Shared<Session> = ss;
+    let kids : dyn Widget[] = [
+        new Button(
+            ButtonProps { label: "Open the program's folder", kind: ButtonKind::Outline, icon: IconKind::Folder },
+            () => actions::open(hand)
+        ),
+    ];
+    return new Row(FlexProps { gap: 8.0, align: Align::Center }, kids);
+}
 
-    card::head(c, p, "What is shown");
-    card::keyLine(c, p, "S", "next ranking; Sort and the column headers list them");
-    card::keyLine(c, p, "L", "also show traffic that stays on this machine or network");
-    card::keyLine(c, p, "B", "also show listening sockets and UDP handles");
-    card::keyLine(c, p, "/", "filter by program, host, network or address");
+// ─── The keyboard ────────────────────────────────────────────
 
-    card::head(c, p, "Doing");
-    card::keyLine(c, p, "O", "open the folder holding the program");
-    card::keyLine(c, p, "C", "clear the history back to what is live");
-    card::keyLine(c, p, "Space", "pause and resume");
-    card::keyLine(c, p, "R / F5", "re-read the machine now");
-    card::keyLine(c, p, "F12", "write the window to netaudit.bmp");
-    card::keyLine(c, p, "Esc", "close a card, clear the filter");
-    card::keyLine(c, p, "Q", "quit");
+/** A heading and its keys. */
+fn keys(into : Column, name : string, terms : string[], details : string[]) : void {
+    into.add(new Eyebrow(name, Tone::Neutral));
+    into.add(new DescriptionList(terms, details));
+}
+
+/** Everything the window answers to. The pointer does the rest. */
+pub fn help() : dyn Widget {
+    let col : Column = new Column(FlexProps { gap: 16.0, align: Align::Stretch, width: Length::Fill, capacity: 12 });
+
+    let moving : string[] = ["Up / Down", "PgUp / PgDn", "Right / Left", "8", "Enter"];
+    let movingDo : string[] = [
+        "move between rows",
+        "move by a screen; Home and End go to the ends",
+        "open and fold a program",
+        "fold or open every program",
+        "details of an endpoint; fold, on a program",
+    ];
+    keys(col, "Moving", moving, movingDo);
+
+    let shown : string[] = ["S", "L", "B", "/"];
+    let shownDo : string[] = [
+        "next ranking; Sort lists them all",
+        "also show traffic that stays on this machine or network",
+        "also show listening sockets and UDP handles",
+        "filter by program, host, network or address",
+    ];
+    keys(col, "What is shown", shown, shownDo);
+
+    let doing : string[] = ["O", "C", "P / Space", "R / F5", "F1 / ?", "F12", "Esc", "Q"];
+    let doingDo : string[] = [
+        "open the folder holding the program",
+        "clear the history back to what is live",
+        "pause and resume",
+        "re-read the machine now",
+        "this list",
+        "write the window to netaudit.bmp",
+        "close this, clear the filter",
+        "quit",
+    ];
+    keys(col, "Doing", doing, doingDo);
+    return col;
 }

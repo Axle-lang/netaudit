@@ -1,0 +1,52 @@
+// ui/text — the model keeps its text as bytes in a pool and its figures as
+// bytes in a cursor; a widget takes a `string`. These are the two doors
+// between them, and nothing else in the window reads either.
+
+use smalt::{Mem, Scratch};
+use std::text::StringBuilder;
+use crate::model::pool::Bytes;
+
+/** The text of a span of interned bytes; empty for an absent span. */
+pub fn spanText(b : Bytes) : string {
+    let sb : StringBuilder = new StringBuilder();
+    for (i of 0..b.len) {
+        sb.appendChar(Mem::byteAt(b.at, i as i64));
+    }
+
+    return sb.toString();
+}
+
+/** What a formatting cursor holds, as text. */
+pub fn scratchText(s : Scratch) : string {
+    return spanText(Bytes::make(s.at(), s.length()));
+}
+
+/** A whole number, as written. */
+pub fn count(n : i32) : string {
+    let sb : StringBuilder = new StringBuilder();
+    sb.appendI32(n);
+    return sb.toString();
+}
+
+/** `one` when there is one of something, `many` otherwise. */
+pub fn plural(n : i32, one : string, many : string) : string {
+    if (n == 1) {
+        return one;
+    }
+
+    return many;
+}
+
+/** `5 processes`, `1 endpoint`: a count and its noun. */
+pub fn counted(n : i32, one : string, many : string) : string {
+    return count(n) + " " + plural(n, one, many);
+}
+
+/** `a, b`, or just `b` when `a` is empty. */
+pub fn joined(a : string, b : string) : string {
+    if (a.byteLength == 0) {
+        return b;
+    }
+
+    return a + ", " + b;
+}

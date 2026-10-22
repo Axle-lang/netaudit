@@ -1,0 +1,126 @@
+// ui/live — a piece of the window that is rebuilt from the model.
+//
+// A Zaffre widget is made once, and a `Stat` holds the text it was made with.
+// The figures, the badges and the count of rows shown change once a second, so
+// each of those is a `Rebuilt`: a widget that asks its `Maker` for a fresh
+// child whenever the stamp the loop bumps at each reading has moved, and is
+// otherwise exactly that child. Nothing is rebuilt between readings, so a
+// frame that only animates allocates nothing.
+
+use zaffre::{Widget, Base, Context, Size, Bounds, Limits, UiEvent, Painter, Model};
+
+/** Something that can make the widget a `Rebuilt` is showing. */
+pub trait Maker {
+    /** A widget for the model as it is now. */
+    fn make(mut self) : dyn Widget;
+}
+
+/** A child that is made again whenever `stamp` changes. */
+pub class Rebuilt : Base, Widget {
+    maker : dyn Maker[];
+    stamp : Shared<Model<i64>>;
+    seen : i64 = -1;
+    kid : dyn Widget[];
+
+    /** The widget `maker` makes, kept current with `stamp`. */
+    constructor(own maker : dyn Maker, stamp : Shared<Model<i64>>) {
+        self.maker = malloc<dyn Maker>(1 as i64);
+        self.maker[0] = maker;
+        self.stamp = stamp;
+        self.kid = malloc<dyn Widget>(1 as i64);
+        let m : dyn Maker = self.maker[0];
+        self.kid[0] = m.make();
+        self.seen = stamp.get();
+    }
+
+    /** Make the child again if the model has moved since it was made. */
+    pub(file) fn sync(mut self) : void {
+        let now : i64 = self.stamp.get();
+        if (now == self.seen) {
+            return;
+        }
+
+        self.seen = now;
+        let m : dyn Maker = self.maker[0];
+        self.kid[0] = m.make();
+    }
+
+    pub fn flex(self) : f64 {
+        let c : dyn Widget = self.kid[0];
+        return c.flex();
+    }
+
+    pub fn measure(mut self, ctx : Context, limits : Limits) : Size {
+        self.sync();
+        let c : dyn Widget = self.kid[0];
+        return c.measure(ctx, limits);
+    }
+
+    pub fn arrange(mut self, ctx : Context, area : Bounds) : void {
+        self.area = area;
+        let c : dyn Widget = self.kid[0];
+        c.arrange(ctx, area);
+    }
+
+    pub fn paint(mut self, ctx : Context, p : Painter) : void {
+        let c : dyn Widget = self.kid[0];
+        c.paint(ctx, p);
+    }
+
+    pub fn event(mut self, ctx : Context, e : UiEvent) : bool {
+        let c : dyn Widget = self.kid[0];
+        return c.event(ctx, e);
+    }
+
+    pub fn tick(mut self, ctx : Context, dt : f64) : bool {
+        let c : dyn Widget = self.kid[0];
+        return c.tick(ctx, dt);
+    }
+}
+
+/**
+ * A child as tall as the window less `margin`, asked afresh at every layout.
+ *
+ * A sheet that is a drawer measures its content without a height limit, so
+ * something that has to scroll inside it cannot be told its height once and
+ * left: it would keep the window's size from when the sheet was opened.
+ */
+pub class Tall : Base, Widget {
+    margin : f64;
+    kid : dyn Widget[];
+
+    /** `child`, which it takes, filling the window's height less `margin`. */
+    constructor(margin : f64, own child : dyn Widget) {
+        self.margin = margin;
+        self.kid = malloc<dyn Widget>(1 as i64);
+        self.kid[0] = child;
+    }
+
+    pub fn measure(mut self, ctx : Context, limits : Limits) : Size {
+        let h : f64 = (ctx.height - self.margin).max(120.0);
+        let c : dyn Widget = self.kid[0];
+        c.measure(ctx, Limits::tight(limits.maxW, h));
+        return Size { w: limits.maxW, h: h };
+    }
+
+    pub fn arrange(mut self, ctx : Context, area : Bounds) : void {
+        self.area = area;
+        let c : dyn Widget = self.kid[0];
+        c.arrange(ctx, area);
+    }
+
+    pub fn paint(mut self, ctx : Context, p : Painter) : void {
+        let c : dyn Widget = self.kid[0];
+        c.paint(ctx, p);
+    }
+
+    pub fn event(mut self, ctx : Context, e : UiEvent) : bool {
+        let c : dyn Widget = self.kid[0];
+        return c.event(ctx, e);
+    }
+
+    pub fn tick(mut self, ctx : Context, dt : f64) : bool {
+        let c : dyn Widget = self.kid[0];
+        return c.tick(ctx, dt);
+    }
+}

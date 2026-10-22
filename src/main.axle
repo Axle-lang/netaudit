@@ -4,22 +4,23 @@
 //                lookup queue, and what the reader is doing
 //   sys/machine  the OS readings: processes, connection tables, the DNS
 //                cache, and which of the three readings are running
-//   sys/raw      the four pointer views those imports need, and every
-//                `unsafe` in this program
+//   sys/raw      the pointer views those imports need, and every `unsafe`
+//                in this program
 //   model/world  the journal: endpoints, their programs, their addresses,
 //                their rhythm, their score, and the flattened tree
 //   app          what the reader is doing to it
-//   ui/*         the chrome, the tree, the hover card, the detail card,
-//                all drawn through one `Paint` per repaint
-//   smalt        the window, the surface, the event queue, the clipped
-//                2-D primitives, the two faces and the BMP writer
+//   ui/*         the window, built from Zaffre's components: a grid over the
+//                journal, key figures, a filter, a status bar, and a sheet
+//                for one endpoint
+//   zaffre       the widgets, the theme, the view; smalt under it is the
+//                window, the surface and the event queue
 //   fmt          the figures a library cannot format: an address, and the
 //                readings whose empty case carries information
 //
 // The loop is event-driven, not frame-driven: `Events::wait` blocks in the
-// OS until something arrives or the next reading is due, and the repaint
-// happens when something changed. A tool that measures the machine's
-// traffic should not be a reason to measure it.
+// OS until something arrives, an animation needs a frame, or the next reading
+// is due, and the window is drawn when something changed. A tool that
+// measures the machine's traffic should not be a reason to measure it.
 //
 // The machine is re-read once a second, and nothing a reader can see moves
 // because of that: rows are keyed rather than indexed, closed conversations
@@ -29,26 +30,24 @@
 // Build & run:  axle build, then target/netaudit.exe
 //               (no elevation needed; elevated, service paths also read)
 
-use smalt::{Platform, PlatformError, WindowDesc, Clock, Events, Event, EventKind};
-use smalt::{Surface, Bmp};
-use crate::input;
-use crate::ui::chrome;
-use crate::ui::tree;
-use crate::ui::tooltip;
-use crate::ui::detail;
-use crate::ui::paint::Paint;
-use crate::app::{App, Modal, Say};
+use smalt::{Platform, PlatformError, WindowDesc, Clock, Events, Event, EventKind as SmaltKind};
+use smalt::{Surface, Bmp, MouseButton, Scancode, CursorShape};
+use zaffre::{
+    View, Theme, Fonts, Keys, UiEvent, EventKind, Key, Mod, Cursor, Strings,
+};
+use crate::ui::page;
+use crate::ui::root::Root;
+use crate::ui::actions;
+use crate::app::{App, Say};
 use crate::session::Session;
 use crate::model::world::World;
-use crate::model::view;
 use crate::model::pulse;
+use crate::model::view::{Rows, RowKind};
 use crate::model::score;
 use crate::model::endpoints::{rank, absorbSnapshot};
-use crate::model::hosts::{Hosts, NameSource, HOST_MAX, Look, ASKED_ORIGIN, ASKED_AS_NAME};
+use crate::model::hosts::{Hosts, NameSource, HOST_MAX, ASKED_ORIGIN, ASKED_AS_NAME};
 use crate::model::addr::Reach;
 use crate::sys::machine::Machine;
-use crate::sys::shell;
-use crate::sys::pointer::Pointer;
 use crate::sys::tiers::TierState;
 use crate::sys::dnscache;
 use crate::sys::rdns;
@@ -57,10 +56,12 @@ use crate::enrich::queue::{Queue, WhoisKind};
 use crate::enrich::ipapi;
 use crate::enrich::cymru;
 use crate::enrich::worker;
-use crate::theme::{WIN_W, WIN_H};
 use std::sys::process::{argc, argAt};
 use std::lang::{IndexOutOfBoundsException, ParseException};
 
+/** The size the window opens at. */
+const WIN_W : i32 = 1360;
+const WIN_H : i32 = 900;
 /** How often the machine is re-read, in milliseconds. */
 const REFRESH_MS : i64 = 1000;
 /**
@@ -73,7 +74,9 @@ const REFRESH_MS : i64 = 1000;
  * that measures the machine owes it.
  */
 const IDLE_MS : i32 = 250;
-/** The window's caption — and how `sys::pointer` finds the window again. */
+/** The wait while something animates: about a frame. */
+const FRAME_MS : i32 = 16;
+/** The window's caption. */
 const TITLE : string = "netaudit";
 /** Where a snapshot lands: the folder the program was started from. */
 const SNAP_PATH : string = "netaudit.bmp";
@@ -86,15 +89,21 @@ fn main() : void {
     }
 }
 
+/** The faces and the theme the whole window is set in. */
+fn built(ss : Shared<Session>) : View {
+    let fonts : Shared<Fonts> = new shared Fonts();
+    return new View(Theme::dark(), fonts, ss.a.dark, new Root(ss, page::assemble(ss)));
+}
+
 fn run() : void ! PlatformError {
-    let platform = new Platform()?;
+    let platform = new Platform();
     defer platform.close();
     let win = platform.open(WindowDesc {
         title: TITLE,
         w: WIN_W,
         h: WIN_H,
         resizable: true,
-    })?;
+    });
     defer win.close();
     let screen = new Surface(WIN_W, WIN_H);
     defer screen.close();
@@ -103,131 +112,274 @@ fn run() : void ! PlatformError {
     let events = new Events();
     defer events.close();
 
-    // A `Frame` is a view of the surface's plane, not an owner of it, and
-    // it is taken afresh at each repaint (`Paint::begin`). The surface never
-    // hands its colour buffer out as an array, and that is what makes the
-    // double release unwritable: an `i32[]` field over a borrowed plane gives
-    // one allocation two owners, and the second release is a fault on exit,
-    // after everything has been drawn and flushed.
-    let pt : Paint = new Paint(screen.frame());
-    let ss : Session = new Session();
-    let a : App = ss.a;
-    let pointer : Pointer = new Pointer(TITLE);
+    let ss : Shared<Session> = new shared Session();
+    let mut a : App = ss.a;
+    let view : View = built(ss);
+    view.resize(WIN_W as f64, WIN_H as f64);
 
     // The two lookups in flight. They live here rather than on `Session`
     // because a `Task` is a handle minted on this thread and consumable only
     // here — parking one in a field would be parking it where the thread
-    // that must join it cannot reach.
-    let jobs : Task<string>[2];
+    // that must join it cannot reach it.
+    let mut jobs : Future<string>[2];
     jobs[0] = spawn worker::idle();
     jobs[1] = spawn worker::idle();
-    jobs[0].join();
-    jobs[1].join();
+    await jobs[0];
+    await jobs[1];
 
     let freq : i64 = clock.frequency();
     let start : i64 = clock.counter();
-    let due : i64 = 0;
+    let mut due : i64 = 0;
+    // The text last mirrored to the system clipboard, so only a change is sent.
+    let mut mirrored : string = "";
+    let mut mx : f64 = 0.0;
+    let mut my : f64 = 0.0;
+    // How many presses the button made when it went down, so its release can say so: a
+    // grid reads a double click off the release.
+    let mut presses : i32 = 1;
 
     // `--snap <ms>` writes one frame and leaves. It is how a capture gets
     // into a report without someone standing over the machine at the right
     // moment, and how this window's own layout is checked without one either.
     let snapAtMs : i64 = snapDeadline();
+    let pane : string = snapPane();
+    let mut paned : bool = false;
 
     while (!a.quitting && win.isOpen()) {
-        // Blocks in the OS until an event arrives or the next reading is
-        // due, whichever comes first. The loop is woken by the machine
-        // changing or by the reader, never by a clock it set for itself.
-        events.wait(win, clock, waitMs(clock, due, freq, a.paused));
+        a.nowMs = ((clock.counter() - start) * 1000) / freq;
+        events.wait(win, clock, waitMs(clock, view, due, freq, a.paused));
+        a.nowMs = ((clock.counter() - start) * 1000) / freq;
 
-        let nowMs : i64 = ((clock.counter() - start) * 1000) / freq;
         while (events.hasNext()) {
             let e : Event = events.next();
-            let act : Action = match e.kind {
-                EventKind::Quit => Action::Quit,
-                EventKind::KeyDown => input::onKey(ss, e.scancode),
-                EventKind::TextInput => input::onText(a, e.text),
-                EventKind::MouseMotion => input::onMotion(ss, nowMs, e.x, e.y),
-                EventKind::MouseButtonDown => input::onClick(ss, e),
-                EventKind::MouseButtonUp => input::onRelease(a, e),
-                EventKind::MouseWheel => input::onWheel(ss, e.wheel),
-                EventKind::WindowResized => resized(screen, a, e),
-                _ => Action::None,
-            };
+            match e.kind {
+                SmaltKind::Quit => {
+                    a.quit();
+                },
+                SmaltKind::WindowResized => {
+                    if (e.width > 0 && e.height > 0) {
+                        screen.resize(e.width, e.height);
+                        view.resize(e.width as f64, e.height as f64);
+                    }
+                },
+                SmaltKind::MouseMotion => {
+                    mx = e.x as f64;
+                    my = e.y as f64;
+                    view.input(UiEvent { kind: EventKind::PointerMove, x: mx, y: my, mods: modsOf(events) });
+                },
+                SmaltKind::MouseButtonDown => {
+                    mx = e.x as f64;
+                    my = e.y as f64;
+                    presses = e.clicks;
+                    view.input(UiEvent { kind: EventKind::PointerDown, x: mx, y: my, button: buttonOf(e.button), clicks: e.clicks, mods: modsOf(events) });
+                },
+                SmaltKind::MouseButtonUp => {
+                    mx = e.x as f64;
+                    my = e.y as f64;
+                    view.input(UiEvent { kind: EventKind::PointerUp, x: mx, y: my, button: buttonOf(e.button), clicks: presses, mods: modsOf(events) });
+                },
+                SmaltKind::MouseWheel => {
+                    view.input(UiEvent { kind: EventKind::Wheel, x: mx, y: my, wheel: e.wheel as f64, mods: modsOf(events) });
+                },
+                SmaltKind::MouseLeft => {
+                    view.input(UiEvent { kind: EventKind::PointerLeave });
+                },
+                SmaltKind::KeyDown => {
+                    // A paste reads the system clipboard as it is now, not as it was when it was last copied here.
+                    if (Keys::key(e.scancode) == Key::V && (modsOf(events) & Mod::CTRL) != 0) {
+                        view.setClipboard(win.clipboardText());
+                        mirrored = view.clipboard();
+                    }
 
-            match act {
-                Action::Quit => a.quit(),
-                Action::Refresh => a.refreshNow(),
-                Action::Clear => {
-                    ss.w.eps.forget();
-                    a.saying(Say::Cleared);
-                    a.refreshNow();
-                }
-                Action::Open => open(ss),
-                Action::Snap => snap(screen, a),
-                Action::None => {}
+                    // The keys the library has no name for.
+                    if (!fnKey(a, e.scancode)) {
+                        view.input(UiEvent { kind: EventKind::KeyDown, key: Keys::key(e.scancode), mods: modsOf(events), repeat: e.repeat });
+                    }
+                },
+                SmaltKind::KeyUp => {
+                    view.input(UiEvent { kind: EventKind::KeyUp, key: Keys::key(e.scancode), mods: modsOf(events) });
+                },
+                SmaltKind::TextInput => {
+                    view.input(UiEvent { kind: EventKind::Text, cp: e.text, mods: modsOf(events) });
+                },
+                SmaltKind::WindowFocusLost => {
+                    view.input(UiEvent { kind: EventKind::WindowBlur });
+                },
+                _ => {
+                },
             }
         }
 
-        pointer.show(input::shapeFor(a));
+        // What a field copied goes to the system clipboard; the pointer takes the shape asked for.
+        if (view.clipboard() != mirrored) {
+            mirrored = view.clipboard();
+            win.setClipboardText(mirrored);
+        }
+
+        win.setCursor(shapeOf(view.cursor()));
 
         // Each step runs every turn; only then is it asked whether any of
         // them changed what is on screen.
-        let landed : bool = collect(ss, nowMs, jobs);
-        let named : bool = sweepDns(ss, nowMs);
-        if (landed || named || a.tipPending(nowMs)) {
-            a.dirty = true;
+        let landed : bool = collect(ss, a.nowMs, jobs);
+        let named : bool = sweepDns(ss, a.nowMs);
+        if (landed || named) {
+            a.stamp.set(a.stamp.get() + 1);
+            page::refreshStatus(ss);
+            view.invalidate();
         }
 
-        dispatch(ss, nowMs, jobs);
+        dispatch(ss, a.nowMs, jobs);
 
         let now : i64 = clock.counter();
         if (!a.paused && (a.refreshDue || now >= due)) {
             a.refreshDue = false;
-            refresh(ss, nowMs);
+            refresh(ss, a.nowMs);
             a.tick();
-            a.dirty = true;
+            page::refreshStatus(ss);
+            view.invalidate();
             due = now + (freq * REFRESH_MS) / 1000;
         }
 
-        if (snapAtMs > 0 && nowMs >= snapAtMs) {
-            Bmp::write(SNAP_PATH, screen.frame());
-            a.quit();
+        // A capture of a sheet opens it halfway to the deadline, so the slide has finished.
+        if (snapAtMs > 0 && !paned && a.nowMs >= snapAtMs / 2) {
+            paned = true;
+            if (pane == "help") {
+                a.helpAsked = true;
+            } else if (pane == "detail") {
+                openFirstEndpoint(ss);
+            } else if (pane.byteLength > 5 && Strings::slice(pane, 0, 5) == "keys:") {
+                feed(view, Strings::slice(pane, 5, pane.byteLength));
+            }
         }
 
-        if (a.dirty) {
-            rebuildView(ss, nowMs);
-            pt.begin(screen.frame(), a.lay, nowMs);
-            paint(pt, ss);
+        view.update((a.nowMs as f64) / 1000.0);
+        if (view.needsFrame() && !win.minimised()) {
+            view.render(screen.frame());
             screen.present(win);
-            a.dirty = false;
+        }
+
+        if (a.snapDue || (snapAtMs > 0 && a.nowMs >= snapAtMs)) {
+            let wrote : bool = Bmp::write(SNAP_PATH, screen.frame());
+            if (snapAtMs > 0) {
+                a.quit();
+            } else {
+                a.snapDue = false;
+                if (wrote) {
+                    a.saying(Say::Snapped);
+                } else {
+                    a.saying(Say::NoSnap);
+                }
+
+                view.invalidate();
+            }
         }
     }
 
     drain(ss.q, jobs);
-    pointer.dispose();
-    pt.dispose();
     ss.dispose();
 }
 
 /**
- * How long the loop may block before the next reading is due.
+ * How long the loop may block before something is owed.
  *
- * Paused, nothing is due and the ceiling is the whole of it. Running, the
- * wait ends at the refresh — so a reading is never late by more than the
- * time the OS took to wake the thread, and the loop still sleeps through
- * every millisecond between two of them.
+ * Animating, a frame; with a change waiting, none; otherwise the sooner of
+ * the view's next timed wake (a caret to blink) and the next reading. Paused,
+ * no reading is due and the ceiling is the whole of it. A reading is never
+ * late by more than the time the OS took to wake the thread, and the loop
+ * still sleeps through every millisecond between two of them.
  */
-fn waitMs(clock : Clock, due : i64, freq : i64, paused : bool) : i32 {
-    if (paused) {
-        return IDLE_MS;
+fn waitMs(clock : Clock, view : View, due : i64, freq : i64, paused : bool) : i32 {
+    if (view.isAnimating()) {
+        return FRAME_MS;
     }
 
-    let left : i64 = ((due - clock.counter()) * 1000) / freq;
-    if (left <= 0) {
+    if (view.isDirty()) {
         return 0;
     }
 
-    return (left as i32).min(IDLE_MS);
+    let mut wait : i32 = IDLE_MS;
+    let wake : f64 = view.waitSeconds() * 1000.0;
+    if (wake < (wait as f64)) {
+        wait = wake.ceilToInt() as i32;
+    }
+
+    if (!paused) {
+        let left : i64 = ((due - clock.counter()) * 1000) / freq;
+        if (left <= 0) {
+            return 0;
+        }
+
+        if (left < (wait as i64)) {
+            wait = left as i32;
+        }
+    }
+
+    return wait;
+}
+
+/**
+ * The function keys, which the library does not name. Answers whether the key
+ * was one of them and has been dealt with.
+ */
+fn fnKey(a : App, sc : Scancode) : bool {
+    if (sc == Scancode::F1) {
+        a.helpAsked = true;
+        return true;
+    }
+
+    if (sc == Scancode::F5) {
+        a.refreshNow();
+        return true;
+    }
+
+    if (sc == Scancode::F12) {
+        a.snapDue = true;
+        return true;
+    }
+
+    return false;
+}
+
+/** The modifier bits that are down now. */
+fn modsOf(events : Events) : i32 {
+    let mut m : i32 = 0;
+    if (events.isKeyDown(Scancode::LeftShift) || events.isKeyDown(Scancode::RightShift)) {
+        m = m | Mod::SHIFT;
+    }
+
+    if (events.isKeyDown(Scancode::LeftControl) || events.isKeyDown(Scancode::RightControl)) {
+        m = m | Mod::CTRL;
+    }
+
+    if (events.isKeyDown(Scancode::LeftAlt) || events.isKeyDown(Scancode::RightAlt)) {
+        m = m | Mod::ALT;
+    }
+
+    return m;
+}
+
+/** The window's pointer shape for what a widget asked for. */
+fn shapeOf(c : Cursor) : CursorShape {
+    return match c {
+        Cursor::Hand => CursorShape::Hand,
+        Cursor::Beam => CursorShape::Beam,
+        Cursor::ResizeH => CursorShape::ResizeH,
+        Cursor::ResizeV => CursorShape::ResizeV,
+        Cursor::Wait => CursorShape::Wait,
+        Cursor::NotAllowed => CursorShape::NotAllowed,
+        Cursor::Move => CursorShape::Move,
+        _ => CursorShape::Arrow,
+    };
+}
+
+/** The library's number for smalt's mouse button. */
+fn buttonOf(b : MouseButton) : i32 {
+    return match b {
+        MouseButton::Left => 0,
+        MouseButton::Right => 1,
+        MouseButton::Middle => 2,
+        _ => 3,
+    };
 }
 
 /**
@@ -237,9 +389,9 @@ fn waitMs(clock : Clock, due : i64, freq : i64, paused : bool) : i32 {
  * The badge is off when the reader could not be set up at all, and lost while
  * the cache answers nothing — which an empty cache also does.
  */
-fn sweepDns(ss : Session, nowMs : i64) : bool {
+fn sweepDns(ss : Shared<Session>, nowMs : i64) : bool {
     let dns : DnsCache = ss.mach.dns;
-    let learned : bool = false;
+    let mut learned : bool = false;
     if (!ss.a.paused && dns.due(nowMs)) {
         learned = dnscache::sweep(dns, ss.w.hosts, ss.w.pool, nowMs);
     }
@@ -255,74 +407,6 @@ fn sweepDns(ss : Session, nowMs : i64) : bool {
 }
 
 /**
- * Rebuild the tree for what the reader asked to see, and keep the scroll
- * inside it. The first rebuild that has rows also puts the selection on one,
- * so the arrow keys and Enter work before the pointer has been anywhere.
- */
-fn rebuildView(ss : Session, nowMs : i64) : void {
-    let a : App = ss.a;
-    view::rebuild(ss.w, a.lens(nowMs));
-    a.scroll = a.scroll.max(0).min(tree::maxScroll(a.lay, ss.w.view));
-
-    if (!a.picked && ss.w.view.count > 0) {
-        input::selectRow(ss, 0);
-        a.picked = true;
-    }
-}
-
-/**
- * The window changed size: the framebuffer follows it pixel for pixel and
- * the layout is redone, rather than the old frame being stretched to fit.
- * A minimised window reports a zero size, which is not a size to lay out.
- */
-fn resized(screen : Surface, a : App, e : Event) : Action {
-    if (e.width > 0 && e.height > 0) {
-        screen.resize(e.width, e.height);
-        a.resize(e.width, e.height);
-    }
-
-    return Action::None;
-}
-
-/** Write what is on screen to a file, and say whether it landed. */
-fn snap(screen : Surface, a : App) : void {
-    a.saying(match Bmp::write(SNAP_PATH, screen.frame()) {
-        true => Say::Snapped,
-        false => Say::NoSnap,
-    });
-}
-
-/**
- * The instant a scripted capture is due, or `0` when none was asked for.
- * `--snap <ms>` waits that long, writes the frame, and quits.
- */
-fn snapDeadline() : i64 {
-    let i : i32 = 1;
-    while (i < argc()) {
-        try {
-            if (argAt(i) == "--snap") {
-                if (i + 1 < argc()) {
-                    let ms : i64 = argAt(i + 1).toI64();
-                    if (ms > 0) {
-                        return ms;
-                    }
-                }
-
-                return 3000;
-            }
-        } catch e : IndexOutOfBoundsException {
-            return 0;
-        } catch e : ParseException {
-            return 3000;
-        }
-
-        i = i + 1;
-    }
-
-    return 0;
-}
-
-/**
  * Take in whatever the two lookups have finished, and answer whether
  * anything on screen changed.
  *
@@ -332,13 +416,13 @@ fn snapDeadline() : i64 {
  * which every reader below treats as "did not answer" — see `enrich/worker`
  * for why the failure is a value here rather than an exception.
  */
-fn collect(ss : Session, nowMs : i64, jobs : Task<string>[2]) : bool {
-    let q : Queue = ss.q;
-    let hosts : Hosts = ss.w.hosts;
-    let changed : bool = false;
+fn collect(ss : Shared<Session>, nowMs : i64, jobs : Future<string>[2]) : bool {
+    let mut q : Queue = ss.q;
+    let mut hosts : Hosts = ss.w.hosts;
+    let mut changed : bool = false;
 
     if (q.inFlight && !jobs[0].isAlive()) {
-        let body : string = jobs[0].join();
+        let body : string = await jobs[0];
         if (ipapi::absorb(q, ss.w, body, ss.a.scratch)) {
             q.succeeded(hosts, nowMs);
             changed = true;
@@ -348,7 +432,7 @@ fn collect(ss : Session, nowMs : i64, jobs : Task<string>[2]) : bool {
     }
 
     if (q.whoisInFlight && !jobs[1].isAlive()) {
-        let body : string = jobs[1].join();
+        let body : string = await jobs[1];
         let h : i32 = q.whoisHost;
         if (h >= 0) {
             if (q.whoisKind == WhoisKind::Ptr) {
@@ -379,12 +463,11 @@ fn collect(ss : Session, nowMs : i64, jobs : Task<string>[2]) : bool {
  * hundred addresses at once, and the registry lookups only exist to fill the
  * gaps it leaves.
  */
-fn dispatch(ss : Session, nowMs : i64, jobs : Task<string>[2]) : void {
-    let q : Queue = ss.q;
+fn dispatch(ss : Shared<Session>, nowMs : i64, jobs : Future<string>[2]) : void {
+    let mut q : Queue = ss.q;
     let hosts : Hosts = ss.w.hosts;
     if (q.ready(nowMs) && queue::pending(hosts)) {
-        let payload : string = queue::build(q, hosts, ss.a.scratch);
-        jobs[0] = spawn worker::post(queue::batchUrl(), payload);
+        jobs[0] = spawn worker::post(queue::batchUrl(), queue::build(q, hosts, ss.a.scratch));
         q.inFlight = true;
     }
 
@@ -496,14 +579,14 @@ fn firstUnnamed(hosts : Hosts) : i32 {
  * thread outliving `main` would be a thread writing into tables that are
  * being freed, so the wait is short and the alternative is not.
  */
-fn drain(q : Queue, jobs : Task<string>[2]) : void {
+fn drain(q : Queue, jobs : Future<string>[2]) : void {
     if (q.inFlight) {
-        jobs[0].join();
+        await jobs[0];
         q.inFlight = false;
     }
 
     if (q.whoisInFlight) {
-        jobs[1].join();
+        await jobs[1];
         q.whoisInFlight = false;
     }
 }
@@ -517,9 +600,9 @@ fn drain(q : Queue, jobs : Task<string>[2]) : void {
  * in; then the ranking, which reads the scores; then the cards, which reduce
  * all of it.
  */
-fn refresh(ss : Session, nowMs : i64) : void {
+fn refresh(ss : Shared<Session>, nowMs : i64) : void {
     let w : World = ss.w;
-    let mach : Machine = ss.mach;
+    let mut mach : Machine = ss.mach;
     mach.procs.refresh(w.pool);
     mach.conns.refresh();
     absorbSnapshot(w, mach, nowMs);
@@ -534,48 +617,121 @@ fn refresh(ss : Session, nowMs : i64) : void {
 }
 
 /**
- * Show the selected program's binary in Explorer. An endpoint selection
- * opens its program's folder — "where does this thing live" is a question
- * about the program, and the reader is usually standing on one of its rows.
+ * The instant a scripted capture is due, or `0` when none was asked for.
+ * `--snap <ms>` waits that long, writes the frame, and quits.
  */
-fn open(ss : Session) : void {
-    let a : App = ss.a;
-    let groups : Groups = ss.w.groups;
-    let gi : i32 = -1;
-    if (a.selKind == RowKind::Group) {
-        gi = groups.byKey(a.selKey);
-    } else if (a.selKind == RowKind::Endpoint) {
-        let s : i32 = ss.w.eps.bySlotKey(a.selKey);
-        if (s >= 0) {
-            gi = ss.w.eps.group[s];
+fn snapDeadline() : i64 {
+    let mut i : i32 = 1;
+    while (i < argc()) {
+        try {
+            if (argAt(i) == "--snap") {
+                if (i + 1 < argc()) {
+                    let ms : i64 = argAt(i + 1).toI64();
+                    if (ms > 0) {
+                        return ms;
+                    }
+                }
+
+                return 3000;
+            }
+        } catch e : IndexOutOfBoundsException {
+            return 0;
+        } catch e : ParseException {
+            return 3000;
         }
+
+        i = i + 1;
     }
 
-    if (gi < 0 || !groups.identified(gi)) {
-        a.saying(Say::NoPath);
-        return;
+    return 0;
+}
+
+/**
+ * What a scripted capture opens before it is taken: `detail`, the sheet of the
+ * first endpoint, or `help`. Empty — the page alone — when none was named.
+ */
+fn snapPane() : string {
+    let mut i : i32 = 1;
+    while (i < argc()) {
+        try {
+            if (argAt(i) == "--snap" && i + 2 < argc()) {
+                return argAt(i + 2);
+            }
+        } catch e : IndexOutOfBoundsException {
+            return "";
+        }
+
+        i = i + 1;
     }
 
-    if (revealBinary(ss.w.pool, groups.wideOff[gi], groups.wideChars[gi])) {
-        a.saying(Say::Opened);
-    } else {
-        a.saying(Say::NoPath);
+    return "";
+}
+
+/** Pick the first endpoint row and activate it, as Enter would. */
+fn openFirstEndpoint(ss : Shared<Session>) : void {
+    let v : Rows = ss.w.view;
+    for (r of 0..v.count) {
+        if (v.rowKind[r as i64] == RowKind::Endpoint) {
+            let key : i64 = actions::rowKey(ss, r);
+            ss.a.grid.pick(key);
+            ss.a.grid.activate(key);
+            return;
+        }
     }
 }
 
-/** One full repaint, back to front. */
-fn paint(p : Paint, ss : Session) : void {
-    chrome::background(p);
-    chrome::titleBar(p, ss);
-    chrome::cards(p, ss);
-    chrome::toolbar(p, ss);
-    tree::drawTree(p, ss);
-    chrome::statusBar(p, ss);
+/**
+ * Play a capture's keys into the view: `/,g,h,Down,Enter` — a single character
+ * is typed, a name is a key pressed. It is how the window's keyboard is checked
+ * without a keyboard, and without sending anything to whatever else is on screen.
+ */
+fn feed(view : View, spec : string) : void {
+    let n : i64 = spec.byteLength;
+    let mut from : i64 = 0;
+    let mut i : i64 = 0;
+    while (i <= n) {
+        if (i == n || spec.byteAt(i) == 44) {
+            if (i > from) {
+                press(view, Strings::slice(spec, from, i));
+            }
 
-    if (ss.a.modal == Modal::None) {
-        tooltip::drawTip(p, ss);
+            from = i + 1;
+        }
+
+        i = i + 1;
+    }
+}
+
+/** One token of a capture's keys. */
+fn press(view : View, token : string) : void {
+    let key : Key = keyNamed(token);
+    if (key != Key::Other) {
+        view.input(UiEvent { kind: EventKind::KeyDown, key: key });
+        view.input(UiEvent { kind: EventKind::KeyUp, key: key });
+        return;
     }
 
-    detail::drawCard(p, ss);
-    chrome::sortMenu(p, ss);
+    if (token.byteLength == 1) {
+        view.input(UiEvent { kind: EventKind::Text, cp: token.byteAt(0) });
+    }
+}
+
+/** The key a token names, or `Other`. */
+fn keyNamed(token : string) : Key {
+    return match token {
+        "Down" => Key::Down,
+        "Up" => Key::Up,
+        "Left" => Key::Left,
+        "Right" => Key::Right,
+        "Enter" => Key::Enter,
+        "Space" => Key::Space,
+        "Escape" => Key::Escape,
+        "Tab" => Key::Tab,
+        "PageDown" => Key::PageDown,
+        "PageUp" => Key::PageUp,
+        "Home" => Key::Home,
+        "End" => Key::End,
+        "Backspace" => Key::Backspace,
+        _ => Key::Other,
+    };
 }
