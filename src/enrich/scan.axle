@@ -38,7 +38,7 @@ const J_NOT_FOUND : i64 = -1;
  * (which must be the opening quote), honouring `\"` escapes.
  */
 fn stringEnd(s : string, from : i64, len : i64) : i64 {
-    let i : i64 = from + 1;
+    let mut i : i64 = from + 1;
     while (i < len) {
         let c : i32 = s.byteAt(i);
         if (c == J_BACKSLASH) {
@@ -59,7 +59,7 @@ fn stringEnd(s : string, from : i64, len : i64) : i64 {
  * for the start of an object.
  */
 fn objectStart(s : string, from : i64, len : i64) : i64 {
-    let i : i64 = from;
+    let mut i : i64 = from;
     while (i < len) {
         let c : i32 = s.byteAt(i);
         if (c == J_QUOTE) {
@@ -76,8 +76,8 @@ fn objectStart(s : string, from : i64, len : i64) : i64 {
 
 /** The index just past the `}` closing the object that starts at `from`. */
 fn objectEnd(s : string, from : i64, len : i64) : i64 {
-    let depth : i32 = 0;
-    let i : i64 = from;
+    let mut depth : i32 = 0;
+    let mut i : i64 = from;
     while (i < len) {
         let c : i32 = s.byteAt(i);
         if (c == J_QUOTE) {
@@ -125,8 +125,8 @@ fn matches(s : string, at : i64, len : i64, lit : string) : bool {
  * caller asked about.
  */
 fn field(s : string, from : i64, to : i64, key : string) : i64 {
-    let depth : i32 = 0;
-    let i : i64 = from;
+    let mut depth : i32 = 0;
+    let mut i : i64 = from;
     while (i < to) {
         let c : i32 = s.byteAt(i);
         if (c == J_QUOTE) {
@@ -135,7 +135,7 @@ fn field(s : string, from : i64, to : i64, key : string) : i64 {
             // A string is a key only when a colon follows it. Without that
             // test a *value* that happens to spell the key — a PTR record
             // reading `query` — would answer for it.
-            let v : i64 = end;
+            let mut v : i64 = end;
             while (v < to && s.byteAt(v) == 32) {
                 v = v + 1;
             }
@@ -203,9 +203,9 @@ fn digits(s : string, at : i64, len : i64) : i32 {
         return -1;
     }
 
-    let v : i64 = 0;
-    let n : i32 = 0;
-    let i : i64 = at;
+    let mut v : i64 = 0;
+    let mut n : i32 = 0;
+    let mut i : i64 = at;
     while (i < len && n < 10) {
         let c : i32 = s.byteAt(i);
         if (c < 48 || c > 57) {

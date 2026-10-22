@@ -221,9 +221,9 @@ fn selectEndpoints(w : World, lens : Lens) : void {
     let v : View = w.view;
     let e : Endpoints = w.eps;
     v.gen = v.gen + 1;
-    let taken : i32 = 0;
-    let hiddenLocal : i32 = 0;
-    let hiddenBound : i32 = 0;
+    let mut taken : i32 = 0;
+    let mut hiddenLocal : i32 = 0;
+    let mut hiddenBound : i32 = 0;
 
     for (i of 0..v.orderLen) {
         let s : i32 = e.bySlotKey(v.orderKeys[i]);
@@ -385,7 +385,7 @@ fn sortEndpoints(w : World, sortKey : Sort) : void {
     for (a of 1..v.shown) {
         let x : i32 = v.slots[a];
         let xr : i64 = endpointRank(e, x, sortKey);
-        let b : i32 = a - 1;
+        let mut b : i32 = a - 1;
         while (b >= 0 && xr > endpointRank(e, v.slots[b], sortKey) + hyst) {
             v.slots[b + 1] = v.slots[b];
             b = b - 1;
@@ -400,7 +400,7 @@ fn sortEndpointsByName(w : World) : void {
     let v : View = w.view;
     for (a of 1..v.shown) {
         let x : i32 = v.slots[a];
-        let b : i32 = a - 1;
+        let mut b : i32 = a - 1;
         while (b >= 0 && nameOrder(w, v.slots[b], x) > 0) {
             v.slots[b + 1] = v.slots[b];
             b = b - 1;
@@ -452,7 +452,7 @@ fn bucketByGroup(v : View, e : Endpoints, g : Groups) : void {
         }
     }
 
-    let run : i32 = 0;
+    let mut run : i32 = 0;
     for (gi of 0..g.count) {
         let n : i32 = v.at[gi];
         v.at[gi] = run;
@@ -535,7 +535,7 @@ fn groupRank(w : World, gi : i32, sortKey : Sort) : i64 {
 
 /** The highest `endpointRank` among the shown endpoints of group `gi`. */
 fn bestOf(w : World, gi : i32, sortKey : Sort) : i64 {
-    let best : i64 = -1;
+    let mut best : i64 = -1;
     for (k of runStart(w.view, gi)..runEnd(w.view, gi)) {
         let r : i64 = endpointRank(w.eps, w.view.bucket[k], sortKey);
         if (r > best) {
@@ -565,7 +565,7 @@ fn groupSalience(g : Groups, gi : i32) : i64 {
     let flagged : i64 = (g.flagged[gi] as i64) * 2000;
     let live : i64 = (g.live[gi] as i64) * 100;
     let breadth : i64 = (g.endpoints[gi] as i64) * 20;
-    let traffic : i64 = g.rate(gi) * 1000 / 1048576;
+    let mut traffic : i64 = g.rate(gi) * 1000 / 1048576;
     if (traffic > 2000) {
         traffic = 2000;
     }
@@ -580,7 +580,7 @@ fn sortGroups(w : World, sortKey : Sort) : void {
     let hyst : i64 = band(sortKey);
     for (a of 1..v.groupLen) {
         let x : i32 = v.gslots[a];
-        let b : i32 = a - 1;
+        let mut b : i32 = a - 1;
         if (sortKey == Sort::Name) {
             while (b >= 0 && w.pool.order(
                 g.nameOff[v.gslots[b]], g.nameLen[v.gslots[b]],
@@ -610,7 +610,7 @@ fn emit(v : View, e : Endpoints, g : Groups) : void {
     let y : i32 = 0;
     let keys : i32 = 0;
 
-    let i : i32 = 0;
+    let mut i : i32 = 0;
     while (i < v.groupLen && rows < VIEW_MAX_ROWS) {
         let gi : i32 = v.gslots[i];
         v.groupKeys[i] = g.key[gi];
@@ -654,8 +654,8 @@ fn rowAt(v : View, contentY : i32) : i32 {
         return -1;
     }
 
-    let lo : i32 = 0;
-    let hi : i32 = v.count - 1;
+    let mut lo : i32 = 0;
+    let mut hi : i32 = v.count - 1;
     while (lo <= hi) {
         let mid : i32 = (lo + hi) / 2;
         if (contentY < v.rowTop[mid]) {

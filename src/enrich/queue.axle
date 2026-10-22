@@ -162,7 +162,7 @@ fn build(q : Queue, hosts : Hosts, s : Scratch) : string {
     let sb : StringBuilder = new StringBuilder();
     sb.append("[");
 
-    let h : i32 = 0;
+    let mut h : i32 = 0;
     while (h < hosts.count && q.sentLen < BATCH_MAX) {
         if (hosts.look[h] == Look::New) {
             if (q.sentLen > 0) {

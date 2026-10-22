@@ -189,7 +189,7 @@ class Conns {
         }
 
         self.count = 0;
-        let any : bool = false;
+        let mut any : bool = false;
         if (self.take(AF_INET, true)) {
             self.foldTcp4();
             any = true;
@@ -221,7 +221,7 @@ class Conns {
     fn take(mut self, family : i32, tcp : bool) : bool {
         for (tries of 0..8) {
             Mem::putDword(self.sizeCell, 0, self.bufCap as i32);
-            let st : i32 = 0;
+            let mut st : i32 = 0;
             if (tcp) {
                 st = GetExtendedTcpTable(
                     asPtr(self.buf), asPtr(self.sizeCell), 0,
@@ -259,7 +259,7 @@ class Conns {
 
     /** The row count the table in `buf` declares, capped by what fits. */
     fn declared(self, rowSize : i64) : i32 {
-        let n : i64 = Mem::udwordAt(self.buf, 0);
+        let mut n : i64 = Mem::udwordAt(self.buf, 0);
         let fits : i64 = (self.bufCap - TABLE_ROWS) / rowSize;
         if (n > fits) {
             n = fits;

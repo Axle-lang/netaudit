@@ -39,7 +39,7 @@ fn originName(hosts : Hosts, h : i32) : string {
     let sb : StringBuilder = new StringBuilder();
     let base : i64 = hosts.addrAt(h);
     if (hosts.family[h] == 6) {
-        let i : i32 = 15;
+        let mut i : i32 = 15;
         while (i >= 0) {
             let b : i32 = Mem::byteAt(base, i as i64);
             sb.appendChar(nibbleChar(b & 0xF));
@@ -53,7 +53,7 @@ fn originName(hosts : Hosts, h : i32) : string {
         return sb.toString();
     }
 
-    let i : i32 = 3;
+    let mut i : i32 = 3;
     while (i >= 0) {
         sb.appendI32(Mem::byteAt(base, i as i64));
         sb.append(".");
@@ -92,10 +92,10 @@ fn nibbleChar(v : i32) : i32 {
  */
 fn originAsn(answer : string) : i32 {
     let n : i64 = answer.byteLength;
-    let v : i32 = 0;
-    let seen : bool = false;
-    let i : i64 = 0;
-    let digits : i32 = 0;
+    let mut v : i32 = 0;
+    let mut seen : bool = false;
+    let mut i : i64 = 0;
+    let mut digits : i32 = 0;
     while (i < n) {
         let c : i32 = answer.byteAt(i);
         // Nine digits at most: an AS number is 32 bits unsigned, and the
@@ -137,10 +137,10 @@ fn takeName(hosts : Hosts, pool : Pool, h : i32, asn : i32, answer : string) : b
     sb.appendI32(asn);
     sb.append(" ");
     let n : i64 = answer.byteLength;
-    let taken : i32 = 0;
-    let i : i64 = from;
+    let mut taken : i32 = 0;
+    let mut i : i64 = from;
     while (i < n && taken < ORG_MAX) {
-        let c : i32 = answer.byteAt(i);
+        let mut c : i32 = answer.byteAt(i);
         if (c < 32 || c > 126) {
             c = 63; // '?'
         }
@@ -167,12 +167,12 @@ fn takeName(hosts : Hosts, pool : Pool, h : i32, asn : i32, answer : string) : b
  */
 fn fieldStart(answer : string, want : i32) : i64 {
     let n : i64 = answer.byteLength;
-    let bars : i32 = 0;
+    let mut bars : i32 = 0;
     for (i of 0..n) {
         if (answer.byteAt(i) == BAR) {
             bars = bars + 1;
             if (bars == want) {
-                let at : i64 = i + 1;
+                let mut at : i64 = i + 1;
                 while (at < n && answer.byteAt(at) == 32) {
                     at = at + 1;
                 }

@@ -144,7 +144,7 @@ class Hosts {
         let fam : i32 = shownFamily(src, family);
         let at : i64 = src + shownOffset(src, family);
         let key : i64 = hostKey(at, fam);
-        let s : i32 = self.index.get(key);
+        let mut s : i32 = self.index.get(key);
         if (s >= 0) {
             return s;
         }
@@ -157,7 +157,7 @@ class Hosts {
         self.count = s + 1;
 
         Mem::clear(self.addrAt(s), HOST_ADDR_BYTES);
-        let n : i64 = 4;
+        let mut n : i64 = 4;
         if (fam == 6) {
             n = 16;
         }

@@ -140,7 +140,7 @@ class Pool : Closeable {
      * of the call, and what survives is bytes in the run.
      */
     pub(crate) fn putRange(mut self, s : string, from : i64, to : i64, max : i32) : i64 {
-        let n : i64 = to - from;
+        let mut n : i64 = to - from;
         if (n <= 0) {
             return -1;
         }
@@ -160,8 +160,8 @@ class Pool : Closeable {
         // UTF-8 in, one drawable byte per character out: `Zürich` lands as
         // `Zurich`, not as `Z??rich`. A sequence the cap cut short is
         // dropped rather than misread as a shorter one.
-        let out : i64 = 0;
-        let i : i64 = 0;
+        let mut out : i64 = 0;
+        let mut i : i64 = 0;
         while (i < n) {
             let step : i64 = utf8Length(s.byteAt(from + i));
             if (i + step > n) {
@@ -183,7 +183,7 @@ class Pool : Closeable {
 
     /** Intern `chars` UTF-16 code units from `src` as drawable bytes. */
     pub(crate) fn putWide(mut self, src : i64, chars : i32, max : i32) : i64 {
-        let n : i32 = chars;
+        let mut n : i32 = chars;
         if (n > max) {
             n = max;
         }
@@ -203,8 +203,8 @@ class Pool : Closeable {
     /** An FNV-1a hash of an interned span, for the identity indexes. */
     pub(crate) fn hash(self, off : i64, len : i32) : i64 {
         let base : i64 = self.base();
-        let h : i64 = 0x811C9DC5;
-        let i : i64 = 0;
+        let mut h : i64 = 0x811C9DC5;
+        let mut i : i64 = 0;
         while (i < (len as i64)) {
             h = (h ^ (Mem::byteAt(base, off + i) as i64)) * 16777619;
             h = h & 0x7FFFFFFFFFFF;
@@ -232,12 +232,12 @@ class Pool : Closeable {
     /** Case-insensitive three-way comparison of two interned spans. */
     pub(crate) fn order(self, a : i64, alen : i32, b : i64, blen : i32) : i32 {
         let base : i64 = self.base();
-        let n : i32 = alen;
+        let mut n : i32 = alen;
         if (blen < n) {
             n = blen;
         }
 
-        let i : i64 = 0;
+        let mut i : i64 = 0;
         while (i < (n as i64)) {
             let x : i32 = lower(Mem::byteAt(base, a + i));
             let y : i32 = lower(Mem::byteAt(base, b + i));
@@ -272,7 +272,7 @@ class Pool : Closeable {
      */
     pub(crate) fn lastSeparator(self, off : i64, len : i32) : i32 {
         let base : i64 = self.base();
-        let i : i32 = len - 1;
+        let mut i : i32 = len - 1;
         while (i >= 0) {
             let c : i32 = Mem::byteAt(base, off + (i as i64));
             if (c == 92 || c == 47) { // '\' or '/'
@@ -479,10 +479,10 @@ fn containsAt(hay : i64, len : i32, needle : i64, needleLen : i32) : bool {
         return false;
     }
 
-    let start : i32 = 0;
+    let mut start : i32 = 0;
     while (start <= len - needleLen) {
-        let i : i32 = 0;
-        let hit : bool = true;
+        let mut i : i32 = 0;
+        let mut hit : bool = true;
         while (i < needleLen && hit) {
             let a : i32 = lower(Mem::byteAt(hay, (start + i) as i64));
             let b : i32 = lower(Mem::byteAt(needle, i as i64));

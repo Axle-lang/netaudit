@@ -92,7 +92,7 @@ class Pulse {
  * are needed at the same time.
  */
 fn sample(w : World) : void {
-    let p : Pulse = w.beat;
+    let mut p : Pulse = w.beat;
     let e : Endpoints = w.eps;
     let g : Groups = w.groups;
     let hosts : Hosts = w.hosts;

@@ -60,7 +60,7 @@ fn arpaName(hosts : Hosts, h : i32) : string {
     let sb : StringBuilder = new StringBuilder();
     let base : i64 = hosts.addrAt(h);
     if (hosts.family[h] == 6) {
-        let i : i32 = 15;
+        let mut i : i32 = 15;
         while (i >= 0) {
             let b : i32 = Mem::byteAt(base, i as i64);
             sb.appendChar(nibble(b & 0xF));
@@ -74,7 +74,7 @@ fn arpaName(hosts : Hosts, h : i32) : string {
         return sb.toString();
     }
 
-    let i : i32 = 3;
+    let mut i : i32 = 3;
     while (i >= 0) {
         sb.appendI32(Mem::byteAt(base, i as i64));
         sb.append(".");
@@ -119,7 +119,7 @@ fn query(name : string, kind : i32) : string {
         return "";
     }
 
-    let n : i64 = name.byteLength;
+    let mut n : i64 = name.byteLength;
     if (n > (PTR_QUERY_CHARS as i64) - 1) {
         n = (PTR_QUERY_CHARS as i64) - 1;
     }
@@ -154,11 +154,11 @@ fn query(name : string, kind : i32) : string {
  * in where the pointer sits, which is why one walk serves both.
  */
 fn firstText(records : i64, kind : i32) : string {
-    let rec : i64 = records;
-    let walked : i32 = 0;
+    let mut rec : i64 = records;
+    let mut walked : i32 = 0;
     while (rec != 0 && walked < PTR_MAX_RECORDS) {
         if (Mem::wordAt(rec, PTR_REC_TYPE) == kind) {
-            let at : i64 = PTR_REC_NAME;
+            let mut at : i64 = PTR_REC_NAME;
             if (kind == DNS_TYPE_TXT) {
                 at = TXT_REC_FIRST;
             }
@@ -185,9 +185,9 @@ fn firstText(records : i64, kind : i32) : string {
 /** A NUL-terminated UTF-16 name as an Axle string, printable range only. */
 fn wideToString(p : i64) : string {
     let sb : StringBuilder = new StringBuilder();
-    let i : i32 = 0;
+    let mut i : i32 = 0;
     while (i < PTR_NAME_CHARS) {
-        let c : i32 = Mem::wordAt(p, (i as i64) * 2);
+        let mut c : i32 = Mem::wordAt(p, (i as i64) * 2);
         if (c == 0) {
             i = PTR_NAME_CHARS;
         } else {

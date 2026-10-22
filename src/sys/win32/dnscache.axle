@@ -186,9 +186,9 @@ fn sweep(dns : DnsCache, hosts : Hosts, pool : Pool, nowMs : i64) : bool {
 
     dns.answering = true;
 
-    let entry : i64 = Mem::qwordAt(dns.head, CACHE_NEXT);
-    let walked : i32 = 0;
-    let learned : bool = false;
+    let mut entry : i64 = Mem::qwordAt(dns.head, CACHE_NEXT);
+    let mut walked : i32 = 0;
+    let mut learned : bool = false;
     // Every entry is released, including the ones past `MAX_ENTRIES` that are
     // not matched: stopping the walk early would leak the tail of the list
     // on every sweep.
@@ -249,7 +249,7 @@ fn attach(dns : DnsCache, hosts : Hosts, pool : Pool, name : i64, kind : i32) : 
         return false;
     }
 
-    let len : i32 = chars;
+    let mut len : i32 = chars;
     if (len > HOST_MAX) {
         len = HOST_MAX;
     }
@@ -257,7 +257,7 @@ fn attach(dns : DnsCache, hosts : Hosts, pool : Pool, name : i64, kind : i32) : 
     wideInto(dns.name, name, len);
     // `-1` until a row wants the name; the first one that does interns it,
     // and every later row shares that offset.
-    let off : i64 = -1;
+    let mut off : i64 = -1;
 
     Mem::putQword(dns.slot, 0, 0);
     let status : i32 = DnsQuery_W(
@@ -273,12 +273,12 @@ fn attach(dns : DnsCache, hosts : Hosts, pool : Pool, name : i64, kind : i32) : 
     }
 
     let records : i64 = Mem::qwordAt(dns.slot, 0);
-    let rec : i64 = records;
-    let walked : i32 = 0;
-    let used : bool = false;
+    let mut rec : i64 = records;
+    let mut walked : i32 = 0;
+    let mut used : bool = false;
     while (rec != 0 && walked < MAX_RECORDS) {
         let rtype : i32 = Mem::wordAt(rec, REC_TYPE);
-        let family : i32 = 0;
+        let mut family : i32 = 0;
         if (rtype == DNS_TYPE_A) {
             family = 4;
         } else if (rtype == DNS_TYPE_AAAA) {

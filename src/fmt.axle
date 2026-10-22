@@ -104,8 +104,8 @@ fn hexGroup(s : Scratch, v : i32) : void {
         return;
     }
 
-    let seen : bool = false;
-    let shift : i32 = 12;
+    let mut seen : bool = false;
+    let mut shift : i32 = 12;
     while (shift >= 0) {
         let d : i32 = (v >> shift) & 0xF;
         if (seen || d != 0) {
@@ -131,8 +131,8 @@ fn ipv6(s : Scratch, src : i64) : void {
     }
 
     let (bestAt, bestLen) = longestZeroRun(src);
-    let wroteGroup : bool = false;
-    let g : i32 = 0;
+    let mut wroteGroup : bool = false;
+    let mut g : i32 = 0;
     while (g < 8) {
         if (g == bestAt) {
             s.ch(COLON);
@@ -157,10 +157,10 @@ fn ipv6(s : Scratch, src : i64) : void {
  * one is not collapsed — both are RFC 5952.
  */
 fn longestZeroRun(src : i64) : (at: i32, len: i32) {
-    let bestAt : i32 = -1;
-    let bestLen : i32 = 0;
-    let runAt : i32 = -1;
-    let runLen : i32 = 0;
+    let mut bestAt : i32 = -1;
+    let mut bestLen : i32 = 0;
+    let mut runAt : i32 = -1;
+    let mut runLen : i32 = 0;
     for (g of 0..8) {
         if (hexAt(src, g) == 0) {
             if (runAt < 0) {

@@ -92,8 +92,8 @@ class Groups {
         }
 
         let known : bool = procs.resolvePath(pool, s) == PathState::Known;
-        let off : i64 = procs.nameOff[s];
-        let len : i32 = procs.nameLen[s];
+        let mut off : i64 = procs.nameOff[s];
+        let mut len : i32 = procs.nameLen[s];
         if (known) {
             off = procs.pathOff[s];
             len = procs.pathLen[s];
@@ -103,13 +103,13 @@ class Groups {
             return -1;
         }
 
-        let salt : i64 = 0;
+        let mut salt : i64 = 0;
         if (known) {
             salt = 1;
         }
 
         let k : i64 = hashStep(pool.hash(off, len), salt);
-        let g : i32 = self.index.get(k);
+        let mut g : i32 = self.index.get(k);
         if (g < 0) {
             g = self.mint(pool, k, off, len, known);
             if (g >= 0 && known) {
@@ -254,7 +254,7 @@ class Groups {
 
     /** Open or close every group at once — the `8` key. */
     pub(crate) fn setAll(mut self, open : bool) : void {
-        let v : i32 = 0;
+        let mut v : i32 = 0;
         if (open) {
             v = 1;
         }

@@ -46,7 +46,7 @@ fn reach(src : i64, family : i32) : Reach {
         return reach6(src);
     }
 
-    let base : i64 = src;
+    let mut base : i64 = src;
     if (family == 6) {
         base = src + 12;
     }
@@ -183,12 +183,12 @@ fn shownOffset(src : i64, family : i32) : i64 {
 
 /** Fold an address into a running hash: the bytes, never their text. */
 fn hashAddr(h : i64, src : i64, family : i32) : i64 {
-    let n : i64 = 4;
+    let mut n : i64 = 4;
     if (family == 6) {
         n = 16;
     }
 
-    let acc : i64 = hashStep(h, family as i64);
+    let mut acc : i64 = hashStep(h, family as i64);
     for (i of 0..n) {
         acc = hashStep(acc, Mem::byteAt(src, i) as i64);
     }

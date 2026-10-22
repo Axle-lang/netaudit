@@ -147,8 +147,8 @@ class Procs {
         }
 
         self.gen = self.gen + 1;
-        let off : i64 = 0;
-        let more : bool = true;
+        let mut off : i64 = 0;
+        let mut more : bool = true;
         while (more) {
             let e : i64 = self.snap + off;
             self.fold(pool, e, Mem::qwordAt(e, SPI_PID));
@@ -165,7 +165,7 @@ class Procs {
 
     /** Take the snapshot, growing while the kernel reports the buffer short. */
     fn take(mut self) : i32 {
-        let st : i32 = NtQuerySystemInformation(
+        let mut st : i32 = NtQuerySystemInformation(
             SYSTEM_PROCESS_INFORMATION, asPtr(self.snap), self.snapCap as i32, nullPtr()
         );
         while (st == STATUS_INFO_LENGTH_MISMATCH && self.snapCap < SNAP_MAX) {
@@ -197,7 +197,7 @@ class Procs {
      */
     fn fold(mut self, pool : Pool, e : i64, pid : i64) : void {
         let created : i64 = Mem::qwordAt(e, SPI_CREATED);
-        let s : i32 = self.find(pid);
+        let mut s : i32 = self.find(pid);
         if (s >= 0 && self.created[s] != created) {
             self.reset(pool, s, e, created);
         }
@@ -229,7 +229,7 @@ class Procs {
         );
         self.nameLen[s] = 0;
         if (self.nameOff[s] >= 0) {
-            let chars : i32 = Mem::wordAt(e, SPI_NAME_LEN) / 2;
+            let mut chars : i32 = Mem::wordAt(e, SPI_NAME_LEN) / 2;
             if (chars > NAME_MAX) {
                 chars = NAME_MAX;
             }
@@ -245,7 +245,7 @@ class Procs {
      * storage carries no meaning.
      */
     fn sweep(mut self) : void {
-        let i : i32 = 0;
+        let mut i : i32 = 0;
         while (i < self.count) {
             if (self.seen[i] != self.gen) {
                 let last : i32 = self.count - 1;
@@ -301,7 +301,7 @@ class Procs {
             PROCESS_QUERY_LIMITED_INFORMATION, 0, self.pid[s] as i32
         );
         if (isNull(h)) {
-            let why : PathState = PathState::Denied;
+            let mut why : PathState = PathState::Denied;
             if (GetLastError() == ERROR_INVALID_PARAMETER) {
                 why = PathState::Gone;
             }
@@ -320,7 +320,7 @@ class Procs {
             return PathState::Denied;
         }
 
-        let chars : i32 = Mem::udwordAt(self.sizeCell, 0) as i32;
+        let mut chars : i32 = Mem::udwordAt(self.sizeCell, 0) as i32;
         self.wideOff[s] = pool.put(self.wide, chars * 2);
         if (self.wideOff[s] >= 0) {
             self.wideChars[s] = chars;

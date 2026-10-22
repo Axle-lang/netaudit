@@ -44,9 +44,9 @@ struct Obj {
  */
 fn absorb(q : Queue, w : World, body : string, s : Scratch) : bool {
     let len : i64 = body.byteLength;
-    let at : i64 = 0;
-    let i : i32 = 0;
-    let landed : i32 = 0;
+    let mut at : i64 = 0;
+    let mut i : i32 = 0;
+    let mut landed : i32 = 0;
 
     while (i < q.sentLen) {
         let from : i64 = scan::objectStart(body, at, len);
@@ -118,7 +118,7 @@ fn verifies(o : Obj, hosts : Hosts, h : i32, s : Scratch) : bool {
 
 /** Fold one object into row `h`. */
 fn one(o : Obj, w : World, h : i32) : void {
-    let hosts : Hosts = w.hosts;
+    let mut hosts : Hosts = w.hosts;
     if (!succeeded(o)) {
         hosts.look[h] = Look::Failed;
         return;
@@ -168,7 +168,7 @@ fn succeeded(o : Obj) : bool {
  * `asname` is taken instead, and the row says the number it has and no more.
  */
 fn network(o : Obj, w : World, h : i32) : void {
-    let hosts : Hosts = w.hosts;
+    let mut hosts : Hosts = w.hosts;
     let vs : i64 = valueOf(o, "as");
     let ve : i64 = valueEndOf(o, "as");
 

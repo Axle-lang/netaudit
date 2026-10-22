@@ -160,7 +160,7 @@ class Endpoints {
         self.count = s + 1;
 
         Mem::clear(self.addrAt(s), EP_ADDR_BYTES);
-        let n : i64 = 4;
+        let mut n : i64 = 4;
         if (at.family == 6) {
             n = 16;
         }
@@ -250,8 +250,8 @@ class Endpoints {
      * endpoint's row, and nothing would go red.
      */
     pub(crate) fn expire(mut self, nowMs : i64) : void {
-        let moved : bool = false;
-        let s : i32 = 0;
+        let mut moved : bool = false;
+        let mut s : i32 = 0;
         while (s < self.count) {
             if (self.liveNow[s] == 0 && nowMs - self.lastMs[s] > LINGER_MS) {
                 let last : i32 = self.count - 1;
@@ -377,7 +377,7 @@ class Endpoints {
  * arriving.
  */
 fn absorbSnapshot(w : World, mach : Machine, nowMs : i64) : void {
-    let e : Endpoints = w.eps;
+    let mut e : Endpoints = w.eps;
     if (!mach.conns.ok || !e.ready()) {
         return;
     }
@@ -401,8 +401,8 @@ fn attribute(w : World, mach : Machine, r : i32, nowMs : i64) : void {
     }
 
     let at : Sighting = sighted(conns, r, g);
-    let e : Endpoints = w.eps;
-    let s : i32 = e.bySlotKey(at.key);
+    let mut e : Endpoints = w.eps;
+    let mut s : i32 = e.bySlotKey(at.key);
     if (s < 0) {
         s = e.mint(at, nowMs);
         if (s < 0) {
@@ -427,8 +427,8 @@ fn attribute(w : World, mach : Machine, r : i32, nowMs : i64) : void {
  */
 fn sighted(conns : Conns, r : i32, g : i32) : Sighting {
     let proto : Proto = conns.proto[r];
-    let kind : SocketKind = SocketKind::Peer;
-    let port : i32 = conns.remotePort[r];
+    let mut kind : SocketKind = SocketKind::Peer;
+    let mut port : i32 = conns.remotePort[r];
     if (proto == Proto::Udp) {
         kind = SocketKind::Udp;
         port = conns.localPort[r];
@@ -481,33 +481,33 @@ const RECENCY_MS : i64 = 600000;
  * one to an unnamed host every thirty seconds is not.
  */
 fn salienceOf(e : Endpoints, s : i32, nowMs : i64) : i64 {
-    let hits : i64 = (e.hits[s] as i64) * 1000 / (HITS_FULL as i64);
+    let mut hits : i64 = (e.hits[s] as i64) * 1000 / (HITS_FULL as i64);
     if (hits > 1000) {
         hits = 1000;
     }
 
-    let regular : i64 = 0;
+    let mut regular : i64 = 0;
     if (hasRhythm(e.rhythm, s)) {
         regular = e.rhythm.regular[s] as i64;
     }
 
-    let risk : i64 = 0;
+    let mut risk : i64 = 0;
     if (e.score[s] >= 0) {
         risk = ((5 - e.score[s]) as i64) * 200;
     }
 
-    let traffic : i64 = e.rate(s) * 1000 / RATE_FULL;
+    let mut traffic : i64 = e.rate(s) * 1000 / RATE_FULL;
     if (traffic > 1000) {
         traffic = 1000;
     }
 
     let age : i64 = nowMs - e.lastMs[s];
-    let recency : i64 = 1000 - (age * 1000) / RECENCY_MS;
+    let mut recency : i64 = 1000 - (age * 1000) / RECENCY_MS;
     if (recency < 0) {
         recency = 0;
     }
 
-    let live : i64 = 0;
+    let mut live : i64 = 0;
     if (e.liveNow[s] > 0) {
         live = 200;
     }

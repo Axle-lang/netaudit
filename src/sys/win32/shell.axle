@@ -65,7 +65,7 @@ fn revealBinary(pool : Pool, off : i64, chars : i32) : bool {
     Mem::wideFrom(verb, "open", 8);
     Mem::wideFrom(file, "explorer.exe", 24);
 
-    let n : i64 = Mem::wideFrom(args, "/select,", 16) / 2 - 1;
+    let mut n : i64 = Mem::wideFrom(args, "/select,", 16) / 2 - 1;
     Mem::putWord(args, n * 2, QUOTE);
     n = n + 1;
     let src : i64 = pool.base() + off;

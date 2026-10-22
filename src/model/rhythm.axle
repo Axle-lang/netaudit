@@ -130,9 +130,9 @@ class Rhythm {
             return;
         }
 
-        let sum : i64 = 0;
+        let mut sum : i64 = 0;
         for (i of 0..count) {
-            let d : i64 = Mem::qwordAt(self.gaps, (i as i64) * 8) - period;
+            let mut d : i64 = Mem::qwordAt(self.gaps, (i as i64) * 8) - period;
             if (d < 0) {
                 d = 0 - d;
             }
@@ -143,7 +143,7 @@ class Rhythm {
         let jitter : i64 = sum / (count as i64);
         self.jitterMs[s] = jitter;
 
-        let spread : i64 = (jitter * 1000) / period;
+        let mut spread : i64 = (jitter * 1000) / period;
         if (spread > 1000) {
             spread = 1000;
         }
@@ -182,7 +182,7 @@ class Rhythm {
 fn sortGaps(base : i64, n : i32) : void {
     for (a of 1..n) {
         let v : i64 = Mem::qwordAt(base, (a as i64) * 8);
-        let b : i32 = a - 1;
+        let mut b : i32 = a - 1;
         while (b >= 0 && Mem::qwordAt(base, (b as i64) * 8) > v) {
             Mem::putQword(base, ((b + 1) as i64) * 8, Mem::qwordAt(base, (b as i64) * 8));
             b = b - 1;

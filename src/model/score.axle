@@ -187,7 +187,7 @@ fn assess(e : Endpoints, hosts : Hosts, s : i32) : void {
         return;
     }
 
-    let reasons : i32 = behavioural;
+    let mut reasons : i32 = behavioural;
     if (known) {
         reasons = reasons | reputation(hosts, h);
     }
@@ -198,7 +198,7 @@ fn assess(e : Endpoints, hosts : Hosts, s : i32) : void {
 
 /** The reasons that come from the address itself. */
 fn reputation(hosts : Hosts, h : i32) : i32 {
-    let r : i32 = 0;
+    let mut r : i32 = 0;
     if (hosts.has(h, FLAG_PROXY)) {
         r = r | reasonBit(Reason::Proxy);
     }
@@ -227,7 +227,7 @@ fn reputation(hosts : Hosts, h : i32) : i32 {
 
 /** The reasons that come from what the conversation is doing. */
 fn behaviour(e : Endpoints, hosts : Hosts, s : i32, h : i32) : i32 {
-    let r : i32 = 0;
+    let mut r : i32 = 0;
     if (e.kind[s] == SocketKind::Peer && oddPort(e.port[s]) && !hosts.has(h, FLAG_HOSTING)) {
         r = r | reasonBit(Reason::OddPort);
     }
@@ -316,7 +316,7 @@ fn oddPort(port : i32) : bool {
  * there is not one.
  */
 fn fromReasons(reasons : i32) : i32 {
-    let tenths : i32 = 50;
+    let mut tenths : i32 = 50;
     for (i of 0..REASON_COUNT) {
         let r : Reason = reasonAt(i);
         if ((reasons & reasonBit(r)) != 0) {
