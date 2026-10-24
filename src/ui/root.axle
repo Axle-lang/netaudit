@@ -117,7 +117,7 @@ pub class Root : Base, Widget {
         } else if (lower == CH_B) {
             a.flipBound();
         } else if (lower == CH_O) {
-            actions::open(self.ss);
+            actions::openProgram(self.ss);
         } else if (lower == CH_C) {
             actions::clear(self.ss);
         } else if (lower == CH_P) {

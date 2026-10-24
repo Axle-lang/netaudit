@@ -39,7 +39,7 @@ pub fn pickedGroup(ss : Shared<Session>) : i32 {
  * program's folder — "where does this thing live" is a question about the
  * program, and the reader is usually standing on one of its rows.
  */
-pub fn open(ss : Shared<Session>) : void {
+pub fn openProgram(ss : Shared<Session>) : void {
     let a : App = ss.a;
     let groups : Groups = ss.w.groups;
     let gi : i32 = pickedGroup(ss);

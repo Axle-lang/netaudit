@@ -352,7 +352,7 @@ fn footer(ss : Shared<Session>) : dyn Widget {
     let kids : dyn Widget[] = [
         new Button(
             ButtonProps { label: "Open the program's folder", kind: ButtonKind::Outline, icon: IconKind::Folder },
-            () => actions::open(hand)
+            () => actions::openProgram(hand)
         ),
     ];
     return new Row(FlexProps { gap: 8.0, align: Align::Center }, kids);
