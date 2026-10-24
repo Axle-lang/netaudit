@@ -10,6 +10,7 @@
 // Nothing in this class decides anything. It owns the tables, builds them in
 // the order they depend on each other, and releases them in the reverse.
 
+use smalt::Mem;
 use crate::model::pool::{Pool, Bytes};
 use crate::model::endpoints::Endpoints;
 use crate::model::groups::Groups;
@@ -76,6 +77,26 @@ class World {
     /** Program `gi`'s image path, or its name when the path was refused. */
     pub(crate) fn groupPath(self, gi : i32) : Bytes {
         return self.pool.span(self.groups.pathOff[gi], self.groups.pathLen[gi]);
+    }
+
+    /**
+     * Program `gi`'s image path as the UTF-16 code units the system gave, for
+     * the API that hands it back (`Desk::revealUnits`). Exact even for a path
+     * with an unpaired surrogate, which a string cannot hold.
+     */
+    pub(crate) fn groupPathUnits(self, gi : i32) : i32[] {
+        let n : i32 = self.groups.wideChars[gi];
+        let mut out : i32[] = malloc<i32>(n as i64);
+        if (n <= 0 || self.groups.wideOff[gi] < 0) {
+            return out;
+        }
+
+        let at : i64 = self.pool.base() + self.groups.wideOff[gi];
+        for (i of 0..n) {
+            out[i as i64] = Mem::wordAt(at, (i as i64) * 2);
+        }
+
+        return out;
     }
 
     /** Release every table; the pool goes last, since the others point into it. */

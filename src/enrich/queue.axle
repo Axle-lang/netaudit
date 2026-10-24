@@ -41,12 +41,10 @@ const WHOIS_GAP_MS : i64 = 1500;
 
 /** Which registry question is in flight. */
 enum WhoisKind : i32 {
-    /** The lookup asks which network announces the address. */
+    /** Which network announces the address, and what it is called. */
     Origin = 0,
-    /** The lookup asks what that network is called. */
-    AsName = 1,
-    /** The lookup asks what name the address's owner publishes. */
-    Ptr = 2,
+    /** What name the address's owner publishes. */
+    Ptr = 1,
 }
 
 
@@ -75,7 +73,6 @@ class Queue {
 
     pub(crate) whoisHost : i32 = -1,
     pub(crate) whoisKind : WhoisKind = WhoisKind::Origin,
-    pub(crate) whoisAsn : i32 = 0,
     pub(crate) whoisInFlight : bool = false,
     whoisDueMs : i64 = 0,
 

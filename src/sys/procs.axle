@@ -1,0 +1,268 @@
+// sys/procs — what a pid is: a name, and where the binary lives.
+//
+// The list is Gesso's: `Procs::list()` asks the machine once and answers one
+// `ProcInfo` per process, with its name, its id, and the instant it started —
+// the reading that tells a reused pid from the process that held it before.
+//
+// The **path** is a different matter, and it is resolved lazily. Only a pid
+// that actually appears in the socket table is worth a handle, that is a few
+// dozen out of four hundred, and the answer is cached for the pid's life.
+// Gesso's `Procs::imagePath` answers a string or refuses precisely: a process
+// this user may not query — another account's service, or a protected process
+// — throws `Denied`, and one that exited in between throws `Gone`. The name
+// survives, the path stays empty, and the tooltip says which of the two
+// happened rather than showing a blank the reader has to interpret. Run
+// elevated, those paths read too.
+//
+// Names and paths are interned into the pool exactly as before: the table
+// holds offsets, and the UI draws straight out of the run. An identified
+// program also keeps the path in UTF-16 beside the drawable copy, because
+// `explorer.exe /select` takes a wide path and a narrow round trip would lose
+// the characters that make a path unusual.
+
+use gesso::{Procs as GessoProcs, ProcInfo, SysError, Gone, Absent};
+use smalt::Mem;
+use crate::model::pool;
+
+/** Slots the table can hold. */
+const MAX_PROCS : i32 = 4096;
+/** Longest process name kept, in bytes. */
+const NAME_MAX : i32 = 64;
+/** Longest image path kept, in bytes. */
+const PATH_MAX : i32 = 320;
+
+/** Whether a process's image path is known, and why not when it is not. */
+enum PathState : i32 {
+    /** The path has not been asked for yet. */
+    Untried = 0,
+    /** The path is interned and `pathOff` / `pathLen` name it. */
+    Known = 1,
+    /** Gesso refused the handle — another account's service, or a protected process. */
+    Denied = 2,
+    /** The process was gone by the time the path was asked for. */
+    Gone = 3,
+}
+
+/**
+ * Every process on the machine, with its name, and its image path for the
+ * ones that turned out to matter.
+ */
+class Procs {
+    pid : i64[] = malloc<i64>(MAX_PROCS as i64),
+    created : i64[] = malloc<i64>(MAX_PROCS as i64),
+    pub(crate) nameOff : i64[] = malloc<i64>(MAX_PROCS as i64),
+    pub(crate) nameLen : i32[] = malloc<i32>(MAX_PROCS as i64),
+    pub(crate) pathOff : i64[] = malloc<i64>(MAX_PROCS as i64),
+    pub(crate) pathLen : i32[] = malloc<i32>(MAX_PROCS as i64),
+    /**
+     * The same path in UTF-16, unabridged. The drawable span above folds what
+     * the glyph tables cannot draw and stops at `PATH_MAX`; handing *that*
+     * back to Explorer would open the wrong folder for any path with an
+     * accent in it, so the shell is given this one.
+     */
+    pub(crate) wideOff : i64[] = malloc<i64>(MAX_PROCS as i64),
+    pub(crate) wideChars : i32[] = malloc<i32>(MAX_PROCS as i64),
+    pathState : PathState[] = malloc<PathState>(MAX_PROCS as i64),
+    seen : i32[] = malloc<i32>(MAX_PROCS as i64),
+
+    count : i32 = 0,
+    gen : i32 = 0,
+
+    /** The slot holding `pid`, or `-1`. */
+    pub(crate) fn find(self, pid : i64) : i32 {
+        for (i of 0..self.count) {
+            if (self.pid[i] == pid) {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    /**
+     * Re-read the process list and fold it into the table. A slot survives as
+     * long as its process does, which is what lets the path resolved on the
+     * first refresh still be there on the thousandth.
+     */
+    pub(crate) fn refresh(mut self, pool : Pool) : void {
+        let mut all : ProcInfo[];
+        try {
+            all = GessoProcs::list();
+        } catch e : SysError {
+            // The previous table is still a true reading of a moment ago,
+            // and a refresh that failed is not a machine with no processes.
+            return;
+        }
+
+        self.gen = self.gen + 1;
+        for (i of 0..all.length) {
+            self.fold(pool, all[i]);
+        }
+
+        self.sweep();
+    }
+
+    /**
+     * Fold one process into its slot, minting the slot if the pid is new.
+     *
+     * A pid is not an identity: Windows hands a freed one to the next process
+     * within seconds. Gesso's `key` folds the id, the name and the start time,
+     * so a slot whose key no longer matches belongs to a different program and
+     * is re-read from scratch — otherwise the new process's sockets would be
+     * attributed to the old one's name and path.
+     */
+    fn fold(mut self, pool : Pool, info : ProcInfo) : void {
+        let mut s : i32 = self.find(info.pid);
+        if (s >= 0 && self.created[s] != info.key) {
+            self.reset(pool, s, info);
+        }
+
+        if (s < 0) {
+            if (self.count >= MAX_PROCS) {
+                return;
+            }
+
+            s = self.count;
+            self.count = s + 1;
+            self.pid[s] = info.pid;
+            self.reset(pool, s, info);
+        }
+
+        self.seen[s] = self.gen;
+    }
+
+    /** Start slot `s` over for the process `info`. */
+    fn reset(mut self, pool : Pool, s : i32, info : ProcInfo) : void {
+        self.created[s] = info.key;
+        self.pathState[s] = PathState::Untried;
+        self.pathOff[s] = -1;
+        self.pathLen[s] = 0;
+        self.wideOff[s] = -1;
+        self.wideChars[s] = 0;
+
+        let len : i32 = pool.measure(info.name, NAME_MAX);
+        self.nameOff[s] = pool.putString(info.name, NAME_MAX);
+        self.nameLen[s] = 0;
+        if (self.nameOff[s] >= 0) {
+            self.nameLen[s] = len;
+        }
+    }
+
+    /**
+     * Drop the slots this refresh did not see. The hole is filled from the
+     * tail rather than by shifting: nothing outside this table addresses a
+     * slot by index — every caller arrives with a pid — so the order of the
+     * storage carries no meaning.
+     */
+    fn sweep(mut self) : void {
+        let mut i : i32 = 0;
+        while (i < self.count) {
+            if (self.seen[i] != self.gen) {
+                let last : i32 = self.count - 1;
+                if (i != last) {
+                    self.pid[i] = self.pid[last];
+                    self.created[i] = self.created[last];
+                    self.nameOff[i] = self.nameOff[last];
+                    self.nameLen[i] = self.nameLen[last];
+                    self.pathOff[i] = self.pathOff[last];
+                    self.pathLen[i] = self.pathLen[last];
+                    self.wideOff[i] = self.wideOff[last];
+                    self.wideChars[i] = self.wideChars[last];
+                    self.pathState[i] = self.pathState[last];
+                    self.seen[i] = self.seen[last];
+                }
+
+                self.count = last;
+            } else {
+                i = i + 1;
+            }
+        }
+    }
+
+    /**
+     * Resolve slot `s`'s image path if it has not been tried, and answer what
+     * happened. Gesso opens and closes the one handle inside the call: holding
+     * a query handle across the refresh loop would keep a dead process's
+     * record alive in the kernel and make the list disagree with the machine.
+     *
+     * The span interned here is this pid's own copy, and the thirty pids of
+     * one browser therefore intern thirty identical paths. That duplication is
+     * deliberate: it makes the cache a plain per-pid field with no lifetime
+     * shared across slots, and it costs at most a few hundred kilobytes for
+     * the pids that have sockets. `model::groups` interns the one copy that is
+     * keyed on.
+     */
+    pub(crate) fn resolvePath(mut self, pool : Pool, s : i32) : PathState {
+        if (s < 0 || s >= self.count) {
+            return PathState::Gone;
+        }
+
+        if (self.pathState[s] != PathState::Untried) {
+            return self.pathState[s];
+        }
+
+        let mut units : i32[];
+        try {
+            units = GessoProcs::imagePathUnits(self.pid[s]);
+        } catch e : Gone {
+            self.pathState[s] = PathState::Gone;
+            return PathState::Gone;
+        } catch e : Absent {
+            self.pathState[s] = PathState::Gone;
+            return PathState::Gone;
+        } catch e : SysError {
+            self.pathState[s] = PathState::Denied;
+            return PathState::Denied;
+        }
+
+        let chars : i32 = units.length as i32;
+        if (chars <= 0) {
+            self.pathState[s] = PathState::Denied;
+            return PathState::Denied;
+        }
+
+        // The units go into the pool twice: exactly, as UTF-16, for the API
+        // that hands the path back to Windows; and folded to drawable bytes,
+        // for the row that shows it.
+        let stage : i64 = Mem::take((chars as i64) * 2);
+        if (stage == 0) {
+            self.pathState[s] = PathState::Denied;
+            return PathState::Denied;
+        }
+
+        for (i of 0..chars) {
+            Mem::putWord(stage, (i as i64) * 2, units[i as i64]);
+        }
+
+        let off : i64 = pool.put(stage, chars * 2);
+        if (off >= 0) {
+            self.wideOff[s] = off;
+            self.wideChars[s] = chars;
+        }
+
+        self.pathOff[s] = pool.putWide(stage, chars, PATH_MAX);
+        Mem::release(stage);
+        if (self.pathOff[s] < 0) {
+            self.pathState[s] = PathState::Denied;
+            return PathState::Denied;
+        }
+
+        self.pathLen[s] = chars < PATH_MAX ? chars : PATH_MAX;
+        self.pathState[s] = PathState::Known;
+        return PathState::Known;
+    }
+
+    /** Nothing raw is held any more; the column arrays go with the object. */
+    pub(crate) fn dispose(mut self) : void {
+    }
+}
+
+/** Why a program row shows no path, in the words the tooltip uses. */
+fn pathNote(state : PathState) : string {
+    return match state {
+        PathState::Denied => "path refused: another account's service, or a protected process",
+        PathState::Gone => "the process exited before its path could be read",
+        PathState::Untried => "path not read yet",
+        PathState::Known => "",
+    };
+}

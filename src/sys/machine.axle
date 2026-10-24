@@ -1,18 +1,24 @@
-// sys/machine — everything that reads the operating system, as one value.
+// sys/machine — the readings this program keeps, as one value.
 //
-// Four readers: the process list, the connection tables, the resolver's
-// cache, and the record of which of the three readings is running. The loop
+// Three readers: the process list, the connection tables, and the resolver's
+// cache, plus the record of which of the three readings is running. The loop
 // hands them on together because they are consulted together — a refresh
 // reads two of them and sets the third's badge — and the UI only ever wants
 // the last two, to explain itself.
 //
-// Each type here resolves through the port (`axle.toml`'s `[port.win32]`), so
-// this file names no operating system any more than its callers do.
+// All three are Gesso's readings, folded into the column stores this
+// program's journal is built on (`sys/procs`, `sys/conn`, `sys/dnscache`).
+// The kernel trace (`sys/traffic`) is a handle the loop owns directly, not a
+// reading held here: it is started once, on the thread that polls it. Nothing
+// in this file names an operating system.
 
+use gesso::DnsCacheReader;
 use crate::sys::procs::Procs;
 use crate::sys::conn::Conns;
-use crate::sys::dnscache::DnsCache;
 use crate::sys::tiers::Tiers;
+
+/** How often the resolver's cache is read again, in milliseconds. */
+const DNS_SWEEP_MS : i64 = 5000;
 
 /** The machine, as this program reads it. */
 class Machine {
@@ -20,14 +26,13 @@ class Machine {
     pub(crate) procs : Procs = new Procs(),
     /** The per-process TCP and UDP tables. */
     pub(crate) conns : Conns = new Conns(),
-    /** The resolver's cache, inverted to address to name. */
-    pub(crate) dns : DnsCache = new DnsCache(),
+    /** The resolver's cache, read on a schedule, with its own status. */
+    pub(crate) dns : DnsCacheReader = new DnsCacheReader(DNS_SWEEP_MS),
     /** Which of the three readings is running, and why the others are not. */
     pub(crate) tiers : Tiers = new Tiers(),
 
     /** Release the readers' buffers. */
     pub(crate) fn dispose(mut self) : void {
-        self.dns.dispose();
         self.conns.dispose();
         self.procs.dispose();
     }

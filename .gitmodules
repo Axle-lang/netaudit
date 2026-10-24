@@ -1,3 +1,6 @@
 [submodule "vendor/zaffre"]
 	path = vendor/zaffre
 	url = https://github.com/Axle-lang/zaffre
+[submodule "vendor/gesso"]
+	path = vendor/gesso
+	url = https://github.com/Axle-lang/gesso

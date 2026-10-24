@@ -16,6 +16,7 @@
 // for one host, and a v6 address is one key rather than a string that
 // depends on how it was spelled.
 
+use gesso::Addr;
 use smalt::Mem;
 use crate::model::key::{hashStep, seed};
 
@@ -210,4 +211,38 @@ fn reachWord(r : Reach) : string {
         Reach::None => "no peer",
         Reach::Public => "internet",
     };
+}
+
+/**
+ * The address at `src`, as gesso's `Addr` — for the library calls that take
+ * one (the resolver, the origin lookup). `family` is the raw family the table
+ * reported; a v4-mapped v6 address is passed as the v6 address it is, and
+ * gesso's `unmapped` / `equals` already treat it as its v4 twin.
+ */
+pub(crate) fn netAddr(src : i64, family : i32) : Addr {
+    if (family == 6) {
+        return Addr::v6(
+            groupAt(src, 0),
+            groupAt(src, 1),
+            groupAt(src, 2),
+            groupAt(src, 3),
+            groupAt(src, 4),
+            groupAt(src, 5),
+            groupAt(src, 6),
+            groupAt(src, 7)
+        );
+    }
+
+    return Addr::v4(
+        Mem::byteAt(src, 0),
+        Mem::byteAt(src, 1),
+        Mem::byteAt(src, 2),
+        Mem::byteAt(src, 3)
+    );
+}
+
+/** The 16-bit group `i` of the sixteen bytes at `src`, network order. */
+fn groupAt(src : i64, i : i32) : i32 {
+    let at : i64 = (i as i64) * 2;
+    return (Mem::byteAt(src, at) << 8) | Mem::byteAt(src, at + 1);
 }

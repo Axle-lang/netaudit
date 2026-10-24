@@ -67,10 +67,8 @@ const FLAG_HOSTING : i32 = 2;
 /** The address belongs to a mobile carrier. */
 const FLAG_MOBILE : i32 = 4;
 
-/** The registry has been asked which network announces the address. */
+/** The registry has been asked which network announces the address, and what it is called. */
 const ASKED_ORIGIN : i32 = 1;
-/** The registry has been asked what that network is called. */
-const ASKED_AS_NAME : i32 = 2;
 
 /**
  * How strong a claim a source has on a row's name.

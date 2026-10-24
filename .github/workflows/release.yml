@@ -75,11 +75,12 @@ jobs:
           }
           "axle $got satisfies >= $env:AXLE_MIN"
 
-      # `submodules: recursive` is not optional: the interface is the
-      # `vendor/zaffre` submodule, and the platform layer under it is Zaffre's
-      # own `vendor/smalt`. Their src/ compile with ours, so a checkout
-      # without it leaves the directory empty and `axle build` stops on a
-      # missing dependency before it reads any source.
+      # `submodules: recursive` is not optional: the machine layer is the
+      # `vendor/gesso` submodule, the interface is `vendor/zaffre`, and the
+      # platform layer under Zaffre is its own `vendor/smalt`. Their src/
+      # compile with ours, so a checkout without them leaves the directories
+      # empty and `axle build` stops on a missing dependency before it reads
+      # any source.
       - uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -96,9 +97,10 @@ jobs:
           $PKG = 'netaudit-windows-x86_64'
           New-Item -ItemType Directory -Path "dist\$PKG" -Force | Out-Null
           Copy-Item 'target\netaudit.exe' "dist\$PKG\"
-          # Which Zaffre and which smalt this binary was built against — the
-          # submodule pins, recorded so a release names its own interface and
-          # platform layer.
+          # Which gesso, Zaffre and smalt this binary was built against — the
+          # submodule pins, recorded so a release names its own machine layer,
+          # interface and platform layer.
+          $gesso = (git -C vendor/gesso rev-parse --short HEAD)
           $zaffre = (git -C vendor/zaffre rev-parse --short HEAD)
           $smalt = (git -C vendor/zaffre/vendor/smalt rev-parse --short HEAD)
           @"
@@ -110,8 +112,9 @@ jobs:
           dnsapi, kernel32, shell32 and gdi32 ship with Windows, and no DLL is
           bundled because none is needed.
 
-          Built with $(axle --version) against Zaffre $zaffre, on smalt $smalt.
-          The interface is set in Instrument Sans (SIL Open Font License).
+          Built with $(axle --version) against gesso $gesso and Zaffre $zaffre,
+          on smalt $smalt. The interface is set in Instrument Sans (SIL Open
+          Font License).
           "@ | Set-Content -Encoding utf8 "dist\$PKG\README.txt"
           Compress-Archive -Path "dist\$PKG\*" -DestinationPath "$PKG.zip"
 

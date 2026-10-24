@@ -33,7 +33,8 @@ use crate::model::groups::Groups;
 use crate::model::hosts::{Hosts, Look, NameSource};
 use crate::model::rhythm::{hasRhythm, regularityWord};
 use crate::model::addr::{reachWord, Reach};
-use crate::sys::conn::{Proto, stateName};
+use gesso::Proto;
+use crate::sys::conn::stateName;
 
 /** How steady a rhythm has to be to be called out. */
 const STEADY : i32 = 750;

@@ -2,10 +2,11 @@
 //
 //   session      the loop's state, whole: the model, the machine, the
 //                lookup queue, and what the reader is doing
-//   sys/machine  the OS readings: processes, connection tables, the DNS
-//                cache, and which of the three readings are running
-//   sys/raw      the pointer views those imports need, and every `unsafe`
-//                in this program
+//   sys/machine  the readings: the process list and socket table gesso
+//                answers, the resolver's cache, the kernel trace, and which
+//                of the three readings are running
+//   sys/*        the folds from gesso's readings into the journal's columns:
+//                sockets, processes, cached names, and per-process bytes
 //   model/world  the journal: endpoints, their programs, their addresses,
 //                their rhythm, their score, and the flattened tree
 //   app          what the reader is doing to it
@@ -45,16 +46,16 @@ use crate::model::pulse;
 use crate::model::view::{Rows, RowKind};
 use crate::model::score;
 use crate::model::endpoints::{rank, absorbSnapshot};
-use crate::model::hosts::{Hosts, NameSource, HOST_MAX, ASKED_ORIGIN, ASKED_AS_NAME};
-use crate::model::addr::Reach;
+use crate::model::hosts::{Hosts, NameSource, HOST_MAX, ORG_MAX, ASKED_ORIGIN};
+use crate::model::addr::{Reach, netAddr};
 use crate::sys::machine::Machine;
 use crate::sys::tiers::TierState;
+use crate::sys::traffic::{TraceReader, startTraffic};
 use crate::sys::dnscache;
-use crate::sys::rdns;
+use gesso::{DnsCacheReader, ReadingState};
 use crate::enrich::queue;
 use crate::enrich::queue::{Queue, WhoisKind};
 use crate::enrich::ipapi;
-use crate::enrich::cymru;
 use crate::enrich::worker;
 use std::sys::process::{argc, argAt};
 use std::lang::{IndexOutOfBoundsException, ParseException};
@@ -114,6 +115,12 @@ fn run() : void ! PlatformError {
 
     let ss : Shared<Session> = new shared Session();
     let mut a : App = ss.a;
+    // The kernel trace is a handle minted on this thread and polled by the
+    // loop that owns it, like the two lookup tasks below: the type lives
+    // here rather than in `Machine`, because a class stored in a
+    // trait-typed field is not lowered yet.
+    let mut trace : dyn TraceReader = startTraffic();
+    defer trace.dispose();
     let view : View = built(ss);
     view.resize(WIN_W as f64, WIN_H as f64);
 
@@ -233,7 +240,7 @@ fn run() : void ! PlatformError {
         let now : i64 = clock.counter();
         if (!a.paused && (a.refreshDue || now >= due)) {
             a.refreshDue = false;
-            refresh(ss, a.nowMs);
+            refresh(ss, a.nowMs, trace);
             a.tick();
             page::refreshStatus(ss);
             view.invalidate();
@@ -390,18 +397,19 @@ fn buttonOf(b : MouseButton) : i32 {
  * the cache answers nothing — which an empty cache also does.
  */
 fn sweepDns(ss : Shared<Session>, nowMs : i64) : bool {
-    let dns : DnsCache = ss.mach.dns;
+    let dns : DnsCacheReader = ss.mach.dns;
     let mut learned : bool = false;
     if (!ss.a.paused && dns.due(nowMs)) {
         learned = dnscache::sweep(dns, ss.w.hosts, ss.w.pool, nowMs);
     }
 
-    ss.mach.tiers.dns = TierState::Off;
-    if (dns.ok && dns.answering) {
-        ss.mach.tiers.dns = TierState::On;
-    } else if (dns.ok) {
-        ss.mach.tiers.dns = TierState::Lost;
-    }
+    // The reader says which of on / off / lost it is, and why; the window's
+    // three states are that answer with the same names.
+    ss.mach.tiers.dns = match dns.status().state {
+        ReadingState::On => TierState::On,
+        ReadingState::Lost => TierState::Lost,
+        ReadingState::Off => TierState::Off,
+    };
 
     return learned;
 }
@@ -437,18 +445,10 @@ fn collect(ss : Shared<Session>, nowMs : i64, jobs : Future<string>[2]) : bool {
         if (h >= 0) {
             if (q.whoisKind == WhoisKind::Ptr) {
                 changed = tookName(ss.w, h, body) || changed;
-            } else if (q.whoisKind == WhoisKind::Origin) {
-                // The origin answer carries the number; the name is a second
-                // lookup, which a later turn starts. Each question is asked
-                // once (`Hosts::ask`), answered or not.
-                let asn : i32 = cymru::originAsn(body);
-                if (asn > 0) {
-                    hosts.asn[h] = asn;
-                    q.whoisAsn = asn;
-                    changed = true;
-                }
             } else {
-                changed = cymru::takeName(hosts, ss.w.pool, h, q.whoisAsn, body) || changed;
+                // `Net::origin` asks both Team Cymru zones, so one answer
+                // carries the number and the name together.
+                changed = tookOrigin(ss.w, h, body) || changed;
             }
         }
 
@@ -475,26 +475,14 @@ fn dispatch(ss : Shared<Session>, nowMs : i64, jobs : Future<string>[2]) : void 
         return;
     }
 
-    // The registry, in two DNS steps. A row that has an AS number but no
-    // name is one step from being readable, so it goes first: finishing what
-    // is nearly done beats starting something new.
-    let named : i32 = needsAsName(hosts);
-    if (named >= 0) {
-        q.whoisHost = named;
-        q.whoisKind = WhoisKind::AsName;
-        q.whoisAsn = hosts.asn[named];
-        hosts.ask(named, ASKED_AS_NAME);
-        jobs[1] = spawn rdns::txt(cymru::asName(hosts.asn[named]));
-        q.whoisInFlight = true;
-        return;
-    }
-
+    // The registry, in one DNS lookup: `Net::origin` asks the origin zone and
+    // then the AS-name zone, and answers both.
     let origin : i32 = needsOrigin(hosts);
     if (origin >= 0) {
         q.whoisHost = origin;
         q.whoisKind = WhoisKind::Origin;
         hosts.ask(origin, ASKED_ORIGIN);
-        jobs[1] = spawn rdns::txt(cymru::originName(hosts, origin));
+        jobs[1] = spawn worker::origin(netAddr(hosts.addrAt(origin), hosts.family[origin]));
         q.whoisInFlight = true;
         return;
     }
@@ -505,14 +493,13 @@ fn dispatch(ss : Shared<Session>, nowMs : i64, jobs : Future<string>[2]) : void 
     if (nameless >= 0) {
         q.whoisHost = nameless;
         q.whoisKind = WhoisKind::Ptr;
-        jobs[1] = spawn rdns::reverse(rdns::arpaName(hosts, nameless));
+        jobs[1] = spawn worker::reverse(netAddr(hosts.addrAt(nameless), hosts.family[nameless]));
         q.whoisInFlight = true;
     }
 }
 
 /** Fold a reverse-lookup answer into row `h`. */
-fn tookName(w : World, h : i32, body : string) : bool {
-    // Measured before it is interned, so an empty answer never reaches the
+fn tookName(w : World, h : i32, body : string) : bool {    // Measured before it is interned, so an empty answer never reaches the
     // run at all — there is nothing to retract, and no offset whose meaning
     // depends on nothing having been interned since.
     let len : i32 = w.pool.measure(body, HOST_MAX);
@@ -536,6 +523,47 @@ fn tookName(w : World, h : i32, body : string) : bool {
 }
 
 /**
+ * Fold an origin answer into row `h`: the number `Net::origin` read, a `|`,
+ * and the title it built (`AS13335 Cloudflare, Inc.`). The number goes in the
+ * AS column; the title is what the network column shows.
+ */
+fn tookOrigin(w : World, h : i32, body : string) : bool {
+    let n : i64 = body.byteLength;
+    if (n <= 0) {
+        return false;
+    }
+
+    let mut bar : i64 = -1;
+    let mut asn : i32 = 0;
+    for (i of 0..n) {
+        let c : i32 = body.byteAt(i);
+        if (bar < 0) {
+            if (c == 124) {
+                bar = i;
+            } else if (c >= 48 && c <= 57) {
+                asn = asn * 10 + (c - 48);
+            } else {
+                return false;
+            }
+        }
+    }
+
+    if (bar <= 0 || asn <= 0) {
+        return false;
+    }
+
+    let off : i64 = w.pool.putRange(body, bar + 1, n, ORG_MAX);
+    if (off < 0) {
+        return false;
+    }
+
+    w.hosts.netOff[h] = off;
+    w.hosts.netLen[h] = (w.pool.used() - off) as i32;
+    w.hosts.asn[h] = asn;
+    return true;
+}
+
+/**
  * A routable address whose announcing network is still unknown and has not
  * been asked about — including one the batch failed for, which is exactly
  * the address the registry fallback exists for.
@@ -544,18 +572,6 @@ fn needsOrigin(hosts : Hosts) : i32 {
     for (h of 0..hosts.count) {
         if (hosts.settled(h) && hosts.reach[h] == Reach::Public && hosts.netOff[h] < 0
             && hosts.asn[h] == 0 && !hosts.wasAsked(h, ASKED_ORIGIN)) {
-            return h;
-        }
-    }
-
-    return -1;
-}
-
-/** A routable address that has a network number but no name for it yet. */
-fn needsAsName(hosts : Hosts) : i32 {
-    for (h of 0..hosts.count) {
-        if (hosts.netOff[h] < 0 && hosts.asn[h] > 0 && hosts.reach[h] == Reach::Public
-            && !hosts.wasAsked(h, ASKED_AS_NAME)) {
             return h;
         }
     }
@@ -600,12 +616,19 @@ fn drain(q : Queue, jobs : Future<string>[2]) : void {
  * in; then the ranking, which reads the scores; then the cards, which reduce
  * all of it.
  */
-fn refresh(ss : Shared<Session>, nowMs : i64) : void {
+fn refresh(ss : Shared<Session>, nowMs : i64, trace : dyn TraceReader) : void {
     let w : World = ss.w;
     let mut mach : Machine = ss.mach;
     mach.procs.refresh(w.pool);
     mach.conns.refresh();
     absorbSnapshot(w, mach, nowMs);
+
+    // The trace's counts are per process, and the journal is per conversation.
+    // The delta is folded into the program, which is the finest partition the
+    // trace itself offers; nothing here splits it across sockets.
+    trace.poll();
+    creditTraffic(w, mach, nowMs, trace);
+
     score::assessAll(w.eps, w.hosts);
     rank(w.eps, nowMs);
     pulse::sample(w);
@@ -614,6 +637,31 @@ fn refresh(ss : Shared<Session>, nowMs : i64) : void {
         true => TierState::On,
         false => TierState::Off,
     };
+    mach.tiers.etw = match trace.status().state {
+        ReadingState::On => TierState::On,
+        ReadingState::Lost => TierState::Lost,
+        ReadingState::Off => TierState::Off,
+    };
+}
+
+/** Give this tick's per-process deltas to the programs they belong to. */
+fn creditTraffic(w : World, mach : Machine, nowMs : i64, trace : dyn TraceReader) : void {
+    if (!trace.running()) {
+        return;
+    }
+
+    for (i of 0..trace.size()) {
+        let inBytes : i64 = trace.receivedAt(i);
+        let outBytes : i64 = trace.sentAt(i);
+        if (inBytes == 0 && outBytes == 0) {
+            continue;
+        }
+
+        let g : i32 = w.groups.forPid(w.pool, mach.procs, trace.pidAt(i));
+        if (g >= 0) {
+            w.groups.credit(g, inBytes, outBytes, nowMs);
+        }
+    }
 }
 
 /**

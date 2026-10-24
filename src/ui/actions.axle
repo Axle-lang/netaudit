@@ -3,11 +3,11 @@
 // program. Each is a plain function over the session, so a key, a button and a
 // menu entry all call the same thing and none of them has a copy of it.
 
+use gesso::{Desk, SysError};
 use crate::app::{App, Say};
 use crate::session::Session;
 use crate::model::groups::Groups;
 use crate::model::view::{Rows, RowKind};
-use crate::sys::shell;
 
 /** The key of row `row` of the flat list: the program's or the endpoint's own, which is what a pick follows. */
 pub fn rowKey(ss : Shared<Session>, row : i32) : i64 {
@@ -48,9 +48,10 @@ pub fn open(ss : Shared<Session>) : void {
         return;
     }
 
-    if (shell::revealBinary(ss.w.pool, groups.wideOff[gi as i64], groups.wideChars[gi as i64])) {
+    try {
+        Desk::revealUnits(ss.w.groupPathUnits(gi));
         a.saying(Say::Opened);
-    } else {
+    } catch e : SysError {
         a.saying(Say::NoPath);
     }
 }

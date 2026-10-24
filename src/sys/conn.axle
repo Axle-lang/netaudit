@@ -1,0 +1,180 @@
+// sys/conn — the machine's sockets, folded into the form the journal keeps.
+//
+// Gesso reads them: `Net::sockets()` asks the per-process TCP and UDP tables
+// once and answers one row per socket, with the owning pid, the local and
+// remote endpoints, and the state. This file holds the reading in columns for
+// the life of the window, because the journal is a column store by design —
+// a refresh reuses its storage, and a row is found by scanning numbers rather
+// than following objects.
+//
+// What the tables do NOT carry, stated once so nothing above invents it: no
+// byte counts, and no peer for a UDP socket — the OS simply does not record
+// one for a connectionless handle. A UDP row is a socket that is open, which
+// is worth showing and worth not overstating.
+//
+// Every row keeps both ends: a peer's address is what a reader audits, and a
+// listening socket's bind is the interface it answers on. `sighted` picks the
+// one the journal keys on; nothing here decides.
+//
+// The transport and state vocabularies are Gesso's: `Proto` and `TcpState`
+// are the library's, so a socket means the same thing below and above this
+// file.
+
+use gesso::{Net, Proto, SocketInfo, SocketTable, SysError, TcpState};
+use smalt::Mem;
+
+/** `MIB_TCP_STATE_LISTEN` — inbound, no peer. */
+const TCP_LISTEN : i32 = 2;
+/** `MIB_TCP_STATE_SYN_SENT` — an outbound connection being opened. */
+const TCP_SYN_SENT : i32 = 3;
+/** `MIB_TCP_STATE_ESTAB` — the state a live conversation sits in. */
+const TCP_ESTAB : i32 = 5;
+/** A UDP row carries no TCP state; this is what it reports instead. */
+const STATE_NONE : i32 = 0;
+
+/** Rows the snapshot can hold. A machine past this is a machine in trouble. */
+const CONN_MAX_ROWS : i32 = 8192;
+/** Address bytes per row — sixteen, so an IPv6 row needs no second store. */
+const CONN_ADDR_BYTES : i64 = 16;
+
+/**
+ * One snapshot of every socket on the machine, in column form.
+ *
+ * The address pool is allocated once and reused, so a refresh clears bytes
+ * rather than taking a second copy of the table. `ok` is false when the
+ * machine refused the reading — the one case in which the caller should keep
+ * the previous snapshot rather than believe an empty one.
+ */
+class Conns {
+    pub(crate) proto : Proto[] = malloc<Proto>(CONN_MAX_ROWS as i64),
+    pub(crate) family : i32[] = malloc<i32>(CONN_MAX_ROWS as i64),
+    pub(crate) pid : i32[] = malloc<i32>(CONN_MAX_ROWS as i64),
+    pub(crate) state : i32[] = malloc<i32>(CONN_MAX_ROWS as i64),
+    pub(crate) localPort : i32[] = malloc<i32>(CONN_MAX_ROWS as i64),
+    pub(crate) remotePort : i32[] = malloc<i32>(CONN_MAX_ROWS as i64),
+
+    pub(crate) count : i32 = 0,
+    pub(crate) ok : bool = false,
+
+    addrs : i64 = Mem::take((CONN_MAX_ROWS as i64) * CONN_ADDR_BYTES),
+
+    /**
+     * Byte address of row `i`'s sixteen address bytes: the remote end for a
+     * connection, the local bind for a listening socket or a UDP handle.
+     */
+    pub(crate) fn addrAt(self, i : i32) : i64 {
+        return self.addrs + (i as i64) * CONN_ADDR_BYTES;
+    }
+
+    /**
+     * Re-read every socket. Gesso answers one table for both transports and
+     * both families; a refusal leaves the previous snapshot in place by
+     * leaving `ok` false, which the caller reads as "nothing new".
+     */
+    pub(crate) fn refresh(mut self) : void {
+        if (self.addrs == 0) {
+            self.ok = false;
+            return;
+        }
+
+        let mut table : SocketTable;
+        try {
+            table = Net::sockets();
+        } catch e : SysError {
+            self.ok = false;
+            return;
+        }
+
+        self.count = 0;
+        for (r of 0..table.size()) {
+            if (!self.fold(table.at(r))) {
+                break;
+            }
+        }
+
+        self.ok = true;
+    }
+
+    /** Lay one gesso socket into the next row; false when the snapshot is full. */
+    fn fold(mut self, sk : SocketInfo) : bool {
+        // A listening socket has no peer — its remote endpoint is empty — and
+        // what a reader wants is the interface it is bound to, because
+        // `0.0.0.0:4444` and `127.0.0.1:4444` are a very different sentence.
+        // A UDP handle is the same: the OS names no peer for it.
+        let mut state : i32 = sk.state as i32;
+        if (sk.proto == Proto::Udp) {
+            state = STATE_NONE;
+        }
+
+        let mut end : i32 = 0;
+        if (sk.proto == Proto::Udp || state == TCP_LISTEN) {
+            end = 1;
+        }
+
+        // The address stored is the one the journal keys on: the bind for a
+        // listener or a UDP handle, the peer for every live connection.
+        let mut family : i32 = sk.remote.addr.family;
+        if (end == 1) {
+            family = sk.local.addr.family;
+        }
+
+        let i : i32 = self.mint(sk.proto, family, sk.pid as i32, state);
+        if (i < 0) {
+            return false;
+        }
+
+        self.localPort[i] = sk.local.port;
+        self.remotePort[i] = sk.remote.port;
+
+        let width : i32 = family == 4 ? 4 : 16;
+        for (b of 0..width) {
+            if (end == 1) {
+                Mem::putByte(self.addrAt(i), b as i64, sk.local.addr.byteAt(b));
+            } else {
+                Mem::putByte(self.addrAt(i), b as i64, sk.remote.addr.byteAt(b));
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Mint a row and answer its index, or `-1` when the snapshot is full.
+     * The address bytes are cleared here so a v4 row's upper twelve are
+     * never whatever the previous refresh left behind.
+     */
+    fn mint(mut self, proto : Proto, family : i32, pid : i32, state : i32) : i32 {
+        if (self.count >= CONN_MAX_ROWS) {
+            return -1;
+        }
+
+        let i : i32 = self.count;
+        self.count = i + 1;
+        self.proto[i] = proto;
+        self.family[i] = family;
+        self.pid[i] = pid;
+        self.state[i] = state;
+        self.localPort[i] = 0;
+        self.remotePort[i] = 0;
+        Mem::clear(self.addrAt(i), CONN_ADDR_BYTES);
+        return i;
+    }
+
+    /** Release the address block; the column arrays are freed with the object. */
+    pub(crate) fn dispose(mut self) : void {
+        if (self.addrs != 0) {
+            Mem::release(self.addrs);
+            self.addrs = 0;
+        }
+    }
+}
+
+/** Whether a TCP state means the tuple is still a live conversation. */
+fn isLive(state : i32) : bool {
+    return state == TCP_ESTAB || state == TCP_SYN_SENT;
+}
+
+/** The human name of a TCP state, as the detail card reports it. */
+fn stateName(state : i32) : string {
+    return TcpState::fromWindows(state).label();
+}

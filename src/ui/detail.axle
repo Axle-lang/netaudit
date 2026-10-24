@@ -21,6 +21,7 @@ use crate::ui::live::Tall;
 use crate::session::Session;
 use crate::model::world::World;
 use crate::model::endpoints::{Endpoints, SocketKind, kindBadge};
+use crate::model::groups::Groups;
 use crate::model::hosts::{Hosts, nameSource, lookNote, FLAG_PROXY, FLAG_HOSTING, FLAG_MOBILE};
 use crate::model::rhythm::{hasRhythm, regularityWord};
 use crate::model::addr::{reachWord, Reach};
@@ -241,22 +242,40 @@ fn traffic(into : Column, ss : Shared<Session>, s : i32) : void {
     if (!ss.mach.tiers.bytesMeasured()) {
         into.add(new Label(
             LabelProps { role: TextRole::Dim, wrap: true },
-            "Not measured. Byte counts need the kernel trace (ETW), which this build does not have yet. Blank means unmeasured, not idle."
+            "Not measured. Byte counts need the kernel trace (ETW), which is not running. Blank means unmeasured, not idle."
+        ));
+        return;
+    }
+
+    // The trace counts bytes per process, not per socket. The program's row
+    // is the finest reading it gives, so that is what the card shows — and
+    // it says so, rather than presenting a program total as this socket's.
+    let g : Groups = ss.w.groups;
+    let gi : i32 = e.group[s as i64];
+    if (!g.measured(gi)) {
+        into.add(new Label(
+            LabelProps { role: TextRole::Dim, wrap: true },
+            "The kernel trace is running and has not counted bytes for this program yet."
         ));
         return;
     }
 
     ss.a.scratch.reset();
-    ss.a.scratch.byteCount(e.bytesIn[s as i64]);
-    fact(into, "received", text::scratchText(ss.a.scratch));
+    ss.a.scratch.byteCount(g.traceIn[gi as i64]);
+    fact(into, "received, program", text::scratchText(ss.a.scratch));
 
     ss.a.scratch.reset();
-    ss.a.scratch.byteCount(e.bytesOut[s as i64]);
-    fact(into, "sent", text::scratchText(ss.a.scratch));
+    ss.a.scratch.byteCount(g.traceOut[gi as i64]);
+    fact(into, "sent, program", text::scratchText(ss.a.scratch));
 
     ss.a.scratch.reset();
-    fmt::rate(ss.a.scratch, e.rate(s));
-    fact(into, "now", text::scratchText(ss.a.scratch));
+    fmt::rate(ss.a.scratch, g.rate(gi));
+    fact(into, "now, program", text::scratchText(ss.a.scratch));
+
+    into.add(new Label(
+        LabelProps { role: TextRole::Caption, wrap: true },
+        "The trace counts bytes per program; this connection's share is not split out."
+    ));
 }
 
 /**

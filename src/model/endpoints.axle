@@ -25,7 +25,8 @@
 // weighted read of repetition, regularity, risk, traffic and recency.
 
 use smalt::{Mem, SlotIndex};
-use crate::sys::conn::{Conns, Proto, TCP_LISTEN, isLive};
+use gesso::Proto;
+use crate::sys::conn::{Conns, TCP_LISTEN, isLive};
 use crate::model::key::{hashStep, seed};
 use crate::model::addr::{hashAddr, reach, shownFamily, shownOffset, Reach};
 use crate::model::rhythm::{Rhythm, hasRhythm};
@@ -228,9 +229,9 @@ class Endpoints {
 
     /**
      * Fold this tick's byte counters into the smoothed rates and clear
-     * them. Without the ETW tier the counters are always zero and the rates
-     * decay to zero, which is the honest reading — no traffic figure is
-     * invented from the connection table, which carries none.
+     * them. The kernel trace counts per process, not per socket, so these
+     * endpoint counters stay zero and the rates decay to zero: no traffic
+     * figure is invented for a row the trace cannot split.
      *
      * The smoothing is a three-quarters carry: a rate reaches nine tenths
      * of a step change in about eight ticks, which is fast enough to see a

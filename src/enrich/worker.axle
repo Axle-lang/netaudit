@@ -1,9 +1,9 @@
-// enrich/worker — the one blocking call, kept off the loop.
+// enrich/worker — the blocking calls (HTTP and DNS), kept off the loop.
 //
-// Looking an address up is an HTTP round-trip: a few hundred milliseconds on
-// a good day, and the full timeout on a bad one. Made on the event loop it
-// would freeze the window, and freezing the window of a monitoring tool is
-// how a reader concludes the machine has locked up.
+// Looking an address up is an HTTP round-trip or a DNS query: a few hundred
+// milliseconds on a good day, and the full timeout on a bad one. Made on the
+// event loop it would freeze the window, and freezing the window of a
+// monitoring tool is how a reader concludes the machine has locked up.
 //
 // So the call runs on its own OS thread. `spawn` hands back a
 // `Task<string>`; the loop asks `isAlive()` once a frame, which is a peek and
@@ -22,6 +22,34 @@
 
 use std::net::HttpClient;
 use std::lang::IOException;
+use gesso::{Addr, AsOrigin, Net, SysError};
+
+/**
+ * The name an address's owner publishes, or the empty string when none does.
+ * Runs on the spawned thread: a PTR lookup asks a DNS server and can take
+ * seconds.
+ */
+fn reverse(own addr : Addr) : string {
+    try {
+        return Net::reverse(addr);
+    } catch e : SysError {
+        return "";
+    }
+}
+
+/**
+ * The network announcing `addr`, as `asn|title` (`13335|AS13335 Cloudflare,
+ * Inc.`), or the empty string when nothing answers. One call asks both Team
+ * Cymru zones, so the number and its name arrive together.
+ */
+fn origin(own addr : Addr) : string {
+    try {
+        let found : AsOrigin = Net::origin(addr);
+        return found.asn.toString() + "|" + found.title();
+    } catch e : SysError {
+        return "";
+    }
+}
 
 /**
  * POST `body` to `url` and answer the response body, or the empty string

@@ -40,11 +40,11 @@ const RBRACKET : i32 = 93;
 /**
  * A byte count per second, or a dash when there is nothing to report.
  *
- * The dash is the whole point of the function. Byte counts come from the
- * ETW tier, which is not implemented; until it is every rate is zero, and a
- * column of `0/s` says the programs sent nothing rather than that nothing
- * was measured. ASCII, like every literal drawn: the glyph tables stop at
- * `~`, and a byte past them draws as nothing at all.
+ * The dash is the whole point of the function. A rate of zero is either
+ * nothing measured or nothing sent, and a column of `0/s` would claim the
+ * second; a row nothing measured keeps the dash. ASCII, like every literal
+ * drawn: the glyph tables stop at `~`, and a byte past them draws as nothing
+ * at all.
  */
 fn rate(s : Scratch, n : i64) : void {
     if (n <= 0) {

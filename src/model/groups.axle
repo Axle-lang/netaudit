@@ -58,6 +58,17 @@ class Groups {
     rateOut : i64[] = malloc<i64>(MAX_GROUPS as i64),
     bytesIn : i64[] = malloc<i64>(MAX_GROUPS as i64),
     bytesOut : i64[] = malloc<i64>(MAX_GROUPS as i64),
+
+    // What the kernel trace counted for this program, which is the one
+    // per-process reading there is. Kept apart from the endpoint roll-ups:
+    // the trace knows a program's bytes but not which of its sockets they
+    // crossed, and the two must never be added as if they were the same
+    // measurement.
+    pub(crate) traceIn : i64[] = malloc<i64>(MAX_GROUPS as i64),
+    pub(crate) traceOut : i64[] = malloc<i64>(MAX_GROUPS as i64),
+    traceRateIn : i64[] = malloc<i64>(MAX_GROUPS as i64),
+    traceRateOut : i64[] = malloc<i64>(MAX_GROUPS as i64),
+    traced : i32[] = malloc<i32>(MAX_GROUPS as i64),
     pub(crate) lastMs : i64[] = malloc<i64>(MAX_GROUPS as i64),
     expanded : i32[] = malloc<i32>(MAX_GROUPS as i64),
 
@@ -174,6 +185,11 @@ class Groups {
         self.rateOut[g] = 0;
         self.bytesIn[g] = 0;
         self.bytesOut[g] = 0;
+        self.traceIn[g] = 0;
+        self.traceOut[g] = 0;
+        self.traceRateIn[g] = 0;
+        self.traceRateOut[g] = 0;
+        self.traced[g] = 0;
         self.lastMs[g] = 0;
         // A program arrives open. A tree of forty folded rows answers "which
         // programs use the network", which is the easy half of the question;
@@ -187,7 +203,6 @@ class Groups {
     /** Clear the roll-ups so an endpoint sweep can accumulate into them. */
     pub(crate) fn beginRollup(mut self) : void {
         for (g of 0..self.count) {
-            self.lastMs[g] = 0;
             self.endpoints[g] = 0;
             self.live[g] = 0;
             self.flagged[g] = 0;
@@ -231,6 +246,31 @@ class Groups {
         }
     }
 
+    /**
+     * Fold one tick of the kernel trace into program `g`. The rates are
+     * smoothed with the same three-quarters carry the endpoint rows use, so a
+     * download starting is visible and the column does not flicker.
+     */
+    pub(crate) fn credit(mut self, g : i32, inBytes : i64, outBytes : i64, nowMs : i64) : void {
+        if (g < 0 || g >= self.count) {
+            return;
+        }
+
+        self.traceIn[g] = self.traceIn[g] + inBytes;
+        self.traceOut[g] = self.traceOut[g] + outBytes;
+        self.traceRateIn[g] = (self.traceRateIn[g] * 3 + inBytes) / 4;
+        self.traceRateOut[g] = (self.traceRateOut[g] * 3 + outBytes) / 4;
+        self.traced[g] = 1;
+        if (nowMs > self.lastMs[g]) {
+            self.lastMs[g] = nowMs;
+        }
+    }
+
+    /** Whether the kernel trace has counted anything for program `g`. */
+    pub(crate) fn measured(self, g : i32) : bool {
+        return g >= 0 && g < self.count && self.traced[g] != 0;
+    }
+
     /** Whether group `g` is currently showing its endpoints. */
     pub(crate) fn isOpen(self, g : i32) : bool {
         return g >= 0 && g < self.count && self.expanded[g] != 0;
@@ -269,8 +309,17 @@ class Groups {
         return self.index.get(key);
     }
 
-    /** Combined traffic of a group, which is what its row is ranked on. */
+    /**
+     * Combined traffic of a group, which is what its row is ranked on. A
+     * program the trace has counted answers with the trace's rate; one it has
+     * not answers with what its endpoints report (which is nothing until
+     * some other source supplies bytes).
+     */
     pub(crate) fn rate(self, g : i32) : i64 {
+        if (self.traced[g] != 0) {
+            return self.traceRateIn[g] + self.traceRateOut[g];
+        }
+
         return self.rateIn[g] + self.rateOut[g];
     }
 

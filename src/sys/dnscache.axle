@@ -1,0 +1,73 @@
+// sys/dnscache — the names this machine actually asked for, folded into the
+// host table.
+//
+// gesso reads the resolver's cache (`Net::dnsCache`, answered from the cache
+// alone — nothing leaves the machine) and keeps the last good reading in a
+// `DnsCacheReader`, whose status says whether the cache is answering. This
+// file turns that reading around: `name → addresses` becomes
+// `address → name`, so every host row whose address is in the cache gets the
+// name a program on this machine typed.
+//
+// A name the cache holds outranks a PTR record and is never overwritten by
+// one. That rule lives in `Hosts::name`; this file only names the source.
+
+use gesso::{DnsCache, DnsCacheReader, DnsEntry};
+use smalt::Mem;
+use crate::model::hosts::{Hosts, NameSource, HOST_MAX};
+use crate::model::pool::Pool;
+
+/**
+ * Read the resolver's cache when a sweep is due, and fold it in. Answers
+ * whether anything on screen changed: a host row minted, or a name applied
+ * where a better source had not already spoken.
+ *
+ * The reader keeps the last good reading when a sweep fails, so folding it
+ * again is harmless; the status is what tells the window the cache has gone
+ * dark.
+ */
+pub(crate) fn sweep(reader : DnsCacheReader, hosts : Hosts, pool : Pool, nowMs : i64) : bool {
+    reader.sweep(nowMs);
+    return fold(reader.cache(), hosts, pool);
+}
+
+/** Fold every (name, address) pair the cache holds into the host table. */
+fn fold(cache : DnsCache, hosts : Hosts, pool : Pool) : bool {
+    let scratch : i64 = Mem::take(16);
+    if (scratch == 0) {
+        return false;
+    }
+
+    let mut changed : bool = false;
+    for (i of 0..cache.size()) {
+        let entry : DnsEntry = cache.at(i);
+        let family : i32 = entry.addr.family;
+        let width : i32 = entry.addr.width();
+        Mem::clear(scratch, 16);
+        for (b of 0..width) {
+            Mem::putByte(scratch, b as i64, entry.addr.byteAt(b));
+        }
+
+        let known : i32 = hosts.lookup(scratch, family);
+        let h : i32 = hosts.intern(scratch, family);
+        if (h < 0) {
+            continue;
+        }
+
+        if (known < 0) {
+            changed = true;
+        }
+
+        let len : i32 = pool.measure(entry.name, HOST_MAX);
+        let off : i64 = pool.putString(entry.name, HOST_MAX);
+        if (off >= 0) {
+            let before : NameSource = hosts.nameFrom[h];
+            hosts.name(h, off, len, NameSource::Cache);
+            if (hosts.nameFrom[h] != before) {
+                changed = true;
+            }
+        }
+    }
+
+    Mem::release(scratch);
+    return changed;
+}

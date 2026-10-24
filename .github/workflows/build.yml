@@ -85,11 +85,12 @@ jobs:
           }
           "axle $got satisfies >= $env:AXLE_MIN"
 
-      # `submodules: recursive` is not optional: the interface is the
-      # `vendor/zaffre` submodule, and the platform layer under it is Zaffre's
-      # own `vendor/smalt`. Their src/ compiles with ours, so a checkout without
-      # them leaves the directories empty and `axle build` stops on a missing
-      # dependency before it reads any source.
+      # `submodules: recursive` is not optional: the machine layer is the
+      # `vendor/gesso` submodule, the interface is `vendor/zaffre`, and the
+      # platform layer under Zaffre is its own `vendor/smalt`. Their src/
+      # compiles with ours, so a checkout without them leaves the directories
+      # empty and `axle build` stops on a missing dependency before it reads
+      # any source.
       - uses: actions/checkout@v4
         with:
           submodules: recursive

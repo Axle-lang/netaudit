@@ -2,34 +2,23 @@
 name = "netaudit"
 version = "0.1.0"
 
-# The targets this program promises to serve. The port checks read this: a
-# seam the win32 port implements and another does not is an error only for a
-# target named here, so adding one is the first line of a port rather than a
-# hundred errors at once.
+# The target this program promises to serve. It declares no port of its own:
+# gesso's ports are the only ones its OS code needs, and the window's surface
+# is smalt's.
 targets = ["x86_64-pc-windows-msvc"]
 
-# No `[link]` section. Every OS library is named by the `extern "C" from "…"`
-# block that imports from it — `iphlpapi` for the connection tables, `dnsapi`
-# for the resolver cache and the reverse lookups, `kernel32` for the process
-# handles, `shell32` to reveal a binary, and `gdi32` through smalt — so the
-# link line learns of each from the declaration that needed it, and a
-# consumer links what it uses without being told twice. The one exception is
-# `NtQuerySystemInformation`, bound by symbol from `ntdll`.
+# No `[link]` section and no port of this program's own. Every operating-system
+# call — the process list, the socket tables, the resolver's cache, the PTR and
+# TXT lookups, the network that announces an address, the kernel trace, and
+# revealing a binary — is gesso's, and gesso names each library in its own tree
+# (`iphlpapi`, `kernel32`, `ntdll`, `dnsapi`, `advapi32`, `shell32`, …). The
+# window's surface is smalt's, and it names `gdi32`. A consumer links what it
+# uses without being told twice.
 [dependencies]
+# The machine layer: every reading comes from gesso; netaudit keeps only its
+# journal, its enrichment queue and its window.
+gesso = { path = "vendor/gesso" }
 zaffre = { path = "vendor/zaffre" }
 # The window's OS layer is smalt too, and there is exactly one copy of it: the one
 # Zaffre was written against, so the two never disagree about a type.
 smalt = { path = "vendor/zaffre/vendor/smalt" }
-
-# The port: one condition, and the directory that carries it.
-#
-# Everything that touches the machine is behind a seam — `Conns`, `Procs`,
-# `DnsCache`, the reverse lookup, revealing a binary in a file manager, the
-# pointer's shape — and `src/sys/win32/` is the Windows answer to all six.
-# Nothing above `sys/` names an operating system, so a second port is those
-# six files and no
-# edit anywhere else: the module path stays `crate::sys::conn`, and the
-# build's `--target` picks which file it resolves to.
-[port.win32]
-when = { os = "windows" }
-dirs = ["win32"]

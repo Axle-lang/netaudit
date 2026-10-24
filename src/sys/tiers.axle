@@ -11,10 +11,11 @@
 //         it can go dark and the badge goes with it.
 //   ETW   a real-time kernel trace: bytes per process, the connections too
 //         short for polling to catch, and the domain each process resolved.
-//         Declared and not implemented, so its badge is dark and says why —
-//         which is the whole reason the badges exist. A traffic column with
-//         nothing in it and no badge to explain it reads as "these programs
-//         sent nothing", and that is the one thing it must never say.
+//         It needs an elevated session, so on an ordinary window its badge is
+//         dark and says why — which is the whole reason the badges exist. A
+//         traffic column with nothing in it and no badge to explain it reads
+//         as "these programs sent nothing", and that is the one thing it must
+//         never say.
 //
 // Each tier carries the sentence that explains its state, because "off" is
 // not a diagnosis. `note` is what the status bar and the tooltip show, and

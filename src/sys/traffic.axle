@@ -1,0 +1,207 @@
+// sys/traffic — bytes per process, from gesso's kernel trace.
+//
+// The socket tables say who has a connection *now*. They carry no byte
+// count, and they never see a connection that opened and closed between two
+// readings. gesso's `NetTrace` reads the kernel's own events: every send and
+// receive with the process that made it, every connection too short to poll,
+// and every name a program resolved.
+//
+// This file turns the trace's running totals into **this tick's deltas**, by
+// process. The journal asks for deltas because its rows are conversations: a
+// total counted since startup cannot be attributed to an endpoint, and a
+// delta can be given to the program, which is the finest partition the trace
+// itself offers. A program's bytes therefore light its row, and the endpoint
+// rows stay blank — the trace does not split a program's traffic per socket,
+// and inventing a split would be worse than saying so.
+//
+// Starting a real-time trace needs an elevated session on Windows; on Linux
+// it is `Unsupported`. Either way `status()` says which, and why. A
+// `TraceReader` is either a running `TraceOn` or a `TraceOff` that carries
+// the reason: the type has no "no trace yet" state, because a field left
+// unset would be a null the teardown has to know about.
+
+use gesso::{Host, NetTrace, ReadingStatus, Support, SysError, TraceCounters, Unsupported};
+use smalt::SlotIndex;
+
+/** Processes the delta table can hold. */
+const TRAFFIC_MAX_PIDS : i32 = 4096;
+
+/** What a traffic reader answers, running or not. */
+trait TraceReader {
+    /** Take the events that have arrived since the last call. */
+    fn poll(mut self) : void;
+
+    /** Whether a trace is running. */
+    fn running(self) : bool;
+
+    /** How many processes have moved something since the trace began. */
+    fn size(self) : i32;
+
+    /** The process at position `i`. */
+    fn pidAt(self, i : i32) : i64;
+
+    /** Bytes that process at position `i` received this tick. */
+    fn receivedAt(self, i : i32) : i64;
+
+    /** Bytes that process at position `i` sent this tick. */
+    fn sentAt(self, i : i32) : i64;
+
+    /** What the trace is doing, and why. */
+    fn status(self) : ReadingStatus;
+
+    /** Stop the trace and release the index. */
+    fn dispose(mut self) : void;
+}
+
+/** A trace that could not be started, with the sentence that says why. */
+class TraceOff : TraceReader {
+    why : ReadingStatus;
+
+    constructor(own why : ReadingStatus) {
+        self.why = why;
+    }
+
+    pub fn poll(mut self) : void {
+    }
+
+    pub fn running(self) : bool {
+        return false;
+    }
+
+    pub fn size(self) : i32 {
+        return 0;
+    }
+
+    pub fn pidAt(self, i : i32) : i64 {
+        return -1;
+    }
+
+    pub fn receivedAt(self, i : i32) : i64 {
+        return 0;
+    }
+
+    pub fn sentAt(self, i : i32) : i64 {
+        return 0;
+    }
+
+    pub fn status(self) : ReadingStatus {
+        return self.why;
+    }
+
+    pub fn dispose(mut self) : void {
+    }
+}
+
+/** A running trace, and what each process has moved since the last poll. */
+class TraceOn : TraceReader {
+    trace : NetTrace;
+    now : ReadingStatus;
+    pids : i64[] = malloc<i64>(TRAFFIC_MAX_PIDS as i64),
+    sent : i64[] = malloc<i64>(TRAFFIC_MAX_PIDS as i64),
+    received : i64[] = malloc<i64>(TRAFFIC_MAX_PIDS as i64),
+    totalSent : i64[] = malloc<i64>(TRAFFIC_MAX_PIDS as i64),
+    totalReceived : i64[] = malloc<i64>(TRAFFIC_MAX_PIDS as i64),
+    count : i32 = 0,
+    index : SlotIndex = new SlotIndex(TRAFFIC_MAX_PIDS * 2),
+
+    constructor(own trace : NetTrace) {
+        self.now = trace.status();
+        self.trace = trace;
+    }
+
+    /**
+     * Take the events that have arrived since the last call and turn their
+     * running totals into this tick's deltas. A process's counter going down
+     * means the trace restarted, not that bytes were un-sent; it is read as
+     * no measurement, exactly as `TrafficMeter` reads a counter that went
+     * back.
+     */
+    pub fn poll(mut self) : void {
+        self.trace.poll();
+        self.now = self.trace.status();
+        let counts : TraceCounters = self.trace.counters();
+
+        for (i of 0..self.count) {
+            self.sent[i] = 0;
+            self.received[i] = 0;
+        }
+
+        for (k of 0..counts.pidCount()) {
+            let pid : i64 = counts.pidAt(k);
+            let mut slot : i32 = self.index.get(pid);
+            if (slot < 0) {
+                if (self.count >= TRAFFIC_MAX_PIDS) {
+                    continue;
+                }
+
+                slot = self.count;
+                self.count = slot + 1;
+                self.pids[slot] = pid;
+                self.totalSent[slot] = 0;
+                self.totalReceived[slot] = 0;
+                self.index.put(pid, slot);
+            }
+
+            let sent : i64 = counts.bytesSent(pid);
+            let received : i64 = counts.bytesReceived(pid);
+            let mut dSent : i64 = sent - self.totalSent[slot];
+            let mut dReceived : i64 = received - self.totalReceived[slot];
+            if (dSent < 0) {
+                dSent = 0;
+            }
+            if (dReceived < 0) {
+                dReceived = 0;
+            }
+
+            self.totalSent[slot] = sent;
+            self.totalReceived[slot] = received;
+            self.sent[slot] = dSent;
+            self.received[slot] = dReceived;
+        }
+    }
+
+    pub fn running(self) : bool {
+        return true;
+    }
+
+    pub fn size(self) : i32 {
+        return self.count;
+    }
+
+    pub fn pidAt(self, i : i32) : i64 {
+        return self.pids[i];
+    }
+
+    pub fn receivedAt(self, i : i32) : i64 {
+        return self.received[i];
+    }
+
+    pub fn sentAt(self, i : i32) : i64 {
+        return self.sent[i];
+    }
+
+    pub fn status(self) : ReadingStatus {
+        return self.now;
+    }
+
+    pub fn dispose(mut self) : void {
+        self.trace.stop();
+        self.index.close();
+    }
+}
+
+/** Start the trace if it can be started here; otherwise answer why not. */
+fn startTraffic() : dyn TraceReader {
+    let support : Support = NetTrace::canStart();
+    if (!support.usableBy(Host::privilege())) {
+        return new TraceOff(ReadingStatus::off("kernel trace", support.reason));
+    }
+
+    try {
+        return new TraceOn(NetTrace::start());
+    } catch e : Unsupported {
+        return new TraceOff(NetTrace::unavailable(e));
+    } catch e : SysError {
+        return new TraceOff(NetTrace::refused(e));
+    }
+}

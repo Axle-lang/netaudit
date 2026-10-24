@@ -6,6 +6,7 @@
 
 <p align="center">
   <a href="https://axle-lang.dev"><img alt="Powered by Axle 0.18" src="https://img.shields.io/badge/powered%20by-Axle%200.18-5B4BE1?style=for-the-badge&labelColor=1b1b2b"></a>
+  <a href="https://github.com/Axle-lang/gesso"><img alt="Machine readings from gesso" src="https://img.shields.io/badge/machine%20readings-gesso-FF7A45?style=for-the-badge&labelColor=1b1b2b"></a>
   <a href="https://github.com/Axle-lang/zaffre"><img alt="Interface by Zaffre" src="https://img.shields.io/badge/interface-Zaffre-7A8CFF?style=for-the-badge&labelColor=1b1b2b"></a>
   <a href="https://github.com/Axle-lang/smalt"><img alt="Built on smalt" src="https://img.shields.io/badge/built%20on-smalt-1D6FB8?style=for-the-badge&labelColor=1b1b2b"></a>
 </p>
@@ -21,7 +22,7 @@
 
 <br>
 
-<sub><a href="#the-idea">The idea</a> · <a href="#what-it-can-and-cannot-see">What it sees</a> · <a href="#it-refreshes-every-second-and-still-sits-still">Why it sits still</a> · <a href="#keys">Keys</a> · <a href="#building">Building</a> · <a href="#reading-the-source">Reading the source</a> · <a href="https://github.com/Axle-lang/zaffre">Zaffre ↗</a> · <a href="https://github.com/Axle-lang/smalt">smalt ↗</a> · <a href="https://axle-lang.dev">Axle ↗</a></sub>
+<sub><a href="#the-idea">The idea</a> · <a href="#what-it-can-and-cannot-see">What it sees</a> · <a href="#it-refreshes-every-second-and-still-sits-still">Why it sits still</a> · <a href="#keys">Keys</a> · <a href="#building">Building</a> · <a href="#reading-the-source">Reading the source</a> · <a href="https://github.com/Axle-lang/gesso">gesso ↗</a> · <a href="https://github.com/Axle-lang/zaffre">Zaffre ↗</a> · <a href="https://github.com/Axle-lang/smalt">smalt ↗</a> · <a href="https://axle-lang.dev">Axle ↗</a></sub>
 
 </div>
 
@@ -70,18 +71,20 @@ What it answers instead:
 
 | Question | Where the answer comes from | Reading |
 |---|---|---|
-| which program, which protocol, which address and port | the per-process TCP/UDP tables (`iphlpapi`) | `POLL` |
-| which **name** is behind the address | the machine's DNS cache, and reverse DNS | `DNS` |
-| who **owns** the address, and where it is | `ip-api.com`, with Team Cymru's DNS whois behind it | `DNS` |
-| how many **bytes** moved | a kernel ETW trace | `ETW` |
+| which program, which protocol, which address and port | gesso's socket table (the per-process TCP/UDP tables) | `POLL` |
+| which **name** is behind the address | gesso: the machine's DNS cache, reverse DNS, Team Cymru | `DNS` |
+| who **owns** the address, and where it is | `ip-api.com`, with gesso's Team Cymru lookup behind it | `DNS` |
+| how many **bytes** moved | gesso's kernel trace (ETW), per process | `ETW` |
 | the short connections polling misses | the same trace | `ETW` |
 
 Three readings, three badges in the title bar. Each is lit when it is running,
 and each explains itself when hovered.
 
-> **`ETW` is declared and not implemented.** Its badge stays dark and the
-> traffic column stays blank — and the badge is exactly why that is readable
-> rather than misleading. A blank byte column with nothing to explain it says
+> **`ETW` lights when gesso's kernel trace is running** — which needs an
+> elevated session. Its bytes are counted per **program**, because that is the
+> partition the trace gives: a program's row shows them, and the endpoint rows
+> stay blank rather than have a program total split across sockets. Dark, the
+> badge says why — a blank byte column with nothing to explain it would read as
 > *these programs sent nothing*, which is the one thing it must never say.
 
 **Two things are hidden by default**, each with its count on the toggle that
@@ -160,9 +163,10 @@ exactly once per session. A batch that never arrived — the network was down, t
 service said 429 — puts its addresses back in line; it is not read as "every
 one of them came back empty".
 
-**Team Cymru's DNS whois** — `x.y.z.w.origin.asn.cymru.com` and
-`AS<n>.asn.cymru.com`, both `TXT`, for the addresses the batch could not name.
-Each question is asked once per address, answered or not, so one address the
+**Team Cymru's origin, through gesso** — `Net::origin` asks
+`x.y.z.w.origin.asn.cymru.com` and then `AS<n>.asn.cymru.com`, both `TXT`, and
+reads both answers into one `AsOrigin` (number, prefix, country, registry,
+name). It is asked once per address, answered or not, so one address the
 registry cannot place never holds up the rest.
 
 <details>
@@ -186,9 +190,10 @@ is worse than an absent one: it reads as evidence of innocence.
 
 ## Building
 
-The interface, [Zaffre](https://github.com/Axle-lang/zaffre), is a submodule,
-and so is the [smalt](https://github.com/Axle-lang/smalt) under it, so the clone
-has to bring both:
+The machine layer, [gesso](https://github.com/Axle-lang/gesso), is a submodule,
+and so are the interface, [Zaffre](https://github.com/Axle-lang/zaffre), and the
+[smalt](https://github.com/Axle-lang/smalt) under it, so the clone has to bring
+all three:
 
 ```bash
 git clone --recursive https://github.com/Axle-lang/netaudit
@@ -197,23 +202,24 @@ axle build
 ./target/netaudit.exe
 ```
 
-> An existing clone that predates the submodules: `git submodule update --init --recursive`.
+> An existing clone that predates one of the submodules: `git submodule update --init --recursive`.
 
 **The only prerequisite is the Axle compiler, v0.18.1 or newer.** No SDK to
 install, no DLL to copy beside the binary, no `[link]` section to fill in:
-every OS library — `iphlpapi`, `dnsapi`, `kernel32`, `shell32`, and `gdi32`
-through smalt — is named by the `extern "C" from "…"` block that imports from
-it, so the link line learns of each from the declaration that needed it. The
-one exception is `NtQuerySystemInformation`, bound by symbol from `ntdll`.
+this program declares no OS library at all. Every call — the process list, the
+socket tables, the resolver, the kernel trace, revealing a file — is gesso's,
+and gesso names each library (`iphlpapi`, `kernel32`, `ntdll`, `dnsapi`,
+`advapi32`, `shell32`, …) in its own tree; the window names `gdi32` through
+smalt. The link line collects each from the declaration that needed it.
 
-**Nothing needs elevation.** The connection tables, the resolver cache and
-the reverse lookups are readable by any process. Run elevated, one thing
-improves: the image paths of services running under another account become
-readable, so `svchost` and friends are grouped by path rather than by name.
-The kernel trace behind the `ETW` badge would need elevation too, and it is
-not implemented.
+**Nothing needs elevation for the window as it opens.** The connection
+tables, the resolver cache and the reverse lookups are readable by any
+process. Run elevated, two things improve: the image paths of services running
+under another account become readable, so `svchost` and friends are grouped by
+path rather than by name; and the `ETW` badge lights, because a real-time
+kernel trace needs an administrator or a member of Performance Log Users.
 
-**The resolver cache is read, never queried.** Each cached name is resolved
+**The resolver cache is read, never queried.** gesso reads each cached name
 with `DNS_QUERY_NO_WIRE_QUERY`, so nothing about what this machine looked up
 leaves it.
 
@@ -239,7 +245,7 @@ checked without a keyboard.
 
 ```
 netaudit
-├── axle.toml                  the package, the Zaffre and smalt path dependencies, the win32 port
+├── axle.toml                  the package, and the gesso, Zaffre and smalt path dependencies
 ├── src/
 │   ├── main.axle              the loop: events in, a frame out, the readings and the two lookups in flight
 │   ├── session.axle           what the loop owns: the world, the machine, the queue, the app
@@ -247,15 +253,12 @@ netaudit
 │   ├── fmt.axle               the figures a library cannot format: an address, a rate
 │   │
 │   ├── sys/                   the machine, as this program reads it
-│   │   ├── machine.axle       the four readers, as one value
-│   │   ├── raw.axle           the four pointer views the imports need — all the `unsafe`
-│   │   ├── tiers.axle         which readings are running, and why the others are not
-│   │   └── win32/             ← the one directory that names an operating system
-│   │       ├── conn.axle      GetExtendedTcp/UdpTable, v4 and v6, one row shape
-│   │       ├── procs.axle     process names, and where each binary lives
-│   │       ├── dnscache.axle  the resolver's cache, inverted to address → name
-│   │       ├── rdns.axle      the PTR record, for what nothing else could name
-│   │       └── shell.axle     explorer.exe /select,"…"
+│   │   ├── machine.axle       the readers, as one value
+│   │   ├── conn.axle          gesso's socket table, folded into the journal's columns
+│   │   ├── procs.axle         gesso's process list, and the image-path cache
+│   │   ├── dnscache.axle      gesso's resolver cache, inverted into the host table
+│   │   ├── traffic.axle       gesso's kernel trace, as per-process deltas
+│   │   └── tiers.axle         which readings are running, and why the others are not
 │   │
 │   ├── model/                 the journal, and every reading taken off it
 │   │   ├── world.axle         the six tables below, as one value
@@ -272,10 +275,9 @@ netaudit
 │   │
 │   ├── enrich/                who owns an address, asked over the network
 │   │   ├── queue.axle         who gets looked up, how often, and the back-off
-│   │   ├── worker.axle        the one blocking call, on a thread of its own
+│   │   ├── worker.axle        the blocking calls — HTTP and DNS — on a thread of its own
 │   │   ├── scan.axle          values out of a JSON response, byte by byte
-│   │   ├── ipapi.axle         the batch response, folded into rows
-│   │   └── cymru.axle         the registry over DNS, for what the batch could not name
+│   │   └── ipapi.axle         the batch response, folded into rows
 │   │
 │   └── ui/                    the window, in Zaffre's components; nothing here reads the machine
 │       ├── page.axle          the one page: title, figures, filter, tree, status bar
@@ -288,22 +290,28 @@ netaudit
 │       └── text.axle          bytes in the pool and the formatting cursor, as `string`
 │
 ├── doc/netaudit.png           this page's screenshot, written by `--snap`
-└── vendor/zaffre              the interface library, as a submodule
-    └── vendor/smalt           and the platform layer under it, the library's own submodule
+└── vendor/
+    ├── gesso                  the machine layer, as a submodule
+    └── zaffre                 the interface library, as a submodule
+        └── vendor/smalt       and the platform layer under it, the library's own submodule
 ```
 
-**One directory names an operating system, and `axle.toml` says which.**
-`[port.win32]` binds `when = { os = "windows" }` to `dirs = ["win32"]`, so
-`use crate::sys::conn::Conns` resolves to `sys/win32/conn.axle` on Windows and
-would resolve to a sibling directory's file on another target.
-
-Everything above `sys/` — the model, the enrichment, the whole UI — names no OS
-at all. That is what makes a second port six files and no edit anywhere else.
-`axle ports` prints the table with a tick per seam.
+**This program declares no port of its own.** Every operating-system call is
+gesso's; `axle.toml` names no `[port.*]`, and `src/sys/` is shared files that
+fold gesso's readings into the journal. The window's surface is smalt's.
+`axle ports` prints gesso's and smalt's seams; netaudit has none to show.
 
 ### What it stands on
 
-Two libraries, both Axle's, both submodules.
+Three libraries, all Axle's, all submodules.
+
+**[gesso](https://github.com/Axle-lang/gesso)** is the machine: the process
+list with its image paths, the per-process TCP/UDP socket tables with the
+process that owns each, the resolver's cache and its PTR/TXT lookups, Team
+Cymru's origin, the kernel trace, and revealing a binary in the file manager.
+netaudit declares no OS call of its own; `sys/procs`, `sys/conn`,
+`sys/dnscache` and `sys/traffic` fold gesso's readings into the columns and
+tables the journal has always used.
 
 **[smalt](https://github.com/Axle-lang/smalt)** is the platform: the window, the
 surface, the event queue, the clock, the byte pool, the slot index, the
@@ -341,8 +349,8 @@ each reading has moved. A frame that only animates allocates nothing.
 **Text is drawn from bytes, and handed to a widget as a string only at the last
 step.** Every name lives in one pool and is referred to by an offset and a
 length; `ui/text.axle` is the one door out of it. The path `O` hands to
-`ShellExecuteW` is the UTF-16 Windows gave, kept beside the drawable copy, so a
-folder with an accent in its name still opens.
+`ShellExecuteW` is kept as UTF-16 beside the drawable copy, so a folder with an
+accent in its name still opens.
 
 What stays here is what a library cannot know: an address in its canonical text
 form, a rate whose empty case means *nothing measured bytes* rather than
@@ -359,8 +367,8 @@ the tree to show, and `Sighting`, `Obj` and `Bytes` are the small values a
 socket, a JSON object and a span of text are. Axle's borrows are second-class
 (E0513 — a reference lent for a call cannot be kept in a field), so what several
 widgets hold at once is a `Shared<Session>`, and what a widget keeps for itself
-is passed `own`. The four Win32 imports keep their six arguments: those
-signatures are Windows's, not ours.
+is passed `own`. The Win32 imports that remain keep the signatures Windows gave
+them: those are Windows's, not ours.
 
 **Every state is an enum, read by a `match` with no wildcard** — `Tier`,
 `TierState`, `Sort`, `RowKind`, `Say`, `Proto`, `SocketKind`, `Reach`, `Look`,
@@ -376,11 +384,10 @@ names across the whole crate, so `address` in `ui/detail` could not coexist with
 rather than shadow Zaffre's. A class is declared before the code that hands it
 to a trait object — which is why `ui/figures` is a file of its own.
 
-**All the `unsafe` is in one file.** `src/sys/raw.axle` holds the four views
-between an address and a `ptr` that the Windows imports need; smalt owns the raw
-reads and writes. `unsafe` is per-function in Axle (E0707 — it does not
-propagate across a call), so that confinement is enforceable rather than
-aspirational: `grep -rlE "unsafe (fn|\{)" src/` returns one file.
+**There is no `unsafe` and no `extern "C"` in this program.** Every raw read and
+every operating-system entry point is gesso's or smalt's; the grep for either
+in `src/` returns nothing. That is what basing the program on gesso bought: the
+machine layer is the library's problem, and its ports are the library's.
 
 **The interface is set in Instrument Sans**, which Zaffre embeds; the font is
 under the SIL Open Font License (`vendor/zaffre/assets/fonts/InstrumentSans-OFL.txt`).
