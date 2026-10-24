@@ -50,9 +50,31 @@ class Tiers {
     pub(crate) dns : TierState = TierState::Off,
     pub(crate) etw : TierState = TierState::Off,
 
+    // What the library said, when it had a sentence: gesso names the
+    // privilege a trace needs, or why a platform keeps no readable cache.
+    // The static notes below stay as the fallback for the polled tables,
+    // which gesso reports as a plain success or failure.
+    pub(crate) pollNoteText : string = "",
+    pub(crate) dnsNoteText : string = "",
+    pub(crate) etwNoteText : string = "",
+
     /** Whether byte counts are being measured rather than left blank. */
     pub(crate) fn bytesMeasured(self) : bool {
         return self.etw == TierState::On || self.etw == TierState::Partial;
+    }
+
+    /** The sentence a badge explains itself with: the library's, or the static one. */
+    pub(crate) fn noteOf(self, which : Tier) : string {
+        let told : string = match which {
+            Tier::Poll => self.pollNoteText,
+            Tier::Dns => self.dnsNoteText,
+            Tier::Etw => self.etwNoteText,
+        };
+        if (told.byteLength > 0) {
+            return told;
+        }
+
+        return tierNote(which, self.stateOf(which));
     }
 
     /** The state of one badge, for the code that draws all three the same way. */

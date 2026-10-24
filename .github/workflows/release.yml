@@ -5,8 +5,9 @@ name: Release
 # artifact from the Actions tab but does NOT publish a GitHub Release (only a
 # real tag does).
 #
-# One job, and it runs on Windows: `axle.toml` promises a single target
-# (`x86_64-pc-windows-msvc`), so there is no second platform to release.
+# Two jobs, one per target in `axle.toml`. The Windows job creates the release
+# and publishes its archive; the Linux job waits for it, builds on its own
+# runner, and adds its archive to the same release.
 on:
   push:
     tags:
@@ -133,3 +134,82 @@ jobs:
         with:
           files: netaudit-windows-x86_64.zip
           generate_release_notes: true
+
+  linux:
+    name: Build & release (Linux x86_64)
+    runs-on: ubuntu-latest
+    # The Windows job creates the release; this one adds an asset to it.
+    needs: windows
+    steps:
+      - name: Install Axle
+        run: |
+          sudo install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://apt.axle-lang.dev/key.asc | sudo gpg --dearmor -o /etc/apt/keyrings/axle.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/axle.gpg arch=amd64] https://apt.axle-lang.dev stable main" \
+            | sudo tee /etc/apt/sources.list.d/axle.list
+          sudo apt-get update
+          sudo apt-get install -y axle
+
+      - name: Check the compiler is new enough
+        run: |
+          got=$(axle --version | awk '{print $2}' | cut -d- -f1)
+          if [ "$(printf '%s\n%s\n' "$AXLE_MIN" "$got" | sort -V | head -n1)" != "$AXLE_MIN" ]; then
+            echo "axle $got is older than the required $AXLE_MIN"; exit 1
+          fi
+          echo "axle $got satisfies >= $AXLE_MIN"
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # smalt's X11 backend names `X11` and `asound`; the link line needs their
+      # development packages. They are not bundled: a Linux desktop already has
+      # the runtime libraries.
+      - name: Install the X11 link libraries
+        run: sudo apt-get install -y libx11-dev libasound2-dev
+
+      - name: Build
+        run: axle build
+
+      # The package is the binary and nothing else, with the sentence that says
+      # what this platform can and cannot measure.
+      - name: Package
+        run: |
+          PKG=netaudit-linux-x86_64
+          gesso=$(git -C vendor/gesso rev-parse --short HEAD)
+          zaffre=$(git -C vendor/zaffre rev-parse --short HEAD)
+          smalt=$(git -C vendor/zaffre/vendor/smalt rev-parse --short HEAD)
+          mkdir -p "dist/$PKG"
+          cp target/netaudit "dist/$PKG/"
+          cat > "dist/$PKG/README.txt" <<EOF
+          netaudit — what every program on this machine is talking to, in one window.
+
+          Run:  ./netaudit
+
+          Needs libX11 and libasound at run time (a Linux desktop already has
+          them); no library is bundled.
+
+          On Linux the DNS badge is off: the system keeps no resolver cache a
+          program may read. The ETW badge is off too: per-process byte counts
+          need a kernel trace, and this library has no Linux trace yet. Sockets
+          whose process is out of sight are grouped by user id; run as root to
+          name the processes.
+
+          Built with $(axle --version) against gesso $gesso and Zaffre $zaffre,
+          on smalt $smalt. The interface is set in Instrument Sans (SIL Open
+          Font License).
+          EOF
+          tar -czf "$PKG.tar.gz" -C dist "$PKG"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: netaudit-linux-x86_64
+          path: netaudit-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+      - name: Publish release asset
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: netaudit-linux-x86_64.tar.gz

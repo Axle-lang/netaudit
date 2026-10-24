@@ -184,6 +184,10 @@ pub class Journal : DataSource {
         }
 
         if (col == 1) {
+            if (g.byUser(gi)) {
+                return line("process out of sight", TextRole::Dim);
+            }
+
             return line(text::counted(g.pids[gi as i64], "process", "processes"), TextRole::Dim);
         }
 
@@ -217,7 +221,8 @@ pub class Journal : DataSource {
         row.add(new Avatar(name, 24.0));
         row.add(new Label(name, TextRole::Strong));
         if (!w.groups.identified(gi)) {
-            row.add(new Tag(TagProps { text: "by name", tone: Tone::Neutral, size: BadgeSize::Sm }));
+            let tag : string = w.groups.byUser(gi) ? "owner" : "by name";
+            row.add(new Tag(TagProps { text: tag, tone: Tone::Neutral, size: BadgeSize::Sm }));
         }
 
         return row;

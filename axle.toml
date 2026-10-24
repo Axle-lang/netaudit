@@ -2,18 +2,20 @@
 name = "netaudit"
 version = "0.1.0"
 
-# The target this program promises to serve. It declares no port of its own:
-# gesso's ports are the only ones its OS code needs, and the window's surface
-# is smalt's.
-targets = ["x86_64-pc-windows-msvc"]
+# The targets this program promises to serve: the two the libraries under it
+# serve — Windows (Win32) and Linux (X11, smalt's default backend). It declares
+# no port of its own: gesso's ports are the only ones its OS code needs, and the
+# window's surface is smalt's.
+targets = ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"]
 
 # No `[link]` section and no port of this program's own. Every operating-system
 # call — the process list, the socket tables, the resolver's cache, the PTR and
 # TXT lookups, the network that announces an address, the kernel trace, and
 # revealing a binary — is gesso's, and gesso names each library in its own tree
-# (`iphlpapi`, `kernel32`, `ntdll`, `dnsapi`, `advapi32`, `shell32`, …). The
-# window's surface is smalt's, and it names `gdi32`. A consumer links what it
-# uses without being told twice.
+# (`iphlpapi`, `kernel32`, `ntdll`, `dnsapi`, `advapi32`, `shell32`, …; `c` and
+# `resolv` on Linux). The window's surface is smalt's, and it names `gdi32` on
+# Windows and `X11` / `asound` on Linux. A consumer links what it uses without
+# being told twice.
 [dependencies]
 # The machine layer: every reading comes from gesso; netaudit keeps only its
 # journal, its enrichment queue and its window.

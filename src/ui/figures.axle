@@ -166,7 +166,7 @@ class PillMaker : Maker {
         }
 
         return new Tooltip(
-            tierNote(which, state),
+            self.ss.mach.tiers.noteOf(which),
             new Badge(BadgeProps { text: tierName(which), tone: tone, dot: dot })
         );
     }

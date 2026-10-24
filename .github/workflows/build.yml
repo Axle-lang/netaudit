@@ -2,10 +2,9 @@ name: Build
 
 # Every push to main, and every pull request aimed at it.
 #
-# One job, and it runs on Windows: `axle.toml` promises a single target
-# (`x86_64-pc-windows-msvc`) and declares a single port, so there is no second
-# platform to build for — a Linux job would fail on the first `extern "C" from
-# "iphlpapi"` and would be saying nothing this repository has not already said.
+# Two jobs, because `axle.toml` promises two targets. The source tree has no
+# port of its own: both builds resolve gesso's ports and smalt's backend, so the
+# Linux job is the same `axle build` on another runner, not a second port.
 on:
   push:
     branches: [main]
@@ -112,4 +111,57 @@ jobs:
         with:
           name: netaudit-windows-x86_64
           path: target/netaudit.exe
+          if-no-files-found: error
+
+  linux:
+    name: Build (Linux x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      # The apt repository is the Linux compiler's distribution channel; the
+      # Windows job uses the MSI. Both serve whatever is current, so the same
+      # check follows.
+      - name: Install Axle
+        run: |
+          sudo install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://apt.axle-lang.dev/key.asc | sudo gpg --dearmor -o /etc/apt/keyrings/axle.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/axle.gpg arch=amd64] https://apt.axle-lang.dev stable main" \
+            | sudo tee /etc/apt/sources.list.d/axle.list
+          sudo apt-get update
+          sudo apt-get install -y axle
+
+      - name: Check the compiler is new enough
+        run: |
+          got=$(axle --version | awk '{print $2}' | cut -d- -f1)
+          if [ "$(printf '%s\n%s\n' "$AXLE_MIN" "$got" | sort -V | head -n1)" != "$AXLE_MIN" ]; then
+            echo "axle $got is older than the required $AXLE_MIN"; exit 1
+          fi
+          echo "axle $got satisfies >= $AXLE_MIN"
+
+      # `submodules: recursive` brings gesso and Zaffre, and smalt under
+      # Zaffre; their src/ compiles with ours.
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # smalt's X11 backend names `X11` and `asound` in its own extern blocks,
+      # so the link line needs the development packages even though nothing in
+      # this repository names them. The Wayland backend would need
+      # `libwayland-dev` instead; X11 is the default and runs under Xwayland.
+      - name: Install the X11 link libraries
+        run: |
+          sudo apt-get install -y libx11-dev libasound2-dev
+
+      - name: The port this build resolves
+        run: axle ports
+
+      - name: Build
+        run: axle build
+
+      # On Linux the artefact has no extension. `if-no-files-found: error` so a
+      # build that stops naming it `netaudit` fails here.
+      - name: Upload the binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: netaudit-linux-x86_64
+          path: target/netaudit
           if-no-files-found: error

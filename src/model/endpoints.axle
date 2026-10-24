@@ -396,7 +396,19 @@ fn absorbSnapshot(w : World, mach : Machine, nowMs : i64) : void {
 /** Fold connection row `r` into the endpoint it belongs to. */
 fn attribute(w : World, mach : Machine, r : i32, nowMs : i64) : void {
     let conns : Conns = mach.conns;
-    let g : i32 = w.groups.forPid(w.pool, mach.procs, conns.pid[r] as i64);
+    let pid : i64 = conns.pid[r] as i64;
+    let mut g : i32 = -1;
+    if (pid >= 0) {
+        g = w.groups.forPid(w.pool, mach.procs, pid);
+    }
+
+    if (g < 0) {
+        // The process is out of sight — either never named, or gone between
+        // the two snapshots — but the system may still name its user. The
+        // socket is attributed to that user rather than dropped.
+        g = w.groups.forUser(w.pool, conns.uid[r]);
+    }
+
     if (g < 0) {
         return;
     }

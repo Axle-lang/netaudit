@@ -11,7 +11,7 @@
   <a href="https://github.com/Axle-lang/smalt"><img alt="Built on smalt" src="https://img.shields.io/badge/built%20on-smalt-1D6FB8?style=for-the-badge&labelColor=1b1b2b"></a>
 </p>
 <p align="center">
-  <img alt="Platform: Windows" src="https://img.shields.io/badge/platform-Windows-1D6FB8?style=flat-square&labelColor=1b1b2b">
+  <img alt="Platform: Windows · Linux" src="https://img.shields.io/badge/platform-Windows%20%C2%B7%20Linux-1D6FB8?style=flat-square&labelColor=1b1b2b">
   <img alt="Dependencies: none" src="https://img.shields.io/badge/runtime%20dependencies-none-2E7D32?style=flat-square&labelColor=1b1b2b">
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-555555?style=flat-square&labelColor=1b1b2b">
 </p>
@@ -63,9 +63,10 @@ are worse than no score.
 
 ## What it can and cannot see
 
-**There is no URL.** Windows does not record the path of an HTTP request
-anywhere a tool can read, and HTTPS would encrypt it even if it did. Getting
-one needs a proxy in the middle or a packet capture, and this is neither.
+**There is no URL.** Neither Windows nor Linux records the path of an HTTP
+request anywhere a tool can read, and HTTPS would encrypt it even if it did.
+Getting one needs a proxy in the middle or a packet capture, and this is
+neither.
 
 What it answers instead:
 
@@ -81,11 +82,12 @@ Three readings, three badges in the title bar. Each is lit when it is running,
 and each explains itself when hovered.
 
 > **`ETW` lights when gesso's kernel trace is running** — which needs an
-> elevated session. Its bytes are counted per **program**, because that is the
-> partition the trace gives: a program's row shows them, and the endpoint rows
-> stay blank rather than have a program total split across sockets. Dark, the
-> badge says why — a blank byte column with nothing to explain it would read as
-> *these programs sent nothing*, which is the one thing it must never say.
+> elevated session on Windows and has no Linux trace yet. Its bytes are counted
+> per **program**, because that is the partition the trace gives: a program's
+> row shows them, and the endpoint rows stay blank rather than have a program
+> total split across sockets. Dark, the badge says why — a blank byte column
+> with nothing to explain it would read as *these programs sent nothing*, which
+> is the one thing it must never say.
 
 **Two things are hidden by default**, each with its count on the toggle that
 reveals it: traffic that never leaves the building (`L`), and sockets with no
@@ -199,7 +201,7 @@ all three:
 git clone --recursive https://github.com/Axle-lang/netaudit
 cd netaudit
 axle build
-./target/netaudit.exe
+./target/netaudit.exe     # Windows; on Linux the binary is ./target/netaudit
 ```
 
 > An existing clone that predates one of the submodules: `git submodule update --init --recursive`.
@@ -212,6 +214,18 @@ and gesso names each library (`iphlpapi`, `kernel32`, `ntdll`, `dnsapi`,
 `advapi32`, `shell32`, …) in its own tree; the window names `gdi32` through
 smalt. The link line collects each from the declaration that needed it.
 
+**On Linux**, the same `axle build` links smalt's X11 backend, so the one thing
+to install first is its development headers:
+
+```bash
+sudo apt-get install libx11-dev libasound2-dev
+```
+
+(A Wayland build would use `libwayland-dev` instead; this manifest leaves
+smalt's `wayland` feature off, so X11 is the backend — it runs under Xwayland
+on a Wayland session.) At run time `libX11` and `libasound` are already on a
+desktop; nothing is bundled.
+
 **Nothing needs elevation for the window as it opens.** The connection
 tables, the resolver cache and the reverse lookups are readable by any
 process. Run elevated, two things improve: the image paths of services running
@@ -219,9 +233,16 @@ under another account become readable, so `svchost` and friends are grouped by
 path rather than by name; and the `ETW` badge lights, because a real-time
 kernel trace needs an administrator or a member of Performance Log Users.
 
-**The resolver cache is read, never queried.** gesso reads each cached name
-with `DNS_QUERY_NO_WIRE_QUERY`, so nothing about what this machine looked up
-leaves it.
+On Linux, an ordinary user sees which process owns only their **own** sockets.
+Another user's socket is still read — its address, port, state and traffic are
+all there — and is grouped under `user N` with the note that its process is out
+of sight; running as root names the process instead. Linux has no kernel trace
+that gesso reads yet, so the `ETW` badge stays off there.
+
+**The resolver cache is read, never queried.** On Windows gesso reads each
+cached name with `DNS_QUERY_NO_WIRE_QUERY`, so nothing about what this machine
+looked up leaves it. Linux keeps no resolver cache a program may read, so the
+`DNS` badge says so and names come from reverse DNS and Team Cymru instead.
 
 **`--snap <ms>`** waits that long, writes `netaudit.bmp`, and quits: a capture
 for a report or for a script, with nobody standing over the machine at the
@@ -362,13 +383,14 @@ Four habits, each turning a class of silent mistake into a compile error or a
 signature that says what it touches.
 
 **What travels together is one value.** `Session` is what the loop owns, `World`
-the six model tables, `Machine` the four OS readers, `Lens` what the reader asked
-the tree to show, and `Sighting`, `Obj` and `Bytes` are the small values a
+the six model tables, `Machine` the readings it keeps, `Lens` what the reader
+asked the tree to show, and `Sighting`, `Obj` and `Bytes` are the small values a
 socket, a JSON object and a span of text are. Axle's borrows are second-class
 (E0513 — a reference lent for a call cannot be kept in a field), so what several
 widgets hold at once is a `Shared<Session>`, and what a widget keeps for itself
-is passed `own`. The Win32 imports that remain keep the signatures Windows gave
-them: those are Windows's, not ours.
+is passed `own`. The kernel trace is a `dyn TraceReader` owned by the loop: a
+class stored in a trait-typed field is not lowered yet, and a local is where it
+belongs anyway.
 
 **Every state is an enum, read by a `match` with no wildcard** — `Tier`,
 `TierState`, `Sort`, `RowKind`, `Say`, `Proto`, `SocketKind`, `Reach`, `Look`,

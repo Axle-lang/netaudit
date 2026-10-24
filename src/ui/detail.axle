@@ -242,7 +242,7 @@ fn traffic(into : Column, ss : Shared<Session>, s : i32) : void {
     if (!ss.mach.tiers.bytesMeasured()) {
         into.add(new Label(
             LabelProps { role: TextRole::Dim, wrap: true },
-            "Not measured. Byte counts need the kernel trace (ETW), which is not running. Blank means unmeasured, not idle."
+            "Not measured. Byte counts need a kernel trace, which is not running here. Blank means unmeasured, not idle."
         ));
         return;
     }

@@ -411,6 +411,7 @@ fn sweepDns(ss : Shared<Session>, nowMs : i64) : bool {
         ReadingState::Off => TierState::Off,
         ReadingState::Partial => TierState::Partial,
     };
+    ss.mach.tiers.dnsNoteText = dns.status().note;
 
     return learned;
 }
@@ -638,12 +639,21 @@ fn refresh(ss : Shared<Session>, nowMs : i64, trace : dyn TraceReader) : void {
         true => TierState::On,
         false => TierState::Off,
     };
+    mach.tiers.pollNoteText = "";
+    if (mach.conns.ok && mach.conns.unowned > 0) {
+        // The tables answered, but the system kept some owners to itself:
+        // running elevated is what names them. Saying only "on" would hide it.
+        mach.tiers.poll = TierState::Partial;
+        mach.tiers.pollNoteText = mach.conns.unowned.toString()
+            + " sockets have no visible owner; an elevated session names their processes.";
+    }
     mach.tiers.etw = match trace.status().state {
         ReadingState::On => TierState::On,
         ReadingState::Lost => TierState::Lost,
         ReadingState::Off => TierState::Off,
         ReadingState::Partial => TierState::Partial,
     };
+    mach.tiers.etwNoteText = trace.status().note;
 }
 
 /** Give this tick's per-process deltas to the programs they belong to. */

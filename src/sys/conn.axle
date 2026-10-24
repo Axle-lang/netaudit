@@ -49,12 +49,16 @@ class Conns {
     pub(crate) proto : Proto[] = malloc<Proto>(CONN_MAX_ROWS as i64),
     pub(crate) family : i32[] = malloc<i32>(CONN_MAX_ROWS as i64),
     pub(crate) pid : i32[] = malloc<i32>(CONN_MAX_ROWS as i64),
+    /** The owner's user id; -1 when the system did not say. Linux names it even when the pid is hidden. */
+    pub(crate) uid : i64[] = malloc<i64>(CONN_MAX_ROWS as i64),
     pub(crate) state : i32[] = malloc<i32>(CONN_MAX_ROWS as i64),
     pub(crate) localPort : i32[] = malloc<i32>(CONN_MAX_ROWS as i64),
     pub(crate) remotePort : i32[] = malloc<i32>(CONN_MAX_ROWS as i64),
 
     pub(crate) count : i32 = 0,
     pub(crate) ok : bool = false,
+    /** Sockets whose owning process the system would not name. */
+    pub(crate) unowned : i32 = 0,
 
     addrs : i64 = Mem::take((CONN_MAX_ROWS as i64) * CONN_ADDR_BYTES),
 
@@ -86,6 +90,7 @@ class Conns {
         }
 
         self.count = 0;
+        self.unowned = 0;
         for (r of 0..table.size()) {
             if (!self.fold(table.at(r))) {
                 break;
@@ -118,7 +123,11 @@ class Conns {
             family = sk.local.addr.family;
         }
 
-        let i : i32 = self.mint(sk.proto, family, sk.pid as i32, state);
+        if (sk.pid < 0) {
+            self.unowned = self.unowned + 1;
+        }
+
+        let i : i32 = self.mint(sk.proto, family, sk.pid as i32, sk.uid, state);
         if (i < 0) {
             return false;
         }
@@ -143,7 +152,7 @@ class Conns {
      * The address bytes are cleared here so a v4 row's upper twelve are
      * never whatever the previous refresh left behind.
      */
-    fn mint(mut self, proto : Proto, family : i32, pid : i32, state : i32) : i32 {
+    fn mint(mut self, proto : Proto, family : i32, pid : i32, uid : i64, state : i32) : i32 {
         if (self.count >= CONN_MAX_ROWS) {
             return -1;
         }
@@ -153,6 +162,7 @@ class Conns {
         self.proto[i] = proto;
         self.family[i] = family;
         self.pid[i] = pid;
+        self.uid[i] = uid;
         self.state[i] = state;
         self.localPort[i] = 0;
         self.remotePort[i] = 0;
