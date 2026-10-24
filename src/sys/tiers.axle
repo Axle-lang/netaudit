@@ -40,6 +40,8 @@ enum TierState : i32 {
     Off = 1,
     /** Started, and then stopped answering. */
     Lost = 2,
+    /** Running, and seeing only part of what is there; the note says which part. */
+    Partial = 3,
 }
 
 /** The state of the three readings, and why each is in it. */
@@ -50,7 +52,7 @@ class Tiers {
 
     /** Whether byte counts are being measured rather than left blank. */
     pub(crate) fn bytesMeasured(self) : bool {
-        return self.etw == TierState::On;
+        return self.etw == TierState::On || self.etw == TierState::Partial;
     }
 
     /** The state of one badge, for the code that draws all three the same way. */
@@ -78,7 +80,7 @@ fn tierName(which : Tier) : string {
  * tell a working source from an empty one.
  */
 fn tierReading(which : Tier, state : TierState) : string {
-    if (which != Tier::Dns || state != TierState::On) {
+    if (which != Tier::Dns || (state != TierState::On && state != TierState::Partial)) {
         return "";
     }
 
@@ -99,7 +101,9 @@ fn pollNote(state : TierState) : string {
     return match state {
         TierState::On => "Reading the per-process TCP and UDP tables once a second.",
         TierState::Lost => "The connection tables stopped answering; the journal waits for them.",
-        TierState::Off => "Windows refused the connection tables, so nothing can be read.",
+        TierState::Off => "The system refused the connection tables, so nothing can be read.",
+        TierState::Partial =>
+            "Reading the connection tables, but some sockets have no visible owner; an elevated session shows them.",
     };
 }
 
@@ -112,6 +116,8 @@ fn dnsNote(state : TierState) : string {
             "The DNS cache is empty or not answering; it is asked again every few seconds.",
         TierState::Off =>
             "The DNS cache is not readable here; addresses keep their reverse-DNS names.",
+        TierState::Partial =>
+            "Reading part of the resolver's cache; the names it cannot show keep their reverse-DNS names.",
     };
 }
 
@@ -124,5 +130,7 @@ fn etwNote(state : TierState) : string {
             "The kernel trace stopped. Byte counts are frozen at their last reading.",
         TierState::Off =>
             "No kernel trace, so no byte counts. The traffic column is blank because nothing measures it, not because nothing was sent.",
+        TierState::Partial =>
+            "Tracing the kernel network provider, but some events are out of sight; the counts are partial.",
     };
 }

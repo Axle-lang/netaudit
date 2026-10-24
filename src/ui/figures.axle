@@ -160,7 +160,7 @@ class PillMaker : Maker {
         if (state == TierState::On) {
             tone = Tone::Accent;
             dot = true;
-        } else if (state == TierState::Lost) {
+        } else if (state == TierState::Lost || state == TierState::Partial) {
             tone = Tone::Warn;
             dot = true;
         }

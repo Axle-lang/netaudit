@@ -409,6 +409,7 @@ fn sweepDns(ss : Shared<Session>, nowMs : i64) : bool {
         ReadingState::On => TierState::On,
         ReadingState::Lost => TierState::Lost,
         ReadingState::Off => TierState::Off,
+        ReadingState::Partial => TierState::Partial,
     };
 
     return learned;
@@ -641,6 +642,7 @@ fn refresh(ss : Shared<Session>, nowMs : i64, trace : dyn TraceReader) : void {
         ReadingState::On => TierState::On,
         ReadingState::Lost => TierState::Lost,
         ReadingState::Off => TierState::Off,
+        ReadingState::Partial => TierState::Partial,
     };
 }
 
