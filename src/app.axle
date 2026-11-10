@@ -17,10 +17,12 @@
 
 use smalt::{Scratch, Mem};
 use zaffre::{Model, DataState};
+
 use crate::model::view::{Sort, SORT_COUNT, sortAt, Lens};
 
 /** Bytes of the filter the model's matcher reads. */
 const FILTER_CAP : i32 = 64;
+
 /** Bytes of the formatting scratch — one figure at a time. */
 const SCRATCH_CAP : i64 = 512;
 
@@ -68,45 +70,57 @@ enum Say : i32 {
 /** The state of the window, whole. */
 class App {
     /** The filter field's text. */
-    pub(crate) query : Shared<Model<string>> = new shared Model<string>("");
+    pub(crate) query : Shared<Model<string>> = share new Model<string>("");
+
     /** The ranking, as a place in the `S` key's cycle. */
-    pub(crate) ranking : Shared<Model<i32>> = new shared Model<i32>(0);
+    pub(crate) ranking : Shared<Model<i32>> = share new Model<i32>(0);
+
     /** Whether traffic that never leaves the building is shown. */
-    pub(crate) showLocal : Shared<Model<bool>> = new shared Model<bool>(false);
+    pub(crate) showLocal : Shared<Model<bool>> = share new Model<bool>(false);
+
     /** Whether listening sockets and UDP handles are shown. */
-    pub(crate) showBound : Shared<Model<bool>> = new shared Model<bool>(false);
+    pub(crate) showBound : Shared<Model<bool>> = share new Model<bool>(false);
+
     /** How many rows each of those two is hiding. */
-    pub(crate) localCount : Shared<Model<i32>> = new shared Model<i32>(0);
-    pub(crate) boundCount : Shared<Model<i32>> = new shared Model<i32>(0);
+    pub(crate) localCount : Shared<Model<i32>> = share new Model<i32>(0);
+    pub(crate) boundCount : Shared<Model<i32>> = share new Model<i32>(0);
+
     /** The line the status bar shows. */
-    pub(crate) status : Shared<Model<string>> = new shared Model<string>("");
+    pub(crate) status : Shared<Model<string>> = share new Model<string>("");
+
     /** What the reader has done to the grid: the pick, the scroll, the pointer over it. */
-    pub(crate) grid : Shared<DataState> = new shared DataState();
+    pub(crate) grid : Shared<DataState> = share new DataState();
+
     /** Whether the dark theme is on. */
-    pub(crate) dark : Shared<Model<bool>> = new shared Model<bool>(true);
+    pub(crate) dark : Shared<Model<bool>> = share new Model<bool>(true);
+
     /** Goes up once per reading and whenever a program is folded, so the grid knows its rows are stale. */
     pub(crate) rev : i64 = 0;
+
     /** Goes up on every refresh, for the pieces that are rebuilt from the model. */
-    pub(crate) stamp : Shared<Model<i64>> = new shared Model<i64>(0);
+    pub(crate) stamp : Shared<Model<i64>> = share new Model<i64>(0);
 
     /** The filter's bytes, as the model's matcher reads them. */
-    pub(crate) filter : i64 = Mem::take(FILTER_CAP as i64);
+    pub(crate) filter    : i64 = Mem::take(FILTER_CAP as i64);
     pub(crate) filterLen : i32 = 0;
 
-    pub(crate) quitting : bool = false;
+    pub(crate) quitting   : bool = false;
     pub(crate) refreshDue : bool = false;
-    pub(crate) paused : bool = false;
+    pub(crate) paused     : bool = false;
+
     /** The keyboard reference was asked for; the root opens it at its next tick. */
     pub(crate) helpAsked : bool = false;
+
     /** A snapshot was asked for; the loop writes it after the next frame. */
     pub(crate) snapDue : bool = false;
+
     /** The time of the loop's last turn, in milliseconds since it began. */
     pub(crate) nowMs : i64 = 0;
-    freezeUntilMs : i64 = 0;
+    freezeUntilMs    : i64 = 0;
 
     pub(crate) scratch : Scratch = new Scratch(SCRATCH_CAP);
-    pub(crate) say : Say = Say::None;
-    sayLeft : i32 = 0;
+    pub(crate) say     : Say = Say::None;
+    sayLeft            : i32 = 0;
 
     /** Whether reordering is currently suspended. */
     pub(crate) fn frozen(self) : bool {
@@ -162,8 +176,8 @@ class App {
      * moved.
      */
     pub(crate) fn signature(self) : i64 {
-        return self.rev + self.query.changes() + self.ranking.changes()
-            + self.showLocal.changes() + self.showBound.changes();
+        return self.rev + self.query.changes() + self.ranking.changes() + self.showLocal.changes()
+            + self.showBound.changes();
     }
 
     /** Move to the next ranking, wrapping. */
@@ -247,16 +261,12 @@ fn sayText(say : Say, showLocal : bool, showBound : bool) : string {
     return match say {
         Say::None => "",
         Say::Opened => "Opened the folder holding that program.",
-        Say::NoPath =>
-            "Windows gave no path for that program, or Explorer refused it.",
+        Say::NoPath => "Windows gave no path for that program, or Explorer refused it.",
         Say::Paused => "Paused. The journal is frozen until Space resumes it.",
         Say::Resumed => "Live again.",
         Say::Cleared => "History cleared back to what is live now.",
         Say::Snapped => "Window written to netaudit.bmp, in the folder it was started from.",
         Say::NoSnap => "Could not write netaudit.bmp; the folder may be read-only.",
-        // The two toggles say which way they went, so each carries both
-        // sentences: a message that only said "local traffic" would leave a
-        // reader to check the row count to find out what just happened.
         Say::Local => match showLocal {
             true => "Showing traffic that stays on this machine and this network.",
             false => "Hiding traffic that stays on this machine and this network.",
@@ -266,6 +276,9 @@ fn sayText(say : Say, showLocal : bool, showBound : bool) : string {
             false => "Hiding listening sockets and UDP handles.",
         },
     };
+    // The two toggles say which way they went, so each carries both
+    // sentences: a message that only said "local traffic" would leave a
+    // reader to check the row count to find out what just happened.
 }
 
 /** The name of a ranking as a title, as the ranking menu lists it. */

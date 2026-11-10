@@ -15,26 +15,27 @@
 // about it* — so a reader skimming for addresses reads only the upper lines,
 // and one auditing attribution reads only the lower ones.
 
+use gesso::Proto;
 use zaffre::{
-    DataSource, DataState, DataColumn, Widget, Label, LabelProps, Column, Row, FlexProps, Avatar, Tag, TagProps,
-    Badge, BadgeProps, BadgeSize, ScoreMeter, Dot, Tone, TextRole, Align, Length, Justify, BadgeLook, StatLook,
-    ControlSize, Elevation,
+    DataSource, DataState, DataColumn, Widget, Label, LabelProps, Column, Row, FlexProps, Avatar,
+    Tag, TagProps, Badge, BadgeProps, BadgeSize, ScoreMeter, Dot, Tone, TextRole, Align, Length,
+    Justify, BadgeLook, StatLook, ControlSize, Elevation
 };
+
 use crate::fmt;
-use crate::ui::text;
-use crate::ui::actions;
 use crate::app::App;
-use crate::session::Session;
-use crate::model::world::World;
 use crate::model::view;
-use crate::model::view::{Rows, RowKind};
+use crate::model::addr::{reachWord, Reach};
 use crate::model::endpoints::{Endpoints, SocketKind, kindBadge};
 use crate::model::groups::Groups;
 use crate::model::hosts::{Hosts, Look, NameSource};
 use crate::model::rhythm::{hasRhythm, regularityWord};
-use crate::model::addr::{reachWord, Reach};
-use gesso::Proto;
+use crate::model::view::{Rows, RowKind};
+use crate::model::world::World;
+use crate::session::Session;
 use crate::sys::conn::stateName;
+use crate::ui::actions;
+use crate::ui::text;
 
 /** How steady a rhythm has to be to be called out. */
 const STEADY : i32 = 750;
@@ -74,7 +75,7 @@ fn beside(gap : f64, own kids : dyn Widget[]) : Row {
 
 /** The tree over the model's flat rows. */
 pub class Journal : DataSource {
-    ss : Shared<Session>;
+    ss   : Shared<Session>;
     seen : i64 = -1;
     rank : i64 = -1;
 
@@ -176,7 +177,7 @@ pub class Journal : DataSource {
     // ─── A program ───────────────────────────────────────────────
 
     /** A program: its monogram and name, how many processes, its worst score, its endpoints and what is live. */
-    pub(file) fn groupCell(self, gi : i32, col : i32) : dyn Widget {
+    pub(file) fn groupCell(mut self, gi : i32, col : i32) : dyn Widget {
         let w : World = self.ss.w;
         let g : Groups = w.groups;
         if (col == 0) {
@@ -200,7 +201,11 @@ pub class Journal : DataSource {
             let row : Row = strip(8.0);
             row.add(line(text::counted(shown, "endpoint", "endpoints"), TextRole::Dim));
             if (g.flagged[gi as i64] > 0) {
-                row.add(new Badge(BadgeProps { text: text::count(g.flagged[gi as i64]) + " flagged", tone: Tone::Danger, size: BadgeSize::Sm }));
+                row.add(new Badge(BadgeProps {
+                    text: text::count(g.flagged[gi as i64]) + " flagged",
+                    tone: Tone::Danger,
+                    size: BadgeSize::Sm,
+                }));
             }
 
             return row;
@@ -229,7 +234,7 @@ pub class Journal : DataSource {
     }
 
     /** How many of a program's endpoints are open now, and what they move. */
-    pub(file) fn liveCell(self, gi : i32) : dyn Widget {
+    pub(file) fn liveCell(mut self, gi : i32) : dyn Widget {
         let g : Groups = self.ss.w.groups;
         let row : Row = new Row(FlexProps { gap: 10.0, align: Align::Center });
         if (g.rate(gi) > 0) {
@@ -240,7 +245,11 @@ pub class Journal : DataSource {
 
         let live : i32 = g.live[gi as i64];
         if (live > 0) {
-            row.add(new Badge(BadgeProps { text: text::count(live) + " live", tone: Tone::Ok, dot: true }));
+            row.add(new Badge(BadgeProps {
+                text: text::count(live) + " live",
+                tone: Tone::Ok,
+                dot: true,
+            }));
         } else {
             row.add(line("idle", TextRole::Faint));
         }
@@ -250,7 +259,7 @@ pub class Journal : DataSource {
 
     // ─── An endpoint ─────────────────────────────────────────────
 
-    pub(file) fn endpointCell(self, s : i32, col : i32) : dyn Widget {
+    pub(file) fn endpointCell(mut self, s : i32, col : i32) : dyn Widget {
         if (col == 0) {
             return self.identity(s);
         }
@@ -289,7 +298,7 @@ pub class Journal : DataSource {
     }
 
     /** Line one: the protocol and the address. Line two: what the socket is doing, with a light for it. */
-    pub(file) fn identity(self, s : i32) : dyn Widget {
+    pub(file) fn identity(mut self, s : i32) : dyn Widget {
         let e : Endpoints = self.ss.w.eps;
         let live : bool = e.liveNow[s as i64] > 0;
         let mut role : TextRole = TextRole::Body;
@@ -320,7 +329,11 @@ pub class Journal : DataSource {
         let state : dyn Widget[] = [new Dot(light, 6.0), line(word, TextRole::Caption)];
         let lines : Column = twoLines(line(addr, role), beside(6.0, state), Align::Start);
         let kids : dyn Widget[] = [
-            new Tag(TagProps { text: kindBadge(e.kind[s as i64], e.proto[s as i64]), tone: self.protoTone(s), size: BadgeSize::Sm }),
+            new Tag(TagProps {
+                text: kindBadge(e.kind[s as i64], e.proto[s as i64]),
+                tone: self.protoTone(s),
+                size: BadgeSize::Sm,
+            }),
             lines,
         ];
         return beside(10.0, kids);
@@ -360,7 +373,11 @@ pub class Journal : DataSource {
             }
         }
 
-        return twoLines(line(name, role), line(text::spanText(w.network(h)), TextRole::Caption), Align::Start);
+        return twoLines(
+            line(name, role),
+            line(text::spanText(w.network(h)), TextRole::Caption),
+            Align::Start
+        );
     }
 
     /** The country, and the trust meter. */
@@ -384,7 +401,7 @@ pub class Journal : DataSource {
      * program exists to surface. A row visited once says so plainly rather
      * than claiming a period it cannot have measured.
      */
-    pub(file) fn rhythm(self, s : i32) : dyn Widget {
+    pub(file) fn rhythm(mut self, s : i32) : dyn Widget {
         let e : Endpoints = self.ss.w.eps;
         let hits : i32 = e.hits[s as i64];
         let mut first : Label = line("seen once", TextRole::Faint);
@@ -406,7 +423,11 @@ pub class Journal : DataSource {
             second.add(line("every " + text::scratchText(self.ss.a.scratch), TextRole::Caption));
             let regular : i32 = e.rhythm.regular[s as i64];
             if (regular >= STEADY) {
-                second.add(new Badge(BadgeProps { text: regularityWord(regular), tone: Tone::Accent, size: BadgeSize::Sm }));
+                second.add(new Badge(BadgeProps {
+                    text: regularityWord(regular),
+                    tone: Tone::Accent,
+                    size: BadgeSize::Sm,
+                }));
             } else {
                 second.add(line(regularityWord(regular), TextRole::Caption));
             }
@@ -431,7 +452,7 @@ pub class Journal : DataSource {
      * "is this current", and printing a zero would claim a measurement never
      * taken.
      */
-    pub(file) fn traffic(self, s : i32) : dyn Widget {
+    pub(file) fn traffic(mut self, s : i32) : dyn Widget {
         let e : Endpoints = self.ss.w.eps;
         let mut first : Label = line("open now", TextRole::Dim);
         if (e.bytesIn[s as i64] + e.bytesOut[s as i64] > 0) {
@@ -451,7 +472,11 @@ pub class Journal : DataSource {
 
         self.ss.a.scratch.reset();
         self.ss.a.scratch.elapsed(e.lastMs[s as i64] - e.firstMs[s as i64] + 1);
-        return twoLines(first, line("known for " + text::scratchText(self.ss.a.scratch), TextRole::Caption), Align::End);
+        return twoLines(
+            first,
+            line("known for " + text::scratchText(self.ss.a.scratch), TextRole::Caption),
+            Align::End
+        );
     }
 }
 

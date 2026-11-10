@@ -8,25 +8,28 @@
 // cannot be interrogated is a reading that will be either believed blindly
 // or ignored entirely, and both are worse than no reading.
 
-use zaffre::{
-    Widget, Column, Row, FlexProps, Label, LabelProps, Eyebrow, Tag, TagProps, ScoreMeter, ReasonList, ReasonProps,
-    Reason, Scroll, ScrollProps, Button, ButtonProps, ButtonKind, IconKind, Spacer, Divider, DescriptionList, Tone,
-    TextRole, BadgeSize, Align, Length, Insets, Justify, BadgeLook, StatLook, ControlSize, Elevation,
-};
 use std::text::StringBuilder;
+
+use zaffre::{
+    Widget, Column, Row, FlexProps, Label, LabelProps, Eyebrow, Tag, TagProps, ScoreMeter,
+    ReasonList, ReasonProps, Reason, Scroll, ScrollProps, Button, ButtonProps, ButtonKind, IconKind,
+    Spacer, Divider, DescriptionList, Tone, TextRole, BadgeSize, Align, Length, Insets, Justify,
+    BadgeLook, StatLook, ControlSize, Elevation
+};
+
 use crate::fmt;
-use crate::ui::text;
-use crate::ui::actions;
-use crate::ui::live::Tall;
-use crate::session::Session;
-use crate::model::world::World;
+use crate::model::addr::{reachWord, Reach};
 use crate::model::endpoints::{Endpoints, SocketKind, kindBadge};
 use crate::model::groups::Groups;
 use crate::model::hosts::{Hosts, nameSource, lookNote, FLAG_PROXY, FLAG_HOSTING, FLAG_MOBILE};
 use crate::model::rhythm::{hasRhythm, regularityWord};
-use crate::model::addr::{reachWord, Reach};
 use crate::model::score::{Signal, reasonAt, reasonBit, reasonWeight, reasonText, REASON_COUNT};
+use crate::model::world::World;
+use crate::session::Session;
 use crate::sys::conn::stateName;
+use crate::ui::actions;
+use crate::ui::text;
+use crate::ui::live::Tall;
 
 /** The width the scrollbar takes at the right of the sheet's content. */
 const BAR_ROOM : f64 = 16.0;
@@ -75,7 +78,12 @@ fn fact(into : Column, term : string, value : string) : void {
 fn section(into : Column, name : string) : Column {
     into.add(new Divider());
     into.add(new Eyebrow(name, Tone::Neutral));
-    return new Column(FlexProps { gap: 8.0, align: Align::Stretch, width: Length::Fill, capacity: 16 });
+    return new Column(FlexProps {
+        gap: 8.0,
+        align: Align::Stretch,
+        width: Length::Fill,
+        capacity: 16,
+    });
 }
 
 /** The endpoint the grid has picked, said in full. */
@@ -129,7 +137,11 @@ fn summary(ss : Shared<Session>, s : i32) : dyn Widget {
     let named : bool = h >= 0 && w.hostName(h).some();
 
     let line : Row = new Row(FlexProps { gap: 10.0, align: Align::Center });
-    line.add(new Tag(TagProps { text: kindBadge(e.kind[s as i64], e.proto[s as i64]), tone: Tone::Info, size: BadgeSize::Sm }));
+    line.add(new Tag(TagProps {
+        text: kindBadge(e.kind[s as i64], e.proto[s as i64]),
+        tone: Tone::Info,
+        size: BadgeSize::Sm,
+    }));
     if (named) {
         line.add(new Label(addrText(ss, s), TextRole::Dim));
     }
@@ -146,8 +158,16 @@ fn summary(ss : Shared<Session>, s : i32) : dyn Widget {
         verdict = text::scratchText(ss.a.scratch);
     }
 
-    let right : dyn Widget[] = [new Label("trust", TextRole::Caption), new Label(verdict, TextRole::H3), new ScoreMeter(score)];
-    let kids : dyn Widget[] = [line, new Spacer(1.0), new Column(FlexProps { gap: 4.0, align: Align::End }, right)];
+    let right : dyn Widget[] = [
+        new Label("trust", TextRole::Caption),
+        new Label(verdict, TextRole::H3),
+        new ScoreMeter(score),
+    ];
+    let kids : dyn Widget[] = [
+        line,
+        new Spacer(1.0),
+        new Column(FlexProps { gap: 4.0, align: Align::End }, right),
+    ];
     return new Row(FlexProps { gap: 12.0, align: Align::Center, width: Length::Fill }, kids);
 }
 
@@ -289,7 +309,10 @@ fn trust(ss : Shared<Session>, s : i32) : dyn Widget {
     if (score < 0) {
         let kids : dyn Widget[] = [
             new Eyebrow("Trust", Tone::Neutral),
-            new Label("Nothing is known about this address yet. A score now would be a number with no evidence behind it.", TextRole::Dim),
+            new Label(
+                "Nothing is known about this address yet. A score now would be a number with no evidence behind it.",
+                TextRole::Dim
+            ),
         ];
         return new Column(FlexProps { gap: 8.0, align: Align::Stretch }, kids);
     }
@@ -304,12 +327,15 @@ fn trust(ss : Shared<Session>, s : i32) : dyn Widget {
     if (n == 0) {
         let kids : dyn Widget[] = [
             new Eyebrow("Trust", Tone::Neutral),
-            new Label("No signal applies. The burden is on the evidence, so it scores five.", TextRole::Dim),
+            new Label(
+                "No signal applies. The burden is on the evidence, so it scores five.",
+                TextRole::Dim
+            ),
         ];
         return new Column(FlexProps { gap: 8.0, align: Align::Stretch }, kids);
     }
 
-    let mut signals : Reason[] = malloc<Reason>(n as i64);
+    let mut signals : Reason[] = new Reason[n as i64];
     let mut at : i32 = 0;
     for (i of 0..REASON_COUNT) {
         let r : Signal = reasonAt(i);
@@ -351,7 +377,11 @@ fn footer(ss : Shared<Session>) : dyn Widget {
     let hand : Shared<Session> = ss;
     let kids : dyn Widget[] = [
         new Button(
-            ButtonProps { label: "Open the program's folder", kind: ButtonKind::Outline, icon: IconKind::Folder },
+            ButtonProps {
+                label: "Open the program's folder",
+                kind: ButtonKind::Outline,
+                icon: IconKind::Folder,
+            },
             () => actions::openProgram(hand)
         ),
     ];
@@ -368,7 +398,12 @@ fn keys(into : Column, name : string, terms : string[], details : string[]) : vo
 
 /** Everything the window answers to. The pointer does the rest. */
 pub fn help() : dyn Widget {
-    let col : Column = new Column(FlexProps { gap: 16.0, align: Align::Stretch, width: Length::Fill, capacity: 12 });
+    let col : Column = new Column(FlexProps {
+        gap: 16.0,
+        align: Align::Stretch,
+        width: Length::Fill,
+        capacity: 12,
+    });
 
     let moving : string[] = ["Up / Down", "PgUp / PgDn", "Right / Left", "8", "Enter"];
     let movingDo : string[] = [

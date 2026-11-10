@@ -2,8 +2,10 @@
 // bytes in a cursor; a widget takes a `string`. These are the two doors
 // between them, and nothing else in the window reads either.
 
-use smalt::{Mem, Scratch};
 use std::text::StringBuilder;
+
+use smalt::{Mem, Scratch};
+
 use crate::model::pool::Bytes;
 
 /** The text of a span of interned bytes; empty for an absent span. */

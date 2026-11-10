@@ -18,15 +18,18 @@
 // `stringEnd` honours the backslash escape, and every scan that crosses a
 // value goes through it.
 
-
 /** ASCII `"`. */
 const J_QUOTE : i32 = 34;
+
 /** ASCII `\`. */
 const J_BACKSLASH : i32 = 92;
+
 /** ASCII `{`. */
 const J_OPEN_BRACE : i32 = 123;
+
 /** ASCII `}`. */
 const J_CLOSE_BRACE : i32 = 125;
+
 /** ASCII `:`. */
 const J_COLON : i32 = 58;
 
@@ -140,8 +143,9 @@ fn field(s : string, from : i64, to : i64, key : string) : i64 {
                 v = v + 1;
             }
 
-            if (depth == 1 && after < to && matches(s, i + 1, to, key)
-                && s.byteAt(after) == J_QUOTE && v < to && s.byteAt(v) == J_COLON) {
+            if (depth == 1 && after < to && matches(s, i + 1, to, key) && s.byteAt(after) == J_QUOTE
+                && v < to
+                && s.byteAt(v) == J_COLON) {
                 v = v + 1;
                 while (v < to && s.byteAt(v) == 32) {
                     v = v + 1;

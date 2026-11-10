@@ -4,10 +4,11 @@
 // menu entry all call the same thing and none of them has a copy of it.
 
 use gesso::{Desk, SysError};
+
 use crate::app::{App, Say};
-use crate::session::Session;
 use crate::model::groups::Groups;
 use crate::model::view::{Rows, RowKind};
+use crate::session::Session;
 
 /** The key of row `row` of the flat list: the program's or the endpoint's own, which is what a pick follows. */
 pub fn rowKey(ss : Shared<Session>, row : i32) : i64 {

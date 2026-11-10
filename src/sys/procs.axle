@@ -22,12 +22,15 @@
 
 use gesso::{Procs as GessoProcs, ProcInfo, SysError, Gone, Absent};
 use smalt::Mem;
+
 use crate::model::pool;
 
 /** Slots the table can hold. */
 const MAX_PROCS : i32 = 4096;
+
 /** Longest process name kept, in bytes. */
 const NAME_MAX : i32 = 64;
+
 /** Longest image path kept, in bytes. */
 const PATH_MAX : i32 = 320;
 
@@ -48,25 +51,26 @@ enum PathState : i32 {
  * ones that turned out to matter.
  */
 class Procs {
-    pid : i64[] = malloc<i64>(MAX_PROCS as i64),
-    created : i64[] = malloc<i64>(MAX_PROCS as i64),
-    pub(crate) nameOff : i64[] = malloc<i64>(MAX_PROCS as i64),
-    pub(crate) nameLen : i32[] = malloc<i32>(MAX_PROCS as i64),
-    pub(crate) pathOff : i64[] = malloc<i64>(MAX_PROCS as i64),
-    pub(crate) pathLen : i32[] = malloc<i32>(MAX_PROCS as i64),
+    pid                : i64[] = new i64[MAX_PROCS as i64];
+    created            : i64[] = new i64[MAX_PROCS as i64];
+    pub(crate) nameOff : i64[] = new i64[MAX_PROCS as i64];
+    pub(crate) nameLen : i32[] = new i32[MAX_PROCS as i64];
+    pub(crate) pathOff : i64[] = new i64[MAX_PROCS as i64];
+    pub(crate) pathLen : i32[] = new i32[MAX_PROCS as i64];
+
     /**
      * The same path in UTF-16, unabridged. The drawable span above folds what
      * the glyph tables cannot draw and stops at `PATH_MAX`; handing *that*
      * back to Explorer would open the wrong folder for any path with an
      * accent in it, so the shell is given this one.
      */
-    pub(crate) wideOff : i64[] = malloc<i64>(MAX_PROCS as i64),
-    pub(crate) wideChars : i32[] = malloc<i32>(MAX_PROCS as i64),
-    pathState : PathState[] = malloc<PathState>(MAX_PROCS as i64),
-    seen : i32[] = malloc<i32>(MAX_PROCS as i64),
+    pub(crate) wideOff   : i64[] = new i64[MAX_PROCS as i64];
+    pub(crate) wideChars : i32[] = new i32[MAX_PROCS as i64];
+    pathState            : PathState[] = new PathState[MAX_PROCS as i64];
+    seen                 : i32[] = new i32[MAX_PROCS as i64];
 
-    count : i32 = 0,
-    gen : i32 = 0,
+    count : i32 = 0;
+    gen   : i32 = 0;
 
     /** The slot holding `pid`, or `-1`. */
     pub(crate) fn find(self, pid : i64) : i32 {
@@ -253,8 +257,7 @@ class Procs {
     }
 
     /** Nothing raw is held any more; the column arrays go with the object. */
-    pub(crate) fn dispose(mut self) : void {
-    }
+    pub(crate) fn dispose(mut self) : void {}
 }
 
 /** Why a program row shows no path, in the words the tooltip uses. */

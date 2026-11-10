@@ -46,17 +46,17 @@ enum TierState : i32 {
 
 /** The state of the three readings, and why each is in it. */
 class Tiers {
-    pub(crate) poll : TierState = TierState::On,
-    pub(crate) dns : TierState = TierState::Off,
-    pub(crate) etw : TierState = TierState::Off,
+    pub(crate) poll : TierState = TierState::On;
+    pub(crate) dns  : TierState = TierState::Off;
+    pub(crate) etw  : TierState = TierState::Off;
 
     // What the library said, when it had a sentence: gesso names the
     // privilege a trace needs, or why a platform keeps no readable cache.
     // The static notes below stay as the fallback for the polled tables,
     // which gesso reports as a plain success or failure.
-    pub(crate) pollNoteText : string = "",
-    pub(crate) dnsNoteText : string = "",
-    pub(crate) etwNoteText : string = "",
+    pub(crate) pollNoteText : string = "";
+    pub(crate) dnsNoteText  : string = "";
+    pub(crate) etwNoteText  : string = "";
 
     /** Whether byte counts are being measured rather than left blank. */
     pub(crate) fn bytesMeasured(self) : bool {
@@ -124,35 +124,26 @@ fn pollNote(state : TierState) : string {
         TierState::On => "Reading the per-process TCP and UDP tables once a second.",
         TierState::Lost => "The connection tables stopped answering; the journal waits for them.",
         TierState::Off => "The system refused the connection tables, so nothing can be read.",
-        TierState::Partial =>
-            "Reading the connection tables, but some sockets have no visible owner; an elevated session shows them.",
+        TierState::Partial => "Reading the connection tables, but some sockets have no visible owner; an elevated session shows them.",
     };
 }
 
 /** Why the resolver cache is, or is not, being read. */
 fn dnsNote(state : TierState) : string {
     return match state {
-        TierState::On =>
-            "Reading this machine's DNS cache, so addresses carry the name that was resolved.",
-        TierState::Lost =>
-            "The DNS cache is empty or not answering; it is asked again every few seconds.",
-        TierState::Off =>
-            "The DNS cache is not readable here; addresses keep their reverse-DNS names.",
-        TierState::Partial =>
-            "Reading part of the resolver's cache; the names it cannot show keep their reverse-DNS names.",
+        TierState::On => "Reading this machine's DNS cache, so addresses carry the name that was resolved.",
+        TierState::Lost => "The DNS cache is empty or not answering; it is asked again every few seconds.",
+        TierState::Off => "The DNS cache is not readable here; addresses keep their reverse-DNS names.",
+        TierState::Partial => "Reading part of the resolver's cache; the names it cannot show keep their reverse-DNS names.",
     };
 }
 
 /** Why the kernel trace is, or is not, running. */
 fn etwNote(state : TierState) : string {
     return match state {
-        TierState::On =>
-            "Tracing the kernel network provider: bytes per process, short connections, and resolved names.",
-        TierState::Lost =>
-            "The kernel trace stopped. Byte counts are frozen at their last reading.",
-        TierState::Off =>
-            "No kernel trace, so no byte counts. The traffic column is blank because nothing measures it, not because nothing was sent.",
-        TierState::Partial =>
-            "Tracing the kernel network provider, but some events are out of sight; the counts are partial.",
+        TierState::On => "Tracing the kernel network provider: bytes per process, short connections, and resolved names.",
+        TierState::Lost => "The kernel trace stopped. Byte counts are frozen at their last reading.",
+        TierState::Off => "No kernel trace, so no byte counts. The traffic column is blank because nothing measures it, not because nothing was sent.",
+        TierState::Partial => "Tracing the kernel network provider, but some events are out of sight; the counts are partial.",
     };
 }

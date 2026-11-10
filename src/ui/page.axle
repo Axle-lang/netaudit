@@ -8,19 +8,20 @@
 // the `DataState` the session shares.
 
 use zaffre::{
-    Widget, Column, Row, FlexProps, Label, Spacer, Dot, SearchInput, SearchProps, Select, SelectProps, ToggleChip,
-    DataGrid, DataGridProps, StatusBar, StatusProps, KeyHint, Tone, TextRole, Align, Length, Insets, Justify,
-    BadgeLook, StatLook, ControlSize, Elevation, BadgeSize,
+    Widget, Column, Row, FlexProps, Label, Spacer, Dot, SearchInput, SearchProps, Select,
+    SelectProps, ToggleChip, DataGrid, DataGridProps, StatusBar, StatusProps, KeyHint, Tone,
+    TextRole, Align, Length, Insets, Justify, BadgeLook, StatLook, ControlSize, Elevation, BadgeSize
 };
-use crate::ui::text;
-use crate::ui::live::Rebuilt;
-use crate::ui::figures::{FigureMaker, PillMaker, ShownMaker};
-use crate::ui::journal::{Journal, columns};
+
 use crate::app::{App, Say, sayText, sortTitle};
-use crate::session::Session;
 use crate::enrich::queue::{Queue, troubleNote};
 use crate::model::pulse::Pulse;
 use crate::model::view::sortAt;
+use crate::session::Session;
+use crate::ui::text;
+use crate::ui::figures::{FigureMaker, PillMaker, ShownMaker};
+use crate::ui::journal::{Journal, columns};
+use crate::ui::live::Rebuilt;
 
 /** What the tree says when nothing is showing: the filter, or the two reveals, are the usual reason. */
 const EMPTY : string = "Nothing to show. Esc clears the filter; L also shows local traffic, B listening and UDP sockets.";
@@ -33,7 +34,7 @@ pub fn assemble(ss : Shared<Session>) : dyn Widget {
         new Rebuilt(new FigureMaker(ss), a.stamp),
         toolbar(ss),
         new DataGrid(DataGridProps { grow: 1.0, empty: EMPTY }, columns(), new Journal(ss), a.grid),
-        new StatusBar(StatusProps { }, a.status, hints()),
+        new StatusBar(StatusProps {}, a.status, hints()),
     ];
     return new Column(
         FlexProps {
@@ -79,11 +80,19 @@ fn header(ss : Shared<Session>) : dyn Widget {
 fn toolbar(ss : Shared<Session>) : dyn Widget {
     let a : App = ss.a;
     let rankings : string[] = [
-        sortTitle(sortAt(0)), sortTitle(sortAt(1)), sortTitle(sortAt(2)), sortTitle(sortAt(3)),
-        sortTitle(sortAt(4)), sortTitle(sortAt(5)), sortTitle(sortAt(6)),
+        sortTitle(sortAt(0)),
+        sortTitle(sortAt(1)),
+        sortTitle(sortAt(2)),
+        sortTitle(sortAt(3)),
+        sortTitle(sortAt(4)),
+        sortTitle(sortAt(5)),
+        sortTitle(sortAt(6)),
     ];
     let kids : dyn Widget[] = [
-        new SearchInput(SearchProps { placeholder: "Filter by program, host, network or address", grow: 1.0 }, a.query),
+        new SearchInput(
+            SearchProps { placeholder: "Filter by program, host, network or address", grow: 1.0 },
+            a.query
+        ),
         new Select(SelectProps { prefix: "Sort", width: Length::Px(210.0) }, rankings, a.ranking),
         new ToggleChip("Local traffic", a.localCount, a.showLocal),
         new ToggleChip("Listening / UDP", a.boundCount, a.showBound),
@@ -119,12 +128,14 @@ pub fn refreshStatus(ss : Shared<Session>) : void {
     }
 
     if (beat.dropped > 0) {
-        a.status.set("Journal full: " + text::count(beat.dropped) + " conversations not recorded. C clears it.");
+        a.status.set("Journal full: " + text::count(beat.dropped)
+            + " conversations not recorded. C clears it.");
         return;
     }
 
     if (beat.pending > 0) {
-        let mut line : string = text::counted(beat.pending, "address", "addresses") + " still to look up";
+        let mut line : string = text::counted(beat.pending, "address", "addresses")
+            + " still to look up";
         if (q.resolved > 0) {
             line = line + " · " + text::count(q.resolved) + " answered";
         }

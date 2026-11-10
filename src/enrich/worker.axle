@@ -20,8 +20,9 @@
 // service that is angry are the same decision here, and neither is worth a
 // second control-flow path.
 
-use std::net::HttpClient;
 use std::lang::IOException;
+use std::net::HttpClient;
+
 use gesso::{Addr, AsOrigin, Net, SysError};
 
 /**

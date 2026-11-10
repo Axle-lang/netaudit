@@ -18,6 +18,7 @@
 
 use gesso::Addr;
 use smalt::Mem;
+
 use crate::model::key::{hashStep, seed};
 
 /** How far an address goes. */
@@ -33,8 +34,6 @@ enum Reach : i32 {
     /** Multicast or broadcast — a group, not a host. */
     Multicast = 4,
 }
-
-
 
 /**
  * Classify the sixteen address bytes at `src`, of which `family` says how

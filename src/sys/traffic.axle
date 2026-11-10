@@ -61,8 +61,7 @@ class TraceOff : TraceReader {
         self.why = why;
     }
 
-    pub fn poll(mut self) : void {
-    }
+    pub fn poll(mut self) : void {}
 
     pub fn running(self) : bool {
         return false;
@@ -88,21 +87,20 @@ class TraceOff : TraceReader {
         return self.why;
     }
 
-    pub fn dispose(mut self) : void {
-    }
+    pub fn dispose(mut self) : void {}
 }
 
 /** A running trace, and what each process has moved since the last poll. */
 class TraceOn : TraceReader {
-    trace : NetTrace;
-    now : ReadingStatus;
-    pids : i64[] = malloc<i64>(TRAFFIC_MAX_PIDS as i64),
-    sent : i64[] = malloc<i64>(TRAFFIC_MAX_PIDS as i64),
-    received : i64[] = malloc<i64>(TRAFFIC_MAX_PIDS as i64),
-    totalSent : i64[] = malloc<i64>(TRAFFIC_MAX_PIDS as i64),
-    totalReceived : i64[] = malloc<i64>(TRAFFIC_MAX_PIDS as i64),
-    count : i32 = 0,
-    index : SlotIndex = new SlotIndex(TRAFFIC_MAX_PIDS * 2),
+    trace         : NetTrace;
+    now           : ReadingStatus;
+    pids          : i64[] = new i64[TRAFFIC_MAX_PIDS as i64];
+    sent          : i64[] = new i64[TRAFFIC_MAX_PIDS as i64];
+    received      : i64[] = new i64[TRAFFIC_MAX_PIDS as i64];
+    totalSent     : i64[] = new i64[TRAFFIC_MAX_PIDS as i64];
+    totalReceived : i64[] = new i64[TRAFFIC_MAX_PIDS as i64];
+    count         : i32 = 0;
+    index         : SlotIndex = new SlotIndex(TRAFFIC_MAX_PIDS * 2);
 
     constructor(own trace : NetTrace) {
         self.now = trace.status();

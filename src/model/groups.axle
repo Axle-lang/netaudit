@@ -20,16 +20,20 @@
 // endpoint that pointed past the hole.
 
 use smalt::SlotIndex;
+
 use crate::model::pool;
 use crate::model::key::{hashStep, seed};
 use crate::sys::procs::{Procs, PathState};
 
 /** Programs the table can hold. */
 const MAX_GROUPS : i32 = 512;
+
 /** Pids the per-tick sighting set can hold. */
 const MAX_PIDS : i32 = 4096;
+
 /** The identity salt of a group that stands for a user whose processes are out of sight. */
 const USER_SALT : i64 = 0x75736572;
+
 /** Longest label a user group keeps: "user 4294967295" and room to spare. */
 const USER_LABEL_MAX : i32 = 48;
 
@@ -44,43 +48,44 @@ const USER_LABEL_MAX : i32 = 48;
  * few thousand slots.
  */
 class Groups {
-    pub(crate) key : i64[] = malloc<i64>(MAX_GROUPS as i64),
-    pub(crate) pathOff : i64[] = malloc<i64>(MAX_GROUPS as i64),
-    pub(crate) pathLen : i32[] = malloc<i32>(MAX_GROUPS as i64),
-    pub(crate) nameOff : i64[] = malloc<i64>(MAX_GROUPS as i64),
-    pub(crate) nameLen : i32[] = malloc<i32>(MAX_GROUPS as i64),
-    pub(crate) wideOff : i64[] = malloc<i64>(MAX_GROUPS as i64),
-    pub(crate) wideChars : i32[] = malloc<i32>(MAX_GROUPS as i64),
-    hasPath : i32[] = malloc<i32>(MAX_GROUPS as i64),
-    /** The group stands for a user, not for a program: the system named the owner but not its process. */
-    users : i32[] = malloc<i32>(MAX_GROUPS as i64),
+    pub(crate) key       : i64[] = new i64[MAX_GROUPS as i64];
+    pub(crate) pathOff   : i64[] = new i64[MAX_GROUPS as i64];
+    pub(crate) pathLen   : i32[] = new i32[MAX_GROUPS as i64];
+    pub(crate) nameOff   : i64[] = new i64[MAX_GROUPS as i64];
+    pub(crate) nameLen   : i32[] = new i32[MAX_GROUPS as i64];
+    pub(crate) wideOff   : i64[] = new i64[MAX_GROUPS as i64];
+    pub(crate) wideChars : i32[] = new i32[MAX_GROUPS as i64];
+    hasPath              : i32[] = new i32[MAX_GROUPS as i64];
 
-    pub(crate) pids : i32[] = malloc<i32>(MAX_GROUPS as i64),
-    pub(crate) endpoints : i32[] = malloc<i32>(MAX_GROUPS as i64),
-    pub(crate) live : i32[] = malloc<i32>(MAX_GROUPS as i64),
-    pub(crate) flagged : i32[] = malloc<i32>(MAX_GROUPS as i64),
-    pub(crate) worst : i32[] = malloc<i32>(MAX_GROUPS as i64),
-    rateIn : i64[] = malloc<i64>(MAX_GROUPS as i64),
-    rateOut : i64[] = malloc<i64>(MAX_GROUPS as i64),
-    bytesIn : i64[] = malloc<i64>(MAX_GROUPS as i64),
-    bytesOut : i64[] = malloc<i64>(MAX_GROUPS as i64),
+    /** The group stands for a user, not for a program: the system named the owner but not its process. */
+    users : i32[] = new i32[MAX_GROUPS as i64];
+
+    pub(crate) pids      : i32[] = new i32[MAX_GROUPS as i64];
+    pub(crate) endpoints : i32[] = new i32[MAX_GROUPS as i64];
+    pub(crate) live      : i32[] = new i32[MAX_GROUPS as i64];
+    pub(crate) flagged   : i32[] = new i32[MAX_GROUPS as i64];
+    pub(crate) worst     : i32[] = new i32[MAX_GROUPS as i64];
+    rateIn               : i64[] = new i64[MAX_GROUPS as i64];
+    rateOut              : i64[] = new i64[MAX_GROUPS as i64];
+    bytesIn              : i64[] = new i64[MAX_GROUPS as i64];
+    bytesOut             : i64[] = new i64[MAX_GROUPS as i64];
 
     // What the kernel trace counted for this program, which is the one
     // per-process reading there is. Kept apart from the endpoint roll-ups:
     // the trace knows a program's bytes but not which of its sockets they
     // crossed, and the two must never be added as if they were the same
     // measurement.
-    pub(crate) traceIn : i64[] = malloc<i64>(MAX_GROUPS as i64),
-    pub(crate) traceOut : i64[] = malloc<i64>(MAX_GROUPS as i64),
-    traceRateIn : i64[] = malloc<i64>(MAX_GROUPS as i64),
-    traceRateOut : i64[] = malloc<i64>(MAX_GROUPS as i64),
-    traced : i32[] = malloc<i32>(MAX_GROUPS as i64),
-    pub(crate) lastMs : i64[] = malloc<i64>(MAX_GROUPS as i64),
-    expanded : i32[] = malloc<i32>(MAX_GROUPS as i64),
+    pub(crate) traceIn  : i64[] = new i64[MAX_GROUPS as i64];
+    pub(crate) traceOut : i64[] = new i64[MAX_GROUPS as i64];
+    traceRateIn         : i64[] = new i64[MAX_GROUPS as i64];
+    traceRateOut        : i64[] = new i64[MAX_GROUPS as i64];
+    traced              : i32[] = new i32[MAX_GROUPS as i64];
+    pub(crate) lastMs   : i64[] = new i64[MAX_GROUPS as i64];
+    expanded            : i32[] = new i32[MAX_GROUPS as i64];
 
-    pub(crate) count : i32 = 0,
-    index : SlotIndex = new SlotIndex(MAX_GROUPS * 2),
-    seenPids : SlotIndex = new SlotIndex(MAX_PIDS * 2),
+    pub(crate) count : i32 = 0;
+    index            : SlotIndex = new SlotIndex(MAX_GROUPS * 2);
+    seenPids         : SlotIndex = new SlotIndex(MAX_PIDS * 2);
 
     /**
      * Start a tick: forget which pids have been counted, and zero the

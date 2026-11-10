@@ -18,10 +18,10 @@
 // got. An endpoint no signal applies to scores five: the burden is on the
 // evidence, not on the address.
 
-use crate::model::endpoints::{Endpoints, SocketKind};
-use crate::model::hosts::{Hosts, NameSource, FLAG_PROXY, FLAG_HOSTING, Look, ASKED_ORIGIN};
 use crate::model::rhythm;
 use crate::model::addr::{Reach};
+use crate::model::endpoints::{Endpoints, SocketKind};
+use crate::model::hosts::{Hosts, NameSource, FLAG_PROXY, FLAG_HOSTING, Look, ASKED_ORIGIN};
 
 /**
  * A signal the score can report, in the order the detail card lists them.
@@ -130,6 +130,7 @@ fn reasonText(r : Signal) : string {
 
 /** A rhythm this steady was set by a timer, not by a person. */
 const BEACON_REGULARITY : i32 = 800;
+
 /** And it has to have happened this many times to be a rhythm at all. */
 const BEACON_VISITS : i32 = 4;
 
@@ -339,26 +340,46 @@ fn fromReasons(reasons : i32) : i32 {
  */
 fn isMajor(asn : i32) : bool {
     return match asn {
-        15169 => true,  // Google
-        396982 => true, // Google Cloud
-        13335 => true,  // Cloudflare
-        16509 => true,  // Amazon
-        14618 => true,  // Amazon
-        8075 => true,   // Microsoft
-        8068 => true,   // Microsoft
-        20940 => true,  // Akamai
-        16625 => true,  // Akamai
-        32787 => true,  // Akamai
-        54113 => true,  // Fastly
-        714 => true,    // Apple
-        6185 => true,   // Apple
-        32934 => true,  // Meta
-        13414 => true,  // X
-        36459 => true,  // GitHub
-        3215 => true,   // Orange
-        12322 => true,  // Free
-        5410 => true,   // Bouygues
-        15557 => true,  // SFR
+        15169 => true,
+        396982 => true,
+        13335 => true,
+        16509 => true,
+        14618 => true,
+        8075 => true,
+        8068 => true,
+        20940 => true,
+        16625 => true,
+        32787 => true,
+        54113 => true,
+        714 => true,
+        6185 => true,
+        32934 => true,
+        13414 => true,
+        36459 => true,
+        3215 => true,
+        12322 => true,
+        5410 => true,
+        15557 => true,
         _ => false,
     };
+    // Google
+    // Google Cloud
+    // Cloudflare
+    // Amazon
+    // Amazon
+    // Microsoft
+    // Microsoft
+    // Akamai
+    // Akamai
+    // Akamai
+    // Fastly
+    // Apple
+    // Apple
+    // Meta
+    // X
+    // GitHub
+    // Orange
+    // Free
+    // Bouygues
+    // SFR
 }

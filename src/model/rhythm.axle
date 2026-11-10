@@ -22,14 +22,15 @@
 // is what decides that a regular shape towards a nameless host is worth a
 // warning, and `model/endpoints` is what decides where the row sorts.
 
-
 use smalt::Mem;
 
 /** Arrivals kept per endpoint. Sixteen spans four hours of a 15-minute
  *  beacon and four minutes of a 15-second one — both readable shapes. */
 const RING : i32 = 16;
+
 /** Gaps needed before a regularity reading means anything. */
 const MIN_GAPS : i32 = 3;
+
 /** A period below this is a burst, not a rhythm; regularity is not claimed. */
 const MIN_PERIOD_MS : i64 = 250;
 
@@ -39,21 +40,21 @@ const MIN_PERIOD_MS : i64 = 250;
  * slot numbering, and compacts both together.
  */
 class Rhythm {
-    stamps : i64,
-    head : i32[],
-    pub(crate) count : i32[],
-    pub(crate) periodMs : i64[],
-    pub(crate) jitterMs : i64[],
-    pub(crate) regular : i32[],
-    gaps : i64 = Mem::take((RING as i64) * 8),
+    stamps              : i64;
+    head                : i32[];
+    pub(crate) count    : i32[];
+    pub(crate) periodMs : i64[];
+    pub(crate) jitterMs : i64[];
+    pub(crate) regular  : i32[];
+    gaps                : i64 = Mem::take((RING as i64) * 8);
 
     constructor(slots : i32) {
         self.stamps = Mem::take((slots as i64) * (RING as i64) * 8);
-        self.head = malloc<i32>(slots as i64);
-        self.count = malloc<i32>(slots as i64);
-        self.periodMs = malloc<i64>(slots as i64);
-        self.jitterMs = malloc<i64>(slots as i64);
-        self.regular = malloc<i32>(slots as i64);
+        self.head = new i32[slots as i64];
+        self.count = new i32[slots as i64];
+        self.periodMs = new i64[slots as i64];
+        self.jitterMs = new i64[slots as i64];
+        self.regular = new i32[slots as i64];
     }
 
     /** Byte address of ring position `k` of slot `s`. */

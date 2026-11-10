@@ -51,6 +51,7 @@ const STAGE_BYTES : i64 = 1024;
 struct Bytes {
     /** Address of the first byte; meaningless when `len` is zero. */
     pub(crate) at : i64;
+
     /** How many bytes; zero for a span that is absent. */
     pub(crate) len : i32;
 
@@ -76,8 +77,8 @@ struct Bytes {
  * that the six below can be about this one.
  */
 class Pool : Closeable {
-    bytes : BytePool = new BytePool(POOL_CAP),
-    stage : i64 = Mem::take(STAGE_BYTES),
+    bytes : BytePool = new BytePool(POOL_CAP);
+    stage : i64 = Mem::take(STAGE_BYTES);
 
     /** The run's address — what `drawBytes` and `Mem` read through. */
     pub(crate) fn base(self) : i64 {
@@ -275,7 +276,8 @@ class Pool : Closeable {
         let mut i : i32 = len - 1;
         while (i >= 0) {
             let c : i32 = Mem::byteAt(base, off + (i as i64));
-            if (c == 92 || c == 47) { // '\' or '/'
+            if (c == 92 || c == 47) {
+                // '\' or '/'
                 return i;
             }
 

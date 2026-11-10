@@ -19,15 +19,15 @@ pub trait Maker {
 pub class Rebuilt : Base, Widget {
     maker : dyn Maker[];
     stamp : Shared<Model<i64>>;
-    seen : i64 = -1;
-    kid : dyn Widget[];
+    seen  : i64 = -1;
+    kid   : dyn Widget[];
 
     /** The widget `maker` makes, kept current with `stamp`. */
     constructor(own maker : dyn Maker, stamp : Shared<Model<i64>>) {
-        self.maker = malloc<dyn Maker>(1 as i64);
+        self.maker = new dyn Maker[1 as i64];
         self.maker[0] = maker;
         self.stamp = stamp;
-        self.kid = malloc<dyn Widget>(1 as i64);
+        self.kid = new dyn Widget[1 as i64];
         let m : dyn Maker = self.maker[0];
         self.kid[0] = m.make();
         self.seen = stamp.get();
@@ -87,12 +87,12 @@ pub class Rebuilt : Base, Widget {
  */
 pub class Tall : Base, Widget {
     margin : f64;
-    kid : dyn Widget[];
+    kid    : dyn Widget[];
 
     /** `child`, which it takes, filling the window's height less `margin`. */
     constructor(margin : f64, own child : dyn Widget) {
         self.margin = margin;
-        self.kid = malloc<dyn Widget>(1 as i64);
+        self.kid = new dyn Widget[1 as i64];
         self.kid[0] = child;
     }
 

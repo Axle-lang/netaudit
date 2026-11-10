@@ -8,8 +8,8 @@
 // The enums that props structs default to are named in the *importer's* scope, so a file
 // that builds them has to import them even when it never writes their names.
 use zaffre::{
-    Widget, Column, Row, FlexProps, Label, Spacer, Stat, StatProps, Sparkline, Badge, BadgeProps, Tooltip, Tone,
-    TextRole, Align, Length, StatLook, BadgeLook, Justify, ControlSize,
+    Widget, Column, Row, FlexProps, Label, Spacer, Stat, StatProps, Sparkline, Badge, BadgeProps,
+    Tooltip, Tone, TextRole, Align, Length, StatLook, BadgeLook, Justify, ControlSize
 };
 use crate::fmt;
 use crate::ui::text;
@@ -50,7 +50,8 @@ class FigureMaker : Maker {
                     label: "Reach",
                     value: text::count(beat.publicHosts),
                     unit: "internet addresses",
-                    note: text::count(beat.networks) + " networks · " + text::count(beat.countries) + " countries",
+                    note: text::count(beat.networks) + " networks · " + text::count(beat.countries)
+                        + " countries",
                     dot: Tone::Info,
                     grow: 1.0,
                 },
@@ -80,14 +81,23 @@ class FigureMaker : Maker {
      * rather than showing a zero: "nothing flagged" and "nothing checked" are
      * opposite states and must not share a face.
      */
-    pub(file) fn flagged(self, beat : Pulse) : dyn Widget {
+    pub(file) fn flagged(mut self, beat : Pulse) : dyn Widget {
         if (beat.worst < 0) {
             let mut note : string = "no internet address seen yet";
             if (beat.pending > 0) {
                 note = text::counted(beat.pending, "address", "addresses") + " waiting on a lookup";
             }
 
-            return new Stat(StatProps { label: "Flagged", value: "—", note: note, dot: Tone::Neutral, grow: 1.0 }, new Spacer(0.0, TRACE_H));
+            return new Stat(
+                StatProps {
+                    label: "Flagged",
+                    value: "—",
+                    note: note,
+                    dot: Tone::Neutral,
+                    grow: 1.0,
+                },
+                new Spacer(0.0, TRACE_H)
+            );
         }
 
         let mut dot : Tone = Tone::Ok;
@@ -118,7 +128,7 @@ fn series(ring : i32[], n : i32) : f64[] {
         count = 2;
     }
 
-    let mut values : f64[] = malloc<f64>(count as i64);
+    let mut values : f64[] = new f64[count as i64];
     for (i of 0..count) {
         values[i as i64] = 0.0;
         if (i < n) {
@@ -199,4 +209,3 @@ class ShownMaker : Maker {
         return new Column(FlexProps { gap: 1.0, align: Align::End }, kids);
     }
 }
-

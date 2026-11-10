@@ -10,13 +10,15 @@
 // window opens.
 
 use zaffre::{
-    Widget, Base, Context, Size, Bounds, Limits, UiEvent, EventKind, Key, Painter, Sheet, SheetProps, SheetSide,
+    Widget, Base, Context, Size, Bounds, Limits, UiEvent, EventKind, Key, Painter, Sheet,
+    SheetProps, SheetSide
 };
+
+use crate::app::App;
+use crate::model::view::Rows;
+use crate::session::Session;
 use crate::ui::actions;
 use crate::ui::detail;
-use crate::app::App;
-use crate::session::Session;
-use crate::model::view::Rows;
 
 /** The sheet's width, in pixels. */
 const SHEET_W : f64 = 560.0;
@@ -33,21 +35,23 @@ const CH_P : i32 = 112;
 const CH_Q : i32 = 113;
 const CH_R : i32 = 114;
 const CH_S : i32 = 115;
+
 /** What turns an upper-case ASCII letter into its lower-case. */
 const CASE_BIT : i32 = 32;
 
 /** The page, with the window's keys and sheets. */
 pub class Root : Base, Widget {
-    ss : Shared<Session>;
-    kid : dyn Widget[];
+    ss    : Shared<Session>;
+    kid   : dyn Widget[];
     acted : i64 = 0;
+
     /** Where the rows were scrolled when the button went down: a release after a drag is not a click on a row. */
     downScroll : f64 = 0.0;
 
     /** `page`, which it takes, driven by `ss`. */
     constructor(ss : Shared<Session>, own page : dyn Widget) {
         self.ss = ss;
-        self.kid = malloc<dyn Widget>(1 as i64);
+        self.kid = new dyn Widget[1 as i64];
         self.kid[0] = page;
         self.acted = ss.a.grid.activations;
     }
@@ -157,8 +161,12 @@ pub class Root : Base, Widget {
             return true;
         }
 
-        let moves : bool = e.key == Key::Up || e.key == Key::Down || e.key == Key::PageUp || e.key == Key::PageDown
-            || e.key == Key::Home || e.key == Key::End || e.key == Key::Enter || e.key == Key::Left
+        let moves : bool = e.key == Key::Up || e.key == Key::Down || e.key == Key::PageUp
+            || e.key == Key::PageDown
+            || e.key == Key::Home
+            || e.key == Key::End
+            || e.key == Key::Enter
+            || e.key == Key::Left
             || e.key == Key::Right;
         if (moves) {
             // The grid is the last thing in the Tab order: stepping back from
@@ -191,7 +199,10 @@ pub class Root : Base, Widget {
         if (a.helpAsked) {
             a.helpAsked = false;
             let help : () => dyn Widget = () => detail::help();
-            ctx.openOverlay(new Sheet(SheetProps { title: "Keyboard", side: SheetSide::Right, width: SHEET_W }, help));
+            ctx.openOverlay(new Sheet(
+                SheetProps { title: "Keyboard", side: SheetSide::Right, width: SHEET_W },
+                help
+            ));
         }
 
         return moving;
@@ -217,7 +228,10 @@ pub class Root : Base, Widget {
     pub(file) fn openSheet(mut self, ctx : Context) : void {
         let hand : Shared<Session> = self.ss;
         let content : () => dyn Widget = () => detail::endpoint(hand);
-        ctx.openOverlay(new Sheet(SheetProps { title: detail::title(self.ss), side: SheetSide::Right, width: SHEET_W }, content));
+        ctx.openOverlay(new Sheet(
+            SheetProps { title: detail::title(self.ss), side: SheetSide::Right, width: SHEET_W },
+            content
+        ));
     }
 
     /** Enter on a row: the sheet for an endpoint, the fold for a program. */

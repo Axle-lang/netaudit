@@ -13,8 +13,9 @@
 // in this file names an operating system.
 
 use gesso::DnsCacheReader;
-use crate::sys::procs::Procs;
+
 use crate::sys::conn::Conns;
+use crate::sys::procs::Procs;
 use crate::sys::tiers::Tiers;
 
 /** How often the resolver's cache is read again, in milliseconds. */
@@ -23,13 +24,16 @@ const DNS_SWEEP_MS : i64 = 5000;
 /** The machine, as this program reads it. */
 class Machine {
     /** Process names, and where each binary lives. */
-    pub(crate) procs : Procs = new Procs(),
+    pub(crate) procs : Procs = new Procs();
+
     /** The per-process TCP and UDP tables. */
-    pub(crate) conns : Conns = new Conns(),
+    pub(crate) conns : Conns = new Conns();
+
     /** The resolver's cache, read on a schedule, with its own status. */
-    pub(crate) dns : DnsCacheReader = new DnsCacheReader(DNS_SWEEP_MS),
+    pub(crate) dns : DnsCacheReader = new DnsCacheReader(DNS_SWEEP_MS);
+
     /** Which of the three readings is running, and why the others are not. */
-    pub(crate) tiers : Tiers = new Tiers(),
+    pub(crate) tiers : Tiers = new Tiers();
 
     /** Release the readers' buffers. */
     pub(crate) fn dispose(mut self) : void {

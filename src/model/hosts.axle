@@ -15,16 +15,21 @@
 // same machine reached over v4 and over a dual-stack socket is one row.
 
 use smalt::{Mem, SlotIndex};
+
 use crate::model::addr::{reach, hostKey, shownFamily, shownOffset, Reach};
 
 /** Hosts the table can hold. */
 const MAX_HOSTS : i32 = 4096;
+
 /** Address bytes per row. */
 const HOST_ADDR_BYTES : i64 = 16;
+
 /** Longest hostname kept. */
 const HOST_MAX : i32 = 96;
+
 /** Longest network / organisation name kept. */
 const ORG_MAX : i32 = 48;
+
 /** Longest place name kept. */
 const PLACE_MAX : i32 = 32;
 
@@ -62,8 +67,10 @@ enum NameSource : i32 {
 
 /** The address answers as a proxy, VPN or Tor exit. */
 const FLAG_PROXY : i32 = 1;
+
 /** The address belongs to a datacenter rather than to an access network. */
 const FLAG_HOSTING : i32 = 2;
+
 /** The address belongs to a mobile carrier. */
 const FLAG_MOBILE : i32 = 4;
 
@@ -94,39 +101,40 @@ fn nameRank(from : NameSource) : i32 {
  * the evidence it is built from.
  */
 class Hosts {
-    addrs : i64 = Mem::take((MAX_HOSTS as i64) * HOST_ADDR_BYTES),
-    pub(crate) family : i32[] = malloc<i32>(MAX_HOSTS as i64),
-    pub(crate) reach : Reach[] = malloc<Reach>(MAX_HOSTS as i64),
-    pub(crate) look : Look[] = malloc<Look>(MAX_HOSTS as i64),
+    addrs             : i64 = Mem::take((MAX_HOSTS as i64) * HOST_ADDR_BYTES);
+    pub(crate) family : i32[] = new i32[MAX_HOSTS as i64];
+    pub(crate) reach  : Reach[] = new Reach[MAX_HOSTS as i64];
+    pub(crate) look   : Look[] = new Look[MAX_HOSTS as i64];
 
-    pub(crate) nameOff : i64[] = malloc<i64>(MAX_HOSTS as i64),
-    pub(crate) nameLen : i32[] = malloc<i32>(MAX_HOSTS as i64),
-    pub(crate) nameFrom : NameSource[] = malloc<NameSource>(MAX_HOSTS as i64),
+    pub(crate) nameOff  : i64[] = new i64[MAX_HOSTS as i64];
+    pub(crate) nameLen  : i32[] = new i32[MAX_HOSTS as i64];
+    pub(crate) nameFrom : NameSource[] = new NameSource[MAX_HOSTS as i64];
 
-    pub(crate) asn : i32[] = malloc<i32>(MAX_HOSTS as i64),
-    pub(crate) netOff : i64[] = malloc<i64>(MAX_HOSTS as i64),
-    pub(crate) netLen : i32[] = malloc<i32>(MAX_HOSTS as i64),
-    pub(crate) orgOff : i64[] = malloc<i64>(MAX_HOSTS as i64),
-    pub(crate) orgLen : i32[] = malloc<i32>(MAX_HOSTS as i64),
+    pub(crate) asn    : i32[] = new i32[MAX_HOSTS as i64];
+    pub(crate) netOff : i64[] = new i64[MAX_HOSTS as i64];
+    pub(crate) netLen : i32[] = new i32[MAX_HOSTS as i64];
+    pub(crate) orgOff : i64[] = new i64[MAX_HOSTS as i64];
+    pub(crate) orgLen : i32[] = new i32[MAX_HOSTS as i64];
 
-    pub(crate) ccOff : i64[] = malloc<i64>(MAX_HOSTS as i64),
-    pub(crate) ccLen : i32[] = malloc<i32>(MAX_HOSTS as i64),
-    pub(crate) countryOff : i64[] = malloc<i64>(MAX_HOSTS as i64),
-    pub(crate) countryLen : i32[] = malloc<i32>(MAX_HOSTS as i64),
-    pub(crate) cityOff : i64[] = malloc<i64>(MAX_HOSTS as i64),
-    pub(crate) cityLen : i32[] = malloc<i32>(MAX_HOSTS as i64),
+    pub(crate) ccOff      : i64[] = new i64[MAX_HOSTS as i64];
+    pub(crate) ccLen      : i32[] = new i32[MAX_HOSTS as i64];
+    pub(crate) countryOff : i64[] = new i64[MAX_HOSTS as i64];
+    pub(crate) countryLen : i32[] = new i32[MAX_HOSTS as i64];
+    pub(crate) cityOff    : i64[] = new i64[MAX_HOSTS as i64];
+    pub(crate) cityLen    : i32[] = new i32[MAX_HOSTS as i64];
 
-    flags : i32[] = malloc<i32>(MAX_HOSTS as i64),
+    flags : i32[] = new i32[MAX_HOSTS as i64];
+
     /**
      * Which registry questions have been asked about this row. Each is asked
      * once: an address the registry cannot answer for would otherwise be
      * asked again every second and a half, forever, and - since the loop
      * takes the first row that qualifies - would starve every row behind it.
      */
-    asked : i32[] = malloc<i32>(MAX_HOSTS as i64),
+    asked : i32[] = new i32[MAX_HOSTS as i64];
 
-    pub(crate) count : i32 = 0,
-    index : SlotIndex = new SlotIndex(MAX_HOSTS * 2),
+    pub(crate) count : i32 = 0;
+    index            : SlotIndex = new SlotIndex(MAX_HOSTS * 2);
 
     /** Byte address of row `s`'s sixteen address bytes. */
     pub(crate) fn addrAt(self, s : i32) : i64 {
@@ -251,8 +259,7 @@ class Hosts {
      * service, and the row needs a name more, not less.
      */
     pub(crate) fn unnamed(self, s : i32) : bool {
-        return s >= 0 && self.nameOff[s] < 0 && self.reach[s] == Reach::Public
-            && self.settled(s);
+        return s >= 0 && self.nameOff[s] < 0 && self.reach[s] == Reach::Public && self.settled(s);
     }
 
     /** Whether row `s`'s batch lookup has come back, answered or not. */

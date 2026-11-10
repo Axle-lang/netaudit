@@ -13,15 +13,17 @@
 // steady, or has started doing something it was not doing before.
 
 use smalt::SlotIndex;
-use crate::model::endpoints::{Endpoints, SocketKind};
-use crate::model::hosts::{Hosts, Look};
+
+use crate::model::addr;
 use crate::model::groups;
 use crate::model::pool;
+use crate::model::endpoints::{Endpoints, SocketKind};
+use crate::model::hosts::{Hosts, Look};
 use crate::model::world::World;
-use crate::model::addr;
 
 /** Samples kept behind each card. */
 const PULSE_HIST : i32 = 120;
+
 /** Distinct networks and countries the tally can hold. */
 const PULSE_DISTINCT : i32 = 4096;
 
@@ -30,29 +32,30 @@ const PULSE_DISTINCT : i32 = 4096;
  * history.
  */
 class Pulse {
-    pub(crate) liveHist : i32[] = malloc<i32>(PULSE_HIST as i64),
-    pub(crate) flagHist : i32[] = malloc<i32>(PULSE_HIST as i64),
-    pub(crate) histLen : i32 = 0,
+    pub(crate) liveHist : i32[] = new i32[PULSE_HIST as i64];
+    pub(crate) flagHist : i32[] = new i32[PULSE_HIST as i64];
+    pub(crate) histLen  : i32 = 0;
 
-    pub(crate) live : i32 = 0,
-    pub(crate) journal : i32 = 0,
-    pub(crate) programs : i32 = 0,
-    pub(crate) processes : i32 = 0,
-    pub(crate) knownHosts : i32 = 0,
-    pub(crate) publicHosts : i32 = 0,
-    pub(crate) networks : i32 = 0,
-    pub(crate) countries : i32 = 0,
-    pub(crate) flagged : i32 = 0,
-    pub(crate) worst : i32 = -1,
-    pub(crate) pending : i32 = 0,
+    pub(crate) live        : i32 = 0;
+    pub(crate) journal     : i32 = 0;
+    pub(crate) programs    : i32 = 0;
+    pub(crate) processes   : i32 = 0;
+    pub(crate) knownHosts  : i32 = 0;
+    pub(crate) publicHosts : i32 = 0;
+    pub(crate) networks    : i32 = 0;
+    pub(crate) countries   : i32 = 0;
+    pub(crate) flagged     : i32 = 0;
+    pub(crate) worst       : i32 = -1;
+    pub(crate) pending     : i32 = 0;
+
     /** Internet addresses whose reverse lookup has not answered yet. */
-    pub(crate) resolving : i32 = 0,
-    pub(crate) dropped : i32 = 0,
-    pub(crate) rateIn : i64 = 0,
-    pub(crate) rateOut : i64 = 0,
+    pub(crate) resolving : i32 = 0;
+    pub(crate) dropped   : i32 = 0;
+    pub(crate) rateIn    : i64 = 0;
+    pub(crate) rateOut   : i64 = 0;
 
-    pub(crate) seenNet : SlotIndex = new SlotIndex(PULSE_DISTINCT * 2),
-    pub(crate) seenCountry : SlotIndex = new SlotIndex(PULSE_DISTINCT * 2),
+    pub(crate) seenNet     : SlotIndex = new SlotIndex(PULSE_DISTINCT * 2);
+    pub(crate) seenCountry : SlotIndex = new SlotIndex(PULSE_DISTINCT * 2);
 
     /**
      * Push one sample onto both rings, sliding the oldest off.

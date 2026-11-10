@@ -13,6 +13,7 @@
 
 use gesso::{DnsCache, DnsCacheReader, DnsEntry};
 use smalt::Mem;
+
 use crate::model::hosts::{Hosts, NameSource, HOST_MAX};
 use crate::model::pool::Pool;
 

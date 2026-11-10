@@ -25,15 +25,19 @@ use smalt::Mem;
 
 /** `MIB_TCP_STATE_LISTEN` — inbound, no peer. */
 const TCP_LISTEN : i32 = 2;
+
 /** `MIB_TCP_STATE_SYN_SENT` — an outbound connection being opened. */
 const TCP_SYN_SENT : i32 = 3;
+
 /** `MIB_TCP_STATE_ESTAB` — the state a live conversation sits in. */
 const TCP_ESTAB : i32 = 5;
+
 /** A UDP row carries no TCP state; this is what it reports instead. */
 const STATE_NONE : i32 = 0;
 
 /** Rows the snapshot can hold. A machine past this is a machine in trouble. */
 const CONN_MAX_ROWS : i32 = 8192;
+
 /** Address bytes per row — sixteen, so an IPv6 row needs no second store. */
 const CONN_ADDR_BYTES : i64 = 16;
 
@@ -46,21 +50,23 @@ const CONN_ADDR_BYTES : i64 = 16;
  * the previous snapshot rather than believe an empty one.
  */
 class Conns {
-    pub(crate) proto : Proto[] = malloc<Proto>(CONN_MAX_ROWS as i64),
-    pub(crate) family : i32[] = malloc<i32>(CONN_MAX_ROWS as i64),
-    pub(crate) pid : i32[] = malloc<i32>(CONN_MAX_ROWS as i64),
+    pub(crate) proto  : Proto[] = new Proto[CONN_MAX_ROWS as i64];
+    pub(crate) family : i32[] = new i32[CONN_MAX_ROWS as i64];
+    pub(crate) pid    : i32[] = new i32[CONN_MAX_ROWS as i64];
+
     /** The owner's user id; -1 when the system did not say. Linux names it even when the pid is hidden. */
-    pub(crate) uid : i64[] = malloc<i64>(CONN_MAX_ROWS as i64),
-    pub(crate) state : i32[] = malloc<i32>(CONN_MAX_ROWS as i64),
-    pub(crate) localPort : i32[] = malloc<i32>(CONN_MAX_ROWS as i64),
-    pub(crate) remotePort : i32[] = malloc<i32>(CONN_MAX_ROWS as i64),
+    pub(crate) uid        : i64[] = new i64[CONN_MAX_ROWS as i64];
+    pub(crate) state      : i32[] = new i32[CONN_MAX_ROWS as i64];
+    pub(crate) localPort  : i32[] = new i32[CONN_MAX_ROWS as i64];
+    pub(crate) remotePort : i32[] = new i32[CONN_MAX_ROWS as i64];
 
-    pub(crate) count : i32 = 0,
-    pub(crate) ok : bool = false,
+    pub(crate) count : i32 = 0;
+    pub(crate) ok    : bool = false;
+
     /** Sockets whose owning process the system would not name. */
-    pub(crate) unowned : i32 = 0,
+    pub(crate) unowned : i32 = 0;
 
-    addrs : i64 = Mem::take((CONN_MAX_ROWS as i64) * CONN_ADDR_BYTES),
+    addrs : i64 = Mem::take((CONN_MAX_ROWS as i64) * CONN_ADDR_BYTES);
 
     /**
      * Byte address of row `i`'s sixteen address bytes: the remote end for a

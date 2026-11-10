@@ -19,23 +19,29 @@
 // machine or this network, and asking would be both useless and a leak of
 // what is on it.
 
-use smalt::{Scratch, Mem};
-use crate::model::hosts::{Hosts, Look};
-use crate::fmt;
 use std::text::StringBuilder;
+
+use smalt::{Scratch, Mem};
+
+use crate::fmt;
+use crate::model::hosts::{Hosts, Look};
 
 /** Addresses per batch — the service's own ceiling. */
 const BATCH_MAX : i32 = 100;
+
 /**
  * Shortest gap between two batches. The service allows fifteen batch
  * requests a minute; this is thirteen and a bit, so a long backlog drains
  * without ever meeting a 429.
  */
 const BATCH_GAP_MS : i64 = 4500;
+
 /** How long to wait after the first failure. */
 const BACKOFF_MS : i64 = 15000;
+
 /** Ceiling on the doubling back-off. */
 const BACKOFF_MAX_MS : i64 = 300000;
+
 /** Shortest gap between two registry lookups — one address at a time. */
 const WHOIS_GAP_MS : i64 = 1500;
 
@@ -46,7 +52,6 @@ enum WhoisKind : i32 {
     /** What name the address's owner publishes. */
     Ptr = 1,
 }
-
 
 /**
  * The one place a lookup service is named.
@@ -63,18 +68,18 @@ fn batchUrl() : string {
 
 /** What is outstanding, and when the next batch may go. */
 class Queue {
-    pub(crate) sent : i32[] = malloc<i32>(BATCH_MAX as i64),
-    pub(crate) sentLen : i32 = 0,
-    pub(crate) inFlight : bool = false,
-    nextDueMs : i64 = 0,
-    backoffMs : i64 = 0,
-    pub(crate) resolved : i32 = 0,
-    pub(crate) lastError : bool = false,
+    pub(crate) sent      : i32[] = new i32[BATCH_MAX as i64];
+    pub(crate) sentLen   : i32 = 0;
+    pub(crate) inFlight  : bool = false;
+    nextDueMs            : i64 = 0;
+    backoffMs            : i64 = 0;
+    pub(crate) resolved  : i32 = 0;
+    pub(crate) lastError : bool = false;
 
-    pub(crate) whoisHost : i32 = -1,
-    pub(crate) whoisKind : WhoisKind = WhoisKind::Origin,
-    pub(crate) whoisInFlight : bool = false,
-    whoisDueMs : i64 = 0,
+    pub(crate) whoisHost     : i32 = -1;
+    pub(crate) whoisKind     : WhoisKind = WhoisKind::Origin;
+    pub(crate) whoisInFlight : bool = false;
+    whoisDueMs               : i64 = 0;
 
     /** Whether a registry lookup may go out right now. */
     pub(crate) fn whoisReady(self, nowMs : i64) : bool {

@@ -19,18 +19,24 @@
 // program sent nothing" when it means "nothing measured bytes".
 
 use smalt::{Mem, Scratch};
+
 use crate::model::addr;
 
 /** ASCII `0`. */
 const DIGIT0 : i32 = 48;
+
 /** ASCII `a` — the first hex letter. */
 const LOWER_A : i32 = 97;
+
 /** ASCII `.`. */
 const DOT : i32 = 46;
+
 /** ASCII `:`. */
 const COLON : i32 = 58;
+
 /** ASCII `/`. */
 const SLASH : i32 = 47;
+
 /** ASCII `[` and `]` — the brackets a v6 address wears before a port. */
 const LBRACKET : i32 = 91;
 const RBRACKET : i32 = 93;

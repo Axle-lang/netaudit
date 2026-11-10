@@ -22,17 +22,19 @@
 // tree, no reordering happens at all. Nothing moves under a reader's hand.
 
 use smalt::{Scratch, Mem};
-use crate::model::pool::{Pool, Bytes, containsAt};
+
+use crate::fmt;
+use crate::model::addr::{Reach};
 use crate::model::endpoints::{Endpoints, MAX_ENDPOINTS, SocketKind};
 use crate::model::groups::{Groups, MAX_GROUPS};
 use crate::model::hosts::Hosts;
+use crate::model::pool::{Pool, Bytes, containsAt};
 use crate::model::rhythm::hasRhythm;
 use crate::model::world::World;
-use crate::model::addr::{Reach};
-use crate::fmt;
 
 /** Height of a program row, in pixels. */
 const ROW_GROUP : i32 = 48;
+
 /** Height of an endpoint row: identity on top, attribution beneath. */
 const ROW_ENDPOINT : i32 = 60;
 
@@ -100,8 +102,10 @@ fn sortAt(i : i32) : Sort {
  * small enough that a real change shows within a tick or two.
  */
 const HYST_SALIENCE : i64 = 250;
+
 /** A traffic reading must change by this many bytes per second to overtake. */
 const HYST_TRAFFIC : i64 = 4096;
+
 /** Everything else is a count or a timestamp, where a tie is a genuine tie. */
 const HYST_NONE : i64 = 0;
 
@@ -112,33 +116,33 @@ const MATCH_CAP : i64 = 256;
  * The flattened tree, plus the remembered orders that make it stable.
  */
 class Rows {
-    pub(crate) rowKind : RowKind[] = malloc<RowKind>(VIEW_MAX_ROWS as i64),
-    pub(crate) rowRef : i32[] = malloc<i32>(VIEW_MAX_ROWS as i64),
-    pub(crate) rowTop : i32[] = malloc<i32>(VIEW_MAX_ROWS as i64),
-    pub(crate) rowH : i32[] = malloc<i32>(VIEW_MAX_ROWS as i64),
-    pub(crate) count : i32 = 0,
-    pub(crate) height : i32 = 0,
+    pub(crate) rowKind : RowKind[] = new RowKind[VIEW_MAX_ROWS as i64];
+    pub(crate) rowRef  : i32[] = new i32[VIEW_MAX_ROWS as i64];
+    pub(crate) rowTop  : i32[] = new i32[VIEW_MAX_ROWS as i64];
+    pub(crate) rowH    : i32[] = new i32[VIEW_MAX_ROWS as i64];
+    pub(crate) count   : i32 = 0;
+    pub(crate) height  : i32 = 0;
 
-    pub(crate) orderKeys : i64[] = malloc<i64>(MAX_ENDPOINTS as i64),
-    pub(crate) orderLen : i32 = 0,
-    pub(crate) slots : i32[] = malloc<i32>(MAX_ENDPOINTS as i64),
-    pub(crate) bucket : i32[] = malloc<i32>(MAX_ENDPOINTS as i64),
-    pub(crate) at : i32[] = malloc<i32>(MAX_GROUPS as i64),
-    pub(crate) mark : i32[] = malloc<i32>(MAX_ENDPOINTS as i64),
+    pub(crate) orderKeys : i64[] = new i64[MAX_ENDPOINTS as i64];
+    pub(crate) orderLen  : i32 = 0;
+    pub(crate) slots     : i32[] = new i32[MAX_ENDPOINTS as i64];
+    pub(crate) bucket    : i32[] = new i32[MAX_ENDPOINTS as i64];
+    pub(crate) at        : i32[] = new i32[MAX_GROUPS as i64];
+    pub(crate) mark      : i32[] = new i32[MAX_ENDPOINTS as i64];
 
-    pub(crate) groupKeys : i64[] = malloc<i64>(MAX_GROUPS as i64),
-    pub(crate) groupLen : i32 = 0,
-    pub(crate) gslots : i32[] = malloc<i32>(MAX_GROUPS as i64),
-    pub(crate) gmark : i32[] = malloc<i32>(MAX_GROUPS as i64),
-    pub(crate) gen : i32 = 0,
+    pub(crate) groupKeys : i64[] = new i64[MAX_GROUPS as i64];
+    pub(crate) groupLen  : i32 = 0;
+    pub(crate) gslots    : i32[] = new i32[MAX_GROUPS as i64];
+    pub(crate) gmark     : i32[] = new i32[MAX_GROUPS as i64];
+    pub(crate) gen       : i32 = 0;
 
-    pub(crate) shown : i32 = 0,
-    pub(crate) hiddenLocal : i32 = 0,
-    pub(crate) hiddenBound : i32 = 0,
-    pub(crate) scratch : Scratch = new Scratch(MATCH_CAP),
+    pub(crate) shown       : i32 = 0;
+    pub(crate) hiddenLocal : i32 = 0;
+    pub(crate) hiddenBound : i32 = 0;
+    pub(crate) scratch     : Scratch = new Scratch(MATCH_CAP);
 
     /** Endpoint `s`'s address and port, formatted into the view's own cursor. */
-    pub(crate) fn addressOf(self, e : Endpoints, s : i32) : Bytes {
+    pub(crate) fn addressOf(mut self, e : Endpoints, s : i32) : Bytes {
         self.scratch.reset();
         fmt::addrPort(self.scratch, e.addrAt(s), e.family[s], e.port[s]);
         return Bytes::make(self.scratch.at(), self.scratch.length());
@@ -161,10 +165,12 @@ class Rows {
  */
 struct Lens {
     /** The filter's bytes, and how many of them there are. */
-    pub(crate) needle : i64;
+    pub(crate) needle    : i64;
     pub(crate) needleLen : i32;
+
     /** What the rows are ranked by. */
     pub(crate) sortKey : Sort;
+
     /**
      * Keep the conversations that never leave the building — this machine
      * talking to itself, and to the box next to it. On a working machine
@@ -172,6 +178,7 @@ struct Lens {
      * what *leaves* is drowned by them.
      */
     pub(crate) showLocal : bool;
+
     /**
      * Keep listening sockets and UDP handles. Windows names no peer for
      * either, so they are doors that are open rather than conversations —
@@ -180,6 +187,7 @@ struct Lens {
      * actually talking to.
      */
     pub(crate) showBound : bool;
+
     /** Suspend reordering — raised while the pointer is over the tree. */
     pub(crate) freeze : bool;
 
@@ -434,8 +442,10 @@ fn nameOrder(w : World, x : i32, y : i32) : i32 {
     }
 
     return w.pool.order(
-        hosts.nameOff[hx], hosts.nameLen[hx],
-        hosts.nameOff[hy], hosts.nameLen[hy]
+        hosts.nameOff[hx],
+        hosts.nameLen[hx],
+        hosts.nameOff[hy],
+        hosts.nameLen[hy]
     );
 }
 
@@ -586,10 +596,14 @@ fn sortGroups(w : World, sortKey : Sort) : void {
         let x : i32 = v.gslots[a];
         let mut b : i32 = a - 1;
         if (sortKey == Sort::Name) {
-            while (b >= 0 && w.pool.order(
-                g.nameOff[v.gslots[b]], g.nameLen[v.gslots[b]],
-                g.nameOff[x], g.nameLen[x]
-            ) > 0) {
+            while (b >= 0
+                && w.pool.order(
+                    g.nameOff[v.gslots[b]],
+                    g.nameLen[v.gslots[b]],
+                    g.nameOff[x],
+                    g.nameLen[x]
+                )
+                    > 0) {
                 v.gslots[b + 1] = v.gslots[b];
                 b = b - 1;
             }

@@ -31,40 +31,42 @@
 // Build & run:  axle build, then target/netaudit.exe
 //               (no elevation needed; elevated, service paths also read)
 
+use std::lang::{IndexOutOfBoundsException, ParseException};
+use std::sys::process::{argc, argAt};
+
+use gesso::{DnsCacheReader, ReadingState};
 use smalt::{Platform, PlatformError, WindowDesc, Clock, Events, Event, EventKind as SmaltKind};
 use smalt::{Surface, Bmp, MouseButton, Scancode, CursorShape};
-use zaffre::{
-    View, Theme, Fonts, Keys, UiEvent, EventKind, Key, Mod, Cursor, Strings,
-};
-use crate::ui::page;
-use crate::ui::root::Root;
-use crate::ui::actions;
+use zaffre::{View, Theme, Fonts, Keys, UiEvent, EventKind, Key, Mod, Cursor, Strings};
+
 use crate::app::{App, Say};
-use crate::session::Session;
-use crate::model::world::World;
+use crate::enrich::ipapi;
+use crate::enrich::queue;
+use crate::enrich::worker;
+use crate::enrich::queue::{Queue, WhoisKind};
 use crate::model::pulse;
-use crate::model::view::{Rows, RowKind};
 use crate::model::score;
+use crate::model::addr::{Reach, netAddr};
 use crate::model::endpoints::{rank, absorbSnapshot};
 use crate::model::hosts::{Hosts, NameSource, HOST_MAX, ORG_MAX, ASKED_ORIGIN};
-use crate::model::addr::{Reach, netAddr};
+use crate::model::view::{Rows, RowKind};
+use crate::model::world::World;
+use crate::session::Session;
+use crate::sys::dnscache;
 use crate::sys::machine::Machine;
 use crate::sys::tiers::TierState;
 use crate::sys::traffic::{TraceReader, startTraffic};
-use crate::sys::dnscache;
-use gesso::{DnsCacheReader, ReadingState};
-use crate::enrich::queue;
-use crate::enrich::queue::{Queue, WhoisKind};
-use crate::enrich::ipapi;
-use crate::enrich::worker;
-use std::sys::process::{argc, argAt};
-use std::lang::{IndexOutOfBoundsException, ParseException};
+use crate::ui::actions;
+use crate::ui::page;
+use crate::ui::root::Root;
 
 /** The size the window opens at. */
 const WIN_W : i32 = 1360;
 const WIN_H : i32 = 900;
+
 /** How often the machine is re-read, in milliseconds. */
 const REFRESH_MS : i64 = 1000;
+
 /**
  * Longest the loop blocks in the OS with nothing due.
  *
@@ -75,10 +77,13 @@ const REFRESH_MS : i64 = 1000;
  * that measures the machine owes it.
  */
 const IDLE_MS : i32 = 250;
+
 /** The wait while something animates: about a frame. */
 const FRAME_MS : i32 = 16;
+
 /** The window's caption. */
 const TITLE : string = "netaudit";
+
 /** Where a snapshot lands: the folder the program was started from. */
 const SNAP_PATH : string = "netaudit.bmp";
 
@@ -92,7 +97,7 @@ fn main() : void {
 
 /** The faces and the theme the whole window is set in. */
 fn built(ss : Shared<Session>) : View {
-    let fonts : Shared<Fonts> = new shared Fonts();
+    let fonts : Shared<Fonts> = share new Fonts();
     return new View(Theme::dark(), fonts, ss.a.dark, new Root(ss, page::assemble(ss)));
 }
 
@@ -113,7 +118,7 @@ fn run() : void ! PlatformError {
     let events = new Events();
     defer events.close();
 
-    let ss : Shared<Session> = new shared Session();
+    let ss : Shared<Session> = share new Session();
     let mut a : App = ss.a;
     // The kernel trace is a handle minted on this thread and polled by the
     // loop that owns it, like the two lookup tasks below: the type lives
@@ -172,21 +177,46 @@ fn run() : void ! PlatformError {
                 SmaltKind::MouseMotion => {
                     mx = e.x as f64;
                     my = e.y as f64;
-                    view.input(UiEvent { kind: EventKind::PointerMove, x: mx, y: my, mods: modsOf(events) });
+                    view.input(UiEvent {
+                        kind: EventKind::PointerMove,
+                        x: mx,
+                        y: my,
+                        mods: modsOf(events),
+                    });
                 },
                 SmaltKind::MouseButtonDown => {
                     mx = e.x as f64;
                     my = e.y as f64;
                     presses = e.clicks;
-                    view.input(UiEvent { kind: EventKind::PointerDown, x: mx, y: my, button: buttonOf(e.button), clicks: e.clicks, mods: modsOf(events) });
+                    view.input(UiEvent {
+                        kind: EventKind::PointerDown,
+                        x: mx,
+                        y: my,
+                        button: buttonOf(e.button),
+                        clicks: e.clicks,
+                        mods: modsOf(events),
+                    });
                 },
                 SmaltKind::MouseButtonUp => {
                     mx = e.x as f64;
                     my = e.y as f64;
-                    view.input(UiEvent { kind: EventKind::PointerUp, x: mx, y: my, button: buttonOf(e.button), clicks: presses, mods: modsOf(events) });
+                    view.input(UiEvent {
+                        kind: EventKind::PointerUp,
+                        x: mx,
+                        y: my,
+                        button: buttonOf(e.button),
+                        clicks: presses,
+                        mods: modsOf(events),
+                    });
                 },
                 SmaltKind::MouseWheel => {
-                    view.input(UiEvent { kind: EventKind::Wheel, x: mx, y: my, wheel: e.wheel as f64, mods: modsOf(events) });
+                    view.input(UiEvent {
+                        kind: EventKind::Wheel,
+                        x: mx,
+                        y: my,
+                        wheel: e.wheel as f64,
+                        mods: modsOf(events),
+                    });
                 },
                 SmaltKind::MouseLeft => {
                     view.input(UiEvent { kind: EventKind::PointerLeave });
@@ -200,11 +230,20 @@ fn run() : void ! PlatformError {
 
                     // The keys the library has no name for.
                     if (!fnKey(a, e.scancode)) {
-                        view.input(UiEvent { kind: EventKind::KeyDown, key: Keys::key(e.scancode), mods: modsOf(events), repeat: e.repeat });
+                        view.input(UiEvent {
+                            kind: EventKind::KeyDown,
+                            key: Keys::key(e.scancode),
+                            mods: modsOf(events),
+                            repeat: e.repeat,
+                        });
                     }
                 },
                 SmaltKind::KeyUp => {
-                    view.input(UiEvent { kind: EventKind::KeyUp, key: Keys::key(e.scancode), mods: modsOf(events) });
+                    view.input(UiEvent {
+                        kind: EventKind::KeyUp,
+                        key: Keys::key(e.scancode),
+                        mods: modsOf(events),
+                    });
                 },
                 SmaltKind::TextInput => {
                     view.input(UiEvent { kind: EventKind::Text, cp: e.text, mods: modsOf(events) });
@@ -212,8 +251,7 @@ fn run() : void ! PlatformError {
                 SmaltKind::WindowFocusLost => {
                     view.input(UiEvent { kind: EventKind::WindowBlur });
                 },
-                _ => {
-                },
+                _ => {},
             }
         }
 
@@ -501,7 +539,8 @@ fn dispatch(ss : Shared<Session>, nowMs : i64, jobs : Future<string>[2]) : void 
 }
 
 /** Fold a reverse-lookup answer into row `h`. */
-fn tookName(w : World, h : i32, body : string) : bool {    // Measured before it is interned, so an empty answer never reaches the
+fn tookName(w : World, h : i32, body : string) : bool {
+    // Measured before it is interned, so an empty answer never reaches the
     // run at all — there is nothing to retract, and no offset whose meaning
     // depends on nothing having been interned since.
     let len : i32 = w.pool.measure(body, HOST_MAX);
@@ -573,7 +612,8 @@ fn tookOrigin(w : World, h : i32, body : string) : bool {
 fn needsOrigin(hosts : Hosts) : i32 {
     for (h of 0..hosts.count) {
         if (hosts.settled(h) && hosts.reach[h] == Reach::Public && hosts.netOff[h] < 0
-            && hosts.asn[h] == 0 && !hosts.wasAsked(h, ASKED_ORIGIN)) {
+            && hosts.asn[h] == 0
+            && !hosts.wasAsked(h, ASKED_ORIGIN)) {
             return h;
         }
     }

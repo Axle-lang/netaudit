@@ -11,21 +11,24 @@
 // loop's thread and joinable only there; parking one in a field would be
 // parking it where the thread that must join it cannot be sure to reach it.
 
+use crate::app::App;
+use crate::enrich::queue::Queue;
 use crate::model::world::World;
 use crate::sys::machine::Machine;
-use crate::enrich::queue::Queue;
-use crate::app::App;
 
 /** The loop's state, whole. */
 class Session {
     /** The journal and every reading taken off it. */
-    pub(crate) w : World = new World(),
+    pub(crate) w : World = new World();
+
     /** The process list, the connection tables, the DNS cache, the tiers. */
-    pub(crate) mach : Machine = new Machine(),
+    pub(crate) mach : Machine = new Machine();
+
     /** Which addresses get looked up, and when. */
-    pub(crate) q : Queue = new Queue(),
+    pub(crate) q : Queue = new Queue();
+
     /** What the reader is doing: selection, filter, folds, scroll. */
-    pub(crate) a : App = new App(),
+    pub(crate) a : App = new App();
 
     /** Release everything, the model last. */
     pub(crate) fn dispose(mut self) : void {

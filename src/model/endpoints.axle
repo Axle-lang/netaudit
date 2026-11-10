@@ -24,23 +24,26 @@
 // figures do not strobe, and `salience` — the default ranking — is a
 // weighted read of repetition, regularity, risk, traffic and recency.
 
-use smalt::{Mem, SlotIndex};
 use gesso::Proto;
-use crate::sys::conn::{Conns, TCP_LISTEN, isLive};
-use crate::model::key::{hashStep, seed};
-use crate::model::addr::{hashAddr, reach, shownFamily, shownOffset, Reach};
-use crate::model::rhythm::{Rhythm, hasRhythm};
-use crate::model::hosts;
+use smalt::{Mem, SlotIndex};
+
 use crate::model::groups;
+use crate::model::hosts;
 use crate::model::pool;
-use crate::sys::procs;
-use crate::sys::machine::Machine;
+use crate::model::addr::{hashAddr, reach, shownFamily, shownOffset, Reach};
+use crate::model::key::{hashStep, seed};
+use crate::model::rhythm::{Rhythm, hasRhythm};
 use crate::model::world::World;
+use crate::sys::procs;
+use crate::sys::conn::{Conns, TCP_LISTEN, isLive};
+use crate::sys::machine::Machine;
 
 /** Rows the journal can hold. */
 const MAX_ENDPOINTS : i32 = 8192;
+
 /** Address bytes per row. */
 const EP_ADDR_BYTES : i64 = 16;
+
 /** How long a row outlives its last sighting. */
 const LINGER_MS : i64 = 300000;
 
@@ -58,7 +61,6 @@ enum SocketKind : i32 {
     Udp = 2,
 }
 
-
 /**
  * One socket, as the journal keys it: which program, which protocol and
  * kind, which port, and the address bytes it names. Everything a new row is
@@ -67,16 +69,22 @@ enum SocketKind : i32 {
 struct Sighting {
     /** The identity the row is indexed under. */
     pub(crate) key : i64;
+
     /** The program's group slot. */
     pub(crate) group : i32;
+
     /** Peer, listening socket, or UDP handle. */
     pub(crate) kind : SocketKind;
+
     /** TCP or UDP. */
     pub(crate) proto : Proto;
+
     /** 4 or 6, as the address is shown — a v4-mapped v6 address is 4. */
     pub(crate) family : i32;
+
     /** The peer's port, or the bind's for a listening socket or a UDP handle. */
     pub(crate) port : i32;
+
     /** Where the shown address bytes start. */
     pub(crate) addr : i64;
 }
@@ -89,40 +97,40 @@ struct Sighting {
  * the selection and the scroll — are held as a key and as pixels.
  */
 class Endpoints {
-    pub(crate) key : i64[] = malloc<i64>(MAX_ENDPOINTS as i64),
-    pub(crate) group : i32[] = malloc<i32>(MAX_ENDPOINTS as i64),
-    pub(crate) host : i32[] = malloc<i32>(MAX_ENDPOINTS as i64),
-    pub(crate) kind : SocketKind[] = malloc<SocketKind>(MAX_ENDPOINTS as i64),
-    pub(crate) proto : Proto[] = malloc<Proto>(MAX_ENDPOINTS as i64),
-    pub(crate) family : i32[] = malloc<i32>(MAX_ENDPOINTS as i64),
-    pub(crate) port : i32[] = malloc<i32>(MAX_ENDPOINTS as i64),
-    pub(crate) state : i32[] = malloc<i32>(MAX_ENDPOINTS as i64),
+    pub(crate) key    : i64[] = new i64[MAX_ENDPOINTS as i64];
+    pub(crate) group  : i32[] = new i32[MAX_ENDPOINTS as i64];
+    pub(crate) host   : i32[] = new i32[MAX_ENDPOINTS as i64];
+    pub(crate) kind   : SocketKind[] = new SocketKind[MAX_ENDPOINTS as i64];
+    pub(crate) proto  : Proto[] = new Proto[MAX_ENDPOINTS as i64];
+    pub(crate) family : i32[] = new i32[MAX_ENDPOINTS as i64];
+    pub(crate) port   : i32[] = new i32[MAX_ENDPOINTS as i64];
+    pub(crate) state  : i32[] = new i32[MAX_ENDPOINTS as i64];
 
-    pub(crate) firstMs : i64[] = malloc<i64>(MAX_ENDPOINTS as i64),
-    pub(crate) lastMs : i64[] = malloc<i64>(MAX_ENDPOINTS as i64),
-    pub(crate) closedMs : i64[] = malloc<i64>(MAX_ENDPOINTS as i64),
+    pub(crate) firstMs  : i64[] = new i64[MAX_ENDPOINTS as i64];
+    pub(crate) lastMs   : i64[] = new i64[MAX_ENDPOINTS as i64];
+    pub(crate) closedMs : i64[] = new i64[MAX_ENDPOINTS as i64];
 
-    pub(crate) hits : i32[] = malloc<i32>(MAX_ENDPOINTS as i64),
-    pub(crate) liveNow : i32[] = malloc<i32>(MAX_ENDPOINTS as i64),
-    livePrev : i32[] = malloc<i32>(MAX_ENDPOINTS as i64),
-    pub(crate) sockets : i32[] = malloc<i32>(MAX_ENDPOINTS as i64),
+    pub(crate) hits    : i32[] = new i32[MAX_ENDPOINTS as i64];
+    pub(crate) liveNow : i32[] = new i32[MAX_ENDPOINTS as i64];
+    livePrev           : i32[] = new i32[MAX_ENDPOINTS as i64];
+    pub(crate) sockets : i32[] = new i32[MAX_ENDPOINTS as i64];
 
-    pub(crate) bytesIn : i64[] = malloc<i64>(MAX_ENDPOINTS as i64),
-    pub(crate) bytesOut : i64[] = malloc<i64>(MAX_ENDPOINTS as i64),
-    pub(crate) rateIn : i64[] = malloc<i64>(MAX_ENDPOINTS as i64),
-    pub(crate) rateOut : i64[] = malloc<i64>(MAX_ENDPOINTS as i64),
-    tickIn : i64[] = malloc<i64>(MAX_ENDPOINTS as i64),
-    tickOut : i64[] = malloc<i64>(MAX_ENDPOINTS as i64),
+    pub(crate) bytesIn  : i64[] = new i64[MAX_ENDPOINTS as i64];
+    pub(crate) bytesOut : i64[] = new i64[MAX_ENDPOINTS as i64];
+    pub(crate) rateIn   : i64[] = new i64[MAX_ENDPOINTS as i64];
+    pub(crate) rateOut  : i64[] = new i64[MAX_ENDPOINTS as i64];
+    tickIn              : i64[] = new i64[MAX_ENDPOINTS as i64];
+    tickOut             : i64[] = new i64[MAX_ENDPOINTS as i64];
 
-    pub(crate) salience : i64[] = malloc<i64>(MAX_ENDPOINTS as i64),
-    pub(crate) score : i32[] = malloc<i32>(MAX_ENDPOINTS as i64),
-    pub(crate) reasons : i32[] = malloc<i32>(MAX_ENDPOINTS as i64),
+    pub(crate) salience : i64[] = new i64[MAX_ENDPOINTS as i64];
+    pub(crate) score    : i32[] = new i32[MAX_ENDPOINTS as i64];
+    pub(crate) reasons  : i32[] = new i32[MAX_ENDPOINTS as i64];
 
-    addrs : i64 = Mem::take((MAX_ENDPOINTS as i64) * EP_ADDR_BYTES),
-    pub(crate) count : i32 = 0,
-    index : SlotIndex = new SlotIndex(MAX_ENDPOINTS * 2),
-    pub(crate) rhythm : Rhythm = new Rhythm(MAX_ENDPOINTS),
-    pub(crate) dropped : i32 = 0,
+    addrs              : i64 = Mem::take((MAX_ENDPOINTS as i64) * EP_ADDR_BYTES);
+    pub(crate) count   : i32 = 0;
+    index              : SlotIndex = new SlotIndex(MAX_ENDPOINTS * 2);
+    pub(crate) rhythm  : Rhythm = new Rhythm(MAX_ENDPOINTS);
+    pub(crate) dropped : i32 = 0;
 
     /** Byte address of row `s`'s sixteen address bytes. */
     pub(crate) fn addrAt(self, s : i32) : i64 {
@@ -472,8 +480,10 @@ fn sighted(conns : Conns, r : i32, g : i32) : Sighting {
 
 /** Repetition saturates here: past this, more visits say nothing new. */
 const HITS_FULL : i32 = 25;
+
 /** Traffic saturates here, in bytes per second. */
 const RATE_FULL : i64 = 1048576;
+
 /** How long a row takes to decay to no recency at all. */
 const RECENCY_MS : i64 = 600000;
 
